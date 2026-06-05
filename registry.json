@@ -27,19 +27,6 @@
       "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/command-bookmarks"
     },
     {
-      "id": "dinotty-relay",
-      "name": "Dinotty Relay",
-      "description": "Terminal sharing client — connect to Relay server, share your terminal via QR code",
-      "description_zh": "终端分享客户端，连接 Relay 服务器，通过二维码分享终端",
-      "version": "0.2.0",
-      "icon": "radio",
-      "repo": "xichan96/dinotty-plugins",
-      "branch": "main",
-      "subdir": "dinotty-relay",
-      "author": "dinotty",
-      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/dinotty-relay"
-    },
-    {
       "id": "dinotty-whiteboard",
       "name": "Whiteboard",
       "description": "Infinite canvas whiteboard with freehand drawing, shapes, text and images",
