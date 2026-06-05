@@ -7,10 +7,11 @@
       "description_zh": "快速切换 Claude Code API Provider (基于 cc-switch CLI)",
       "version": "2.0.0",
       "icon": "repeat",
-      "repo": "OWNER/dinotty-plugins",
+      "repo": "xichan96/dinotty-plugins",
       "branch": "main",
       "subdir": "cc-switch",
-      "author": "dinotty"
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/cc-switch"
     },
     {
       "id": "command-bookmarks",
@@ -19,10 +20,11 @@
       "description_zh": "命令收藏夹，支持批量发送到多个终端",
       "version": "1.0.0",
       "icon": "bookmark",
-      "repo": "OWNER/dinotty-plugins",
+      "repo": "xichan96/dinotty-plugins",
       "branch": "main",
       "subdir": "command-bookmarks",
-      "author": "dinotty"
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/command-bookmarks"
     },
     {
       "id": "dinotty-relay",
@@ -31,10 +33,11 @@
       "description_zh": "终端分享客户端，连接 Relay 服务器，通过二维码分享终端",
       "version": "0.2.0",
       "icon": "radio",
-      "repo": "OWNER/dinotty-plugins",
+      "repo": "xichan96/dinotty-plugins",
       "branch": "main",
       "subdir": "dinotty-relay",
-      "author": "dinotty"
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/dinotty-relay"
     },
     {
       "id": "dinotty-whiteboard",
@@ -43,10 +46,11 @@
       "description_zh": "无限画布白板工具，支持自由绘图、图形、文本和图片",
       "version": "1.0.0",
       "icon": "pen-tool",
-      "repo": "OWNER/dinotty-plugins",
+      "repo": "xichan96/dinotty-plugins",
       "branch": "main",
       "subdir": "dinotty-whiteboard",
-      "author": "dinotty"
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/dinotty-whiteboard"
     },
     {
       "id": "json-formatter",
@@ -55,10 +59,11 @@
       "description_zh": "JSON 格式化、压缩与验证工具",
       "version": "1.0.0",
       "icon": "braces",
-      "repo": "OWNER/dinotty-plugins",
+      "repo": "xichan96/dinotty-plugins",
       "branch": "main",
       "subdir": "json-formatter",
-      "author": "dinotty"
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/json-formatter"
     },
     {
       "id": "skill-manager",
@@ -67,10 +72,11 @@
       "description_zh": "管理 Claude Code Agent Skills (~/.claude/skills/)",
       "version": "1.0.0",
       "icon": "zap",
-      "repo": "OWNER/dinotty-plugins",
+      "repo": "xichan96/dinotty-plugins",
       "branch": "main",
       "subdir": "skill-manager",
-      "author": "dinotty"
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/skill-manager"
     },
     {
       "id": "text-diff",
@@ -79,10 +85,11 @@
       "description_zh": "文本差异对比工具，支持逐行对比与高亮显示",
       "version": "1.0.0",
       "icon": "diff",
-      "repo": "OWNER/dinotty-plugins",
+      "repo": "xichan96/dinotty-plugins",
       "branch": "main",
       "subdir": "text-diff",
-      "author": "dinotty"
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/text-diff"
     }
   ]
 }
