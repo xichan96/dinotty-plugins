@@ -2,7 +2,7 @@
   "id": "skill-manager",
   "name": "Skill Manager",
   "version": "1.0.0",
-  "description": "管理 Claude Code Agent Skills (~/.claude/skills/)",
+  "description": "管理 Claude Code / Codex / 自定义目录的 Agent Skills",
   "icon": "zap",
   "entry": "./dist/main.js",
   "styles": "./styles.css",

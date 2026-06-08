@@ -293,6 +293,227 @@
   border-radius: 8px;
 }
 
+/* Source badges */
+.sm-source-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 10px;
+  line-height: 1.6;
+}
+.sm-source-claude {
+  background: rgba(204, 146, 64, 0.15);
+  color: #cc9240;
+}
+.sm-source-codex {
+  background: rgba(16, 163, 127, 0.15);
+  color: #10a37f;
+}
+.sm-source-custom {
+  background: rgba(139, 92, 246, 0.15);
+  color: #8b5cf6;
+}
+.sm-source-cskills {
+  background: rgba(59, 130, 246, 0.15);
+  color: #3b82f6;
+}
+.sm-source-lark {
+  background: rgba(245, 158, 11, 0.15);
+  color: #f59e0b;
+}
+.sm-source-git {
+  background: rgba(34, 197, 94, 0.15);
+  color: #22c55e;
+}
+.sm-source-skills-sh {
+  background: rgba(168, 85, 247, 0.15);
+  color: #a855f7;
+}
+.sm-badge-system {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(239, 68, 68, 0.1);
+  color: #f87171;
+}
+.sm-badge-disabled {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(107, 114, 128, 0.15);
+  color: #6b7280;
+}
+.sm-badge-update {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(251, 191, 36, 0.15);
+  color: #fbbf24;
+}
+.sm-badge-symlink {
+  font-size: 10px;
+  font-weight: 500;
+  padding: 1px 7px;
+  border-radius: 10px;
+  background: rgba(156, 163, 175, 0.15);
+  color: #9ca3af;
+}
+
+/* Source filter */
+.sm-source-filter {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 10px;
+  flex-wrap: wrap;
+}
+.sm-filter-btn {
+  border: 1px solid var(--border, #333);
+  background: transparent;
+  color: var(--text-muted, #888);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 14px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.sm-filter-btn:hover {
+  border-color: var(--border-hover, #555);
+  color: var(--text-color, #e0e0e0);
+}
+.sm-filter-active {
+  background: var(--accent, #4d7fff);
+  border-color: var(--accent, #4d7fff);
+  color: #fff;
+}
+
+/* Directory manager */
+.sm-dir-manager {
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  background: var(--bg-surface, #1e1e1e);
+  border: 1px solid var(--border, #333);
+  border-radius: 8px;
+}
+.sm-dir-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sm-dir-title {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted, #888);
+}
+.sm-dir-form {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-top: 8px;
+}
+.sm-dir-list {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.sm-dir-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--bg-main, #121212);
+  border-radius: 6px;
+}
+.sm-dir-path {
+  font-size: 12px;
+  color: var(--text-muted, #aaa);
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.sm-dir-empty {
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-muted, #666);
+}
+
+/* Select */
+.sm-select {
+  padding: 5px 8px;
+  border: 1px solid var(--border, #333);
+  border-radius: 6px;
+  background: var(--bg-main, #121212);
+  color: var(--text-color, #e0e0e0);
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  cursor: pointer;
+}
+.sm-select:focus { border-color: var(--accent, #4d7fff); }
+
+/* System card */
+.sm-card-system {
+  opacity: 0.7;
+}
+.sm-card-system:hover {
+  opacity: 1;
+}
+
+/* Disabled card */
+.sm-card-disabled {
+  opacity: 0.5;
+}
+.sm-card-disabled:hover {
+  opacity: 0.7;
+}
+
+/* Expanded card */
+.sm-card-expanded {
+  border-color: var(--accent, #4d7fff);
+}
+.sm-card-info {
+  cursor: pointer;
+}
+
+/* Card detail panel */
+.sm-card-detail {
+  margin-top: 10px;
+  padding: 10px;
+  background: var(--bg-main, #121212);
+  border-radius: 6px;
+  font-size: 12px;
+}
+.sm-detail-meta {
+  display: flex;
+  gap: 16px;
+  color: var(--text-muted, #888);
+  margin-bottom: 8px;
+}
+.sm-detail-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.sm-detail-file {
+  padding: 2px 8px;
+  background: var(--bg-hover, #2a2a2a);
+  border-radius: 4px;
+  font-family: 'SF Mono', 'Fira Code', monospace;
+  font-size: 11px;
+  color: var(--text-muted, #aaa);
+}
+
+/* Off button */
+.sm-btn-off {
+  opacity: 0.5;
+}
+
 /* Mobile */
 @media (max-width: 520px) {
   .skill-manager { padding: 10px; }
