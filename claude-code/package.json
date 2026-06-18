@@ -1,0 +1,20 @@
+{
+  "name": "claude-code",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "build:cli": "esbuild src/cli.ts --bundle --platform=node --format=cjs --outfile=dist/cli --target=node18 --banner:js=\"#!/usr/bin/env node\"",
+    "build:ui": "esbuild src/ui.ts --bundle --format=esm --outfile=dist/main.js --platform=browser",
+    "build": "npm run build:cli && npm run build:ui && chmod +x dist/cli"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "esbuild": "^0.28.1"
+  },
+  "dependencies": {
+    "lucide": "^1.21.0"
+  }
+}

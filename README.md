@@ -12,6 +12,7 @@ Plugin collection for [dinotty](https://github.com/xichan96/dinotty) -- a set of
 | [JSON Formatter](./json-formatter) | 1.0.0 | JSON formatting, minifying and validation tool | JSON 格式化、压缩与验证工具 |
 | [Skill Manager](./skill-manager) | 1.0.0 | Manage Claude Code Agent Skills (~/.claude/skills/) | 管理 Claude Code Agent Skills (~/.claude/skills/) |
 | [Text Diff](./text-diff) | 1.0.0 | Text diff comparison tool with line-by-line highlighting | 文本差异对比工具，支持逐行对比与高亮显示 |
+| [Claude Code](./claude-code) | 1.0.0 | Visual conversation manager for Claude Code | Claude Code 可视化对话管理 — 浏览历史、新建和恢复会话 |
 
 ## Installation
 
@@ -32,6 +33,7 @@ Some plugins have additional dependencies:
 | JSON Formatter | None |
 | Skill Manager | `git`, `curl` |
 | Text Diff | None |
+| Claude Code | `claude` CLI (in PATH), 需先安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) |
 
 ## Plugin Architecture
 
@@ -113,6 +115,7 @@ dinotty-plugins/
   json-formatter/            # JSON tools (JavaScript)
   skill-manager/             # Claude Code skill manager (TypeScript)
   text-diff/                 # Text diff tool (JavaScript)
+  claude-code/               # Claude Code conversation manager (TypeScript)
 ```
 
 ## Development
@@ -141,6 +144,14 @@ npm run build
 ```bash
 cd skill-manager
 esbuild src/ui.ts --bundle --format=esm --outfile=dist/main.js
+```
+
+**Claude Code**
+
+```bash
+cd claude-code
+npm install
+npm run build
 ```
 
 Plugins written in plain JavaScript (Command Bookmarks, JSON Formatter, Text Diff) require no build step -- edit `main.js` directly.

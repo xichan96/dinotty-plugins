@@ -1,0 +1,17 @@
+{
+  "id": "claude-code",
+  "name": "Claude Code",
+  "version": "1.0.0",
+  "description": "Visual conversation manager for Claude Code — browse history, create and resume sessions",
+  "description_zh": "Claude Code 可视化对话管理 — 浏览历史、新建和恢复会话",
+  "icon": "message-square",
+  "entry": "./dist/main.js",
+  "bin": { "mode": "cli", "entry": "dist/cli" },
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "claude-code.open", "title": "Open Claude Code" },
+    { "id": "claude-code.new", "title": "New Claude Code Chat" },
+    { "id": "claude-code.search", "title": "Search Claude Code Conversations" },
+    { "id": "claude-code.quick", "title": "Quick Switch Claude Code Session" }
+  ]
+}
