@@ -77,6 +77,19 @@
       "subdir": "claude-code",
       "author": "dinotty",
       "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/claude-code"
+    },
+    {
+      "id": "cc-session-browser",
+      "name": "CC Session Browser",
+      "description": "Read-only Claude Code session browser — browse, resume, archive history sessions",
+      "description_zh": "Claude Code 历史会话浏览器 — 只读浏览、恢复、归档管理",
+      "version": "0.1.0",
+      "icon": "history",
+      "repo": "xichan96/dinotty-plugins",
+      "branch": "main",
+      "subdir": "cc-session-browser",
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/cc-session-browser"
     }
   ]
 }

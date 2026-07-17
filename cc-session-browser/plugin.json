@@ -1,0 +1,15 @@
+{
+  "id": "cc-session-browser",
+  "name": "CC Session Browser",
+  "version": "0.1.0",
+  "description": "Read-only Claude Code session browser — browse, resume, archive history sessions",
+  "description_zh": "Claude Code 历史会话浏览器 — 只读浏览、恢复、归档管理",
+  "icon": "history",
+  "entry": "./dist/main.js",
+  "bin": { "mode": "cli", "entry": "dist/cli-wrapper" },
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "cc-session-browser.open", "title": "Open Session Browser" },
+    { "id": "cc-session-browser.search", "title": "Search Sessions" }
+  ]
+}

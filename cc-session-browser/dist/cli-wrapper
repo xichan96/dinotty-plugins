@@ -1,0 +1,51 @@
+#!/bin/bash
+
+# Find node executable
+find_node() {
+  # Try PATH first
+  if command -v node &>/dev/null; then
+    echo "$(command -v node)"
+    return
+  fi
+
+  # Try nvm default
+  local home="${HOME:-/root}"
+  local nvm_default="$home/.nvm/alias/default"
+  if [[ -f "$nvm_default" ]]; then
+    local version
+    version=$(cat "$nvm_default" 2>/dev/null)
+    if [[ -n "$version" ]]; then
+      local nvm_node="$home/.nvm/versions/node/$version/bin/node"
+      if [[ -x "$nvm_node" ]]; then
+        echo "$nvm_node"
+        return
+      fi
+    fi
+  fi
+
+  # Try common locations
+  local candidates=(
+    "/usr/local/bin/node"
+    "/opt/homebrew/bin/node"
+    "$home/.nvm/versions/node/v23.7.0/bin/node"
+  )
+  for c in "${candidates[@]}"; do
+    if [[ -x "$c" ]]; then
+      echo "$c"
+      return
+    fi
+  done
+
+  echo "node"
+}
+
+NODE_PATH=$(find_node)
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+CLI_SCRIPT="$SCRIPT_DIR/cli"
+
+if [[ ! -f "$CLI_SCRIPT" ]]; then
+  echo "Error: CLI script not found at $CLI_SCRIPT" >&2
+  exit 1
+fi
+
+exec "$NODE_PATH" "$CLI_SCRIPT" "$@"
