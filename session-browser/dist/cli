@@ -1,0 +1,1694 @@
+#!/usr/bin/env node
+var __create = Object.create;
+var __defProp = Object.defineProperty;
+var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
+var __getOwnPropNames = Object.getOwnPropertyNames;
+var __getProtoOf = Object.getPrototypeOf;
+var __hasOwnProp = Object.prototype.hasOwnProperty;
+var __copyProps = (to, from, except, desc) => {
+  if (from && typeof from === "object" || typeof from === "function") {
+    for (let key of __getOwnPropNames(from))
+      if (!__hasOwnProp.call(to, key) && key !== except)
+        __defProp(to, key, { get: () => from[key], enumerable: !(desc = __getOwnPropDesc(from, key)) || desc.enumerable });
+  }
+  return to;
+};
+var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__getProtoOf(mod)) : {}, __copyProps(
+  // If the importer is in node compatibility mode or this is not an ESM
+  // file that has been converted to a CommonJS file using a Babel-
+  // compatible transform (i.e. "__esModule" has not been set), then set
+  // "default" to the CommonJS "module.exports" for node compatibility.
+  isNodeMode || !mod || !mod.__esModule ? __defProp(target, "default", { value: mod, enumerable: true }) : target,
+  mod
+));
+
+// src/history-cli.ts
+var fs2 = __toESM(require("fs"));
+var path2 = __toESM(require("path"));
+var readline2 = __toESM(require("readline"));
+
+// src/codex-connector.ts
+var fs = __toESM(require("fs"));
+var path = __toESM(require("path"));
+var readline = __toESM(require("readline"));
+var import_child_process = require("child_process");
+var HOME = process.env.HOME || "/root";
+var LIVE_DB_PATH = path.join(HOME, ".codex", "state_5.sqlite");
+var LEGACY_DB_PATH = path.join(HOME, ".codex", "sqlite", "state_5.sqlite");
+var SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var READ_SESSION_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+var REQUIRED_THREAD_COLUMNS = [
+  "id",
+  "rollout_path",
+  "created_at",
+  "created_at_ms",
+  "recency_at",
+  "recency_at_ms",
+  "cwd",
+  "title",
+  "archived",
+  "git_branch",
+  "source"
+];
+function output(value) {
+  console.log(JSON.stringify(value));
+}
+function fatal(error, message) {
+  console.error(JSON.stringify({ error, message }));
+  process.exit(1);
+}
+function connectorUnavailable(reason) {
+  return fatal("connector-unavailable", `Codex connector unavailable: ${reason}`);
+}
+function isDatabaseBusy(error) {
+  const code = error && typeof error === "object" && "code" in error ? String(error.code) : "";
+  return code === "SQLITE_BUSY" || code === "SQLITE_LOCKED" || /\b(?:SQLITE_BUSY|SQLITE_LOCKED|database(?: table| schema)? (?:is )?(?:busy|locked))\b/i.test(errorMessage(error));
+}
+function databaseFailure(context, error) {
+  const detail = errorMessage(error);
+  if (isDatabaseBusy(error)) {
+    return fatal("connector-busy", `Codex database is temporarily busy; retry shortly: ${context}${detail ? `: ${detail}` : ""}`);
+  }
+  return connectorUnavailable(`${context}${detail ? `: ${detail}` : ""}`);
+}
+function availabilityDatabaseReason(context, error) {
+  const detail = errorMessage(error);
+  if (isDatabaseBusy(error)) {
+    return `Codex database is temporarily busy; retry shortly: ${context}${detail ? `: ${detail}` : ""}`;
+  }
+  return `${context}${detail ? `: ${detail}` : ""}`;
+}
+function errorMessage(error) {
+  return error instanceof Error && error.message ? error.message : String(error);
+}
+function validateSessionId(sessionId) {
+  if (!SESSION_ID_RE.test(sessionId)) fatal("invalid-session-id", "Session id must be a 36-character UUID basename");
+}
+function resolveDatabasePath() {
+  const override = process.env.CC_SB_CODEX_DB;
+  if (override) {
+    if (!fs.existsSync(override)) throw new Error(`Codex database was not found at configured path ${override}`);
+    return { dbPath: override, degraded: false };
+  }
+  if (fs.existsSync(LIVE_DB_PATH)) return { dbPath: LIVE_DB_PATH, degraded: false };
+  if (fs.existsSync(LEGACY_DB_PATH)) return { dbPath: LEGACY_DB_PATH, degraded: true };
+  throw new Error(`Codex database was not found at ${LIVE_DB_PATH} or ${LEGACY_DB_PATH}`);
+}
+function loadDatabaseSync() {
+  return require("node:sqlite").DatabaseSync;
+}
+function inspectThreadsSchema(db) {
+  const columns = new Set(
+    db.prepare("PRAGMA table_info(threads)").all().map((column) => typeof column.name === "string" ? column.name : "")
+  );
+  const missing = REQUIRED_THREAD_COLUMNS.filter((column) => !columns.has(column));
+  if (missing.length) throw new Error(`threads schema is missing required columns: ${missing.join(", ")}`);
+}
+function openDatabase() {
+  let DatabaseSync;
+  try {
+    DatabaseSync = loadDatabaseSync();
+  } catch (error) {
+    return connectorUnavailable(`node:sqlite is not available: ${errorMessage(error)}`);
+  }
+  let dbPath;
+  let degraded;
+  try {
+    ({ dbPath, degraded } = resolveDatabasePath());
+  } catch (error) {
+    return connectorUnavailable(errorMessage(error));
+  }
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+  } catch (error) {
+    return databaseFailure(`could not open read-only database ${dbPath}`, error);
+  }
+  try {
+    db.exec("PRAGMA busy_timeout=2000");
+  } catch (error) {
+    try {
+      db.close();
+    } catch {
+    }
+    return databaseFailure(`could not configure read-only database ${dbPath}`, error);
+  }
+  try {
+    inspectThreadsSchema(db);
+  } catch (error) {
+    try {
+      db.close();
+    } catch {
+    }
+    return databaseFailure(`could not inspect threads schema in ${dbPath}`, error);
+  }
+  if (degraded) {
+    console.error(JSON.stringify({
+      diagnostic: "connector-degraded",
+      agent: "codex",
+      reason: `Using stale legacy Codex database at ${dbPath}; live database ${LIVE_DB_PATH} was not found`
+    }));
+  }
+  return db;
+}
+function codexBinaryOnPath() {
+  const extensions = process.platform === "win32" ? (process.env.PATHEXT || ".EXE;.CMD;.BAT;.COM").split(path.delimiter) : [""];
+  for (const directory of (process.env.PATH || "").split(path.delimiter)) {
+    for (const extension of extensions) {
+      const candidate = path.join(directory || process.cwd(), `codex${extension}`);
+      try {
+        fs.accessSync(candidate, fs.constants.X_OK);
+        if (fs.statSync(candidate).isFile()) return true;
+      } catch {
+      }
+    }
+  }
+  return false;
+}
+function codexAvailability() {
+  let DatabaseSync;
+  try {
+    DatabaseSync = loadDatabaseSync();
+  } catch (error) {
+    return {
+      available: false,
+      degraded: false,
+      reason: `This Node.js version does not provide node:sqlite: ${errorMessage(error)}`
+    };
+  }
+  let resolution;
+  try {
+    resolution = resolveDatabasePath();
+  } catch (error) {
+    return { available: false, degraded: false, reason: errorMessage(error) };
+  }
+  let db;
+  try {
+    db = new DatabaseSync(resolution.dbPath, { readOnly: true });
+  } catch (error) {
+    return {
+      available: false,
+      degraded: false,
+      reason: availabilityDatabaseReason(`Codex database could not be opened read-only at ${resolution.dbPath}`, error)
+    };
+  }
+  try {
+    db.exec("PRAGMA busy_timeout=2000");
+  } catch (error) {
+    try {
+      db.close();
+    } catch {
+    }
+    return {
+      available: false,
+      degraded: false,
+      reason: availabilityDatabaseReason(`Codex database could not be configured read-only at ${resolution.dbPath}`, error)
+    };
+  }
+  try {
+    inspectThreadsSchema(db);
+  } catch (error) {
+    return {
+      available: false,
+      degraded: false,
+      reason: isDatabaseBusy(error) ? availabilityDatabaseReason(`could not inspect threads schema in ${resolution.dbPath}`, error) : `Codex database schema is incompatible: ${errorMessage(error)}`
+    };
+  } finally {
+    try {
+      db.close();
+    } catch {
+    }
+  }
+  if (!codexBinaryOnPath()) {
+    return {
+      available: false,
+      degraded: false,
+      reason: "Codex CLI binary was not found on PATH; install Codex or add it to PATH"
+    };
+  }
+  if (resolution.degraded) {
+    return {
+      available: true,
+      degraded: true,
+      reason: `Using legacy Codex database at ${resolution.dbPath}; data may be stale because live database ${LIVE_DB_PATH} was not found`
+    };
+  }
+  return { available: true, degraded: false };
+}
+function withDatabase(read) {
+  const db = openDatabase();
+  try {
+    return read(db);
+  } catch (error) {
+    return databaseFailure("threads query failed", error);
+  } finally {
+    try {
+      db.close();
+    } catch {
+    }
+  }
+}
+function toIsoTimestamp(milliseconds, seconds) {
+  const value = milliseconds ?? (seconds === null ? Number.NaN : seconds * 1e3);
+  return Number.isFinite(value) ? new Date(value).toISOString() : "";
+}
+function containsSubagentKey(value) {
+  if (!value || typeof value !== "object") return false;
+  if (Object.prototype.hasOwnProperty.call(value, "subagent")) return true;
+  return Object.values(value).some(containsSubagentKey);
+}
+function normalizeCodexOrigin(value) {
+  if (typeof value !== "string") return "other";
+  const source = value.trim();
+  if (source === "exec" || source === "cli" || source === "vscode" || source === "subagent") return source;
+  try {
+    return containsSubagentKey(JSON.parse(source)) ? "subagent" : "other";
+  } catch {
+    return "other";
+  }
+}
+function readArchived(value) {
+  if (value === 0 || value === false) return false;
+  if (value === 1 || value === true) return true;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLocaleLowerCase();
+    if (normalized === "0" || normalized === "false") return false;
+    if (normalized === "1" || normalized === "true") return true;
+  }
+  throw new Error(`threads.archived has unsupported encoding: ${JSON.stringify(value)}`);
+}
+function threadRecencyMs(row) {
+  return row.recency_at_ms ?? (row.recency_at === null ? Number.NaN : row.recency_at * 1e3);
+}
+function isThreadLive(row) {
+  const recencyMs = threadRecencyMs(row);
+  return Number.isFinite(recencyMs) && Date.now() - recencyMs < LIVE_WINDOW_MS;
+}
+function mapThread(row) {
+  let stat = null;
+  try {
+    stat = fs.statSync(row.rollout_path);
+  } catch {
+  }
+  const rolloutExists = Boolean(stat?.isFile());
+  let health;
+  if (!rolloutExists) health = "truncated";
+  else if (stat.size === 0) health = "empty";
+  else if (isThreadLive(row)) health = "live";
+  else health = "ok";
+  return {
+    id: row.id,
+    agent: "codex",
+    rootPath: row.cwd,
+    attributionKey: row.cwd,
+    title: row.title.slice(0, 200),
+    createdAt: toIsoTimestamp(row.created_at_ms, row.created_at),
+    lastActiveAt: toIsoTimestamp(row.recency_at_ms, row.recency_at),
+    gitBranch: row.git_branch || void 0,
+    partition: readArchived(row.archived) ? "archive" : "active",
+    health,
+    timestampSource: "event",
+    sizeBytes: rolloutExists && stat ? stat.size : 0,
+    origin: normalizeCodexOrigin(row.source)
+  };
+}
+function listThreadRecords() {
+  return withDatabase((db) => {
+    const rows = db.prepare(`
+      SELECT id, rollout_path, created_at, created_at_ms, recency_at, recency_at_ms,
+             cwd, title, archived, git_branch, source
+      FROM threads
+      ORDER BY COALESCE(recency_at_ms, recency_at * 1000) DESC, id
+    `).all();
+    return rows.map((row) => ({ session: mapThread(row), rolloutPath: row.rollout_path }));
+  });
+}
+function listThreads() {
+  return listThreadRecords().map((record) => record.session);
+}
+function findThread(sessionId) {
+  return withDatabase((db) => {
+    const row = db.prepare(`
+      SELECT id, rollout_path, created_at, created_at_ms, recency_at, recency_at_ms,
+             cwd, title, archived, git_branch, source
+      FROM threads WHERE id = ?
+    `).get(sessionId);
+    return row || null;
+  });
+}
+function isUnder(rootPath, candidatePath) {
+  const relative3 = path.relative(path.resolve(rootPath), path.resolve(candidatePath));
+  return relative3 === "" || !relative3.startsWith(`..${path.sep}`) && relative3 !== ".." && !path.isAbsolute(relative3);
+}
+function toLegacySession(session) {
+  return {
+    id: session.id,
+    project: session.rootPath,
+    encodedPath: session.attributionKey,
+    firstPrompt: session.title,
+    lastTimestamp: session.lastActiveAt,
+    messageCount: session.messageCount,
+    gitBranch: session.gitBranch
+  };
+}
+function contentText(content) {
+  if (!Array.isArray(content)) return "";
+  return content.filter((item) => item && typeof item === "object" && (item.type === "input_text" || item.type === "output_text") && typeof item.text === "string").map((item) => item.text).join("\n");
+}
+function compactText(value, limit = 160) {
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return (text || "").replace(/\s+/g, " ").trim().slice(0, limit);
+}
+function parseToolInput(payload) {
+  const raw = payload.type === "function_call" ? payload.arguments : payload.input;
+  if (typeof raw !== "string") return raw;
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return raw;
+  }
+}
+function toolSummary(name, input) {
+  if (!input || typeof input !== "object") return compactText(input) || name;
+  const record = input;
+  return compactText(record.command ?? record.cmd ?? record.file_path ?? record.path ?? record.query ?? input) || name;
+}
+function toolOutput(payload) {
+  if (typeof payload.output === "string") return payload.output;
+  const projected = contentText(payload.output);
+  return projected || compactText(payload.output, 4e3);
+}
+function toolUseFromPayload(payload) {
+  const input = parseToolInput(payload);
+  const tool = {
+    name: typeof payload.name === "string" && payload.name ? payload.name : "tool",
+    summary: toolSummary(payload.name || "tool", input)
+  };
+  if (input && typeof input === "object") {
+    const record = input;
+    if (typeof record.file_path === "string") tool.filePath = record.file_path;
+    if (typeof record.old_string === "string") tool.oldString = record.old_string;
+    if (typeof record.new_string === "string") tool.newString = record.new_string;
+    if (typeof record.content === "string") tool.content = record.content;
+    if (typeof record.replace_all === "boolean") tool.replaceAll = record.replace_all;
+  }
+  return tool;
+}
+function appendTool(messages, pending, record) {
+  const payload = record.payload;
+  const callId = typeof payload.call_id === "string" ? payload.call_id : "";
+  let message = [...messages].reverse().find((item) => item.role === "assistant");
+  if (!message) {
+    message = { uuid: payload.id || callId, role: "assistant", content: "", timestamp: record.timestamp || "" };
+    messages.push(message);
+  }
+  const tool = toolUseFromPayload(payload);
+  if (!message.toolUses) message.toolUses = [];
+  message.toolUses.push(tool);
+  if (callId) pending.set(callId, { callId, message, tool });
+}
+function parseResponseRecord(record, messages, pending) {
+  if (!record || record.type !== "response_item" || !record.payload || typeof record.payload !== "object") return;
+  const payload = record.payload;
+  if (payload.type === "message") {
+    if (payload.role !== "user" && payload.role !== "assistant" && payload.role !== "developer") return;
+    messages.push({
+      uuid: typeof payload.id === "string" ? payload.id : "",
+      role: payload.role,
+      content: contentText(payload.content),
+      timestamp: typeof record.timestamp === "string" ? record.timestamp : ""
+    });
+    return;
+  }
+  if (payload.type === "function_call" || payload.type === "custom_tool_call") {
+    appendTool(messages, pending, record);
+    return;
+  }
+  if (payload.type === "function_call_output" || payload.type === "custom_tool_call_output") {
+    const paired = typeof payload.call_id === "string" ? pending.get(payload.call_id) : void 0;
+    if (paired) paired.tool.content = toolOutput(payload);
+  }
+}
+async function readMessages(filePath) {
+  let stat;
+  try {
+    stat = fs.statSync(filePath);
+    if (!stat.isFile()) throw new Error("not a regular file");
+  } catch (error) {
+    return fatal("read-failed", `Could not read Codex rollout ${filePath}${error?.message ? `: ${error.message}` : ""}`);
+  }
+  const messages = [];
+  const pending = /* @__PURE__ */ new Map();
+  const input = fs.createReadStream(filePath, { encoding: "utf8" });
+  const lines = readline.createInterface({ input, crlfDelay: Infinity });
+  let outputBytes = 2;
+  try {
+    for await (const line of lines) {
+      if (!line.trim()) continue;
+      try {
+        const before = messages.length;
+        parseResponseRecord(JSON.parse(line), messages, pending);
+        for (let index = before; index < messages.length; index++) {
+          outputBytes += Buffer.byteLength(JSON.stringify(messages[index]), "utf8") + (index ? 1 : 0);
+          if (outputBytes > READ_SESSION_MAX_OUTPUT_BYTES) {
+            fatal("session-output-too-large", `Parsed session output exceeds ${READ_SESSION_MAX_OUTPUT_BYTES} bytes`);
+          }
+        }
+      } catch (error) {
+        if (error?.code === "session-output-too-large") throw error;
+      }
+    }
+  } catch (error) {
+    return fatal("read-failed", error?.message || `Could not read Codex rollout ${filePath}`);
+  } finally {
+    lines.close();
+    input.destroy();
+  }
+  if (Buffer.byteLength(JSON.stringify(messages), "utf8") > READ_SESSION_MAX_OUTPUT_BYTES) {
+    return fatal("session-output-too-large", `Parsed session output exceeds ${READ_SESSION_MAX_OUTPUT_BYTES} bytes`);
+  }
+  return messages;
+}
+function mutationFailure(error, message) {
+  return { outcome: "failure", reason: { error, message } };
+}
+function runMutation(command, sessionId, force = false) {
+  validateSessionId(sessionId);
+  if (!force && (command === "archive" || command === "delete")) {
+    const thread = findThread(sessionId);
+    if (thread && isThreadLive(thread)) {
+      output(mutationFailure("possibly-live", "Session was modified within the last 60 seconds; retry with --force after confirmation"));
+      return;
+    }
+  }
+  const args = command === "delete" ? [command, "--force", sessionId] : [command, sessionId];
+  const result = (0, import_child_process.spawnSync)("codex", args, { encoding: "utf8" });
+  if (result.error) {
+    output(mutationFailure("codex-command-unavailable", result.error.message));
+    return;
+  }
+  if (result.status !== 0) {
+    const detail = (result.stderr || result.stdout || "").trim();
+    output(mutationFailure("codex-command-failed", detail || `codex ${command} exited with status ${result.status}`));
+    return;
+  }
+  output({ outcome: "success", cacheRefreshed: true });
+}
+async function searchSessions(query, scope) {
+  const needle = query.toLocaleLowerCase();
+  const results = [];
+  const records = listThreadRecords().filter((record) => record.session.partition === "active" && (!scope || isUnder(scope, record.session.rootPath)));
+  for (const { session, rolloutPath } of records) {
+    if (results.length >= 20) break;
+    if (!fs.existsSync(rolloutPath)) continue;
+    const messages = await readMessages(rolloutPath);
+    let match = "";
+    for (const message of messages) {
+      const index = message.content.toLocaleLowerCase().indexOf(needle);
+      if (index < 0) continue;
+      const start = Math.max(0, index - 60);
+      match = message.content.slice(start, Math.min(message.content.length, index + query.length + 60)).trim();
+      break;
+    }
+    if (match) results.push({ session, match });
+  }
+  output(results);
+}
+var codexConnector = {
+  id: "codex",
+  capabilities: {
+    archive: true,
+    rename: false,
+    delete: true,
+    deleteRequiresArchived: false,
+    nativeIndex: true,
+    tokenStats: false,
+    originFilter: true
+  },
+  resume: { argv: ["codex", "resume"] },
+  isAvailable: () => {
+    try {
+      return codexAvailability();
+    } catch (error) {
+      return {
+        available: false,
+        degraded: false,
+        reason: `Codex availability check failed: ${errorMessage(error)}`
+      };
+    }
+  },
+  buildIndex: () => output(listThreads()),
+  listUnder: (rootPath, partition) => {
+    if (partition && partition !== "active" && partition !== "archive") {
+      fatal("invalid-partition", "Partition must be active or archive");
+    }
+    output(listThreads().filter((session) => (!partition || session.partition === partition) && isUnder(rootPath, session.rootPath)));
+  },
+  listProjects: () => {
+    const grouped = /* @__PURE__ */ new Map();
+    for (const session of listThreads().filter((item) => item.partition === "active")) {
+      const existing = grouped.get(session.attributionKey);
+      if (existing) existing.sessionCount++;
+      else grouped.set(session.attributionKey, { path: session.rootPath, encodedPath: session.attributionKey, sessionCount: 1 });
+    }
+    output([...grouped.values()].sort((a, b) => b.sessionCount - a.sessionCount));
+  },
+  listSessions: () => output(listThreads().filter((session) => session.partition === "active").map(toLegacySession)),
+  readSession: async (_scopeKey, sessionId) => {
+    validateSessionId(sessionId);
+    const thread = findThread(sessionId);
+    if (!thread) fatal("not-found", `Codex session does not exist: ${sessionId}`);
+    output(await readMessages(thread.rollout_path));
+  },
+  moveSession: (_scopeKey, sessionId, direction, force) => runMutation(direction === "archive" ? "archive" : "unarchive", sessionId, force),
+  deleteArchived: (_scopeKey, sessionId, force) => runMutation("delete", sessionId, force),
+  search: (query, scope) => searchSessions(query, scope),
+  listRecent: (limit = 30) => output(listThreads().filter((session) => session.partition === "active").slice(0, limit).map(toLegacySession))
+};
+
+// src/history-cli.ts
+var settingsMigrationAttempted = false;
+function migratePluginSettings(pluginDataBase, legacyDirName, currentDirName) {
+  if (settingsMigrationAttempted) return;
+  settingsMigrationAttempted = true;
+  try {
+    const legacyDir = path2.join(pluginDataBase, legacyDirName);
+    const currentDir = path2.join(pluginDataBase, currentDirName);
+    const entries = fs2.readdirSync(legacyDir, { withFileTypes: true });
+    fs2.mkdirSync(currentDir, { recursive: true });
+    for (const entry of entries) {
+      if (!entry.name.endsWith(".json") || !entry.isFile()) continue;
+      try {
+        fs2.copyFileSync(
+          path2.join(legacyDir, entry.name),
+          path2.join(currentDir, entry.name),
+          fs2.constants.COPYFILE_EXCL
+        );
+      } catch {
+      }
+    }
+  } catch {
+  }
+}
+var HOME2 = process.env.HOME || "/root";
+var CLAUDE_DIR = path2.join(HOME2, ".claude");
+var PROJECTS_DIR = process.env.CC_SB_PROJECTS_DIR || path2.join(CLAUDE_DIR, "projects");
+var ARCHIVE_DIR = process.env.CC_SB_ARCHIVE_DIR || path2.join(CLAUDE_DIR, "projects-archive");
+var SESSIONS_DIR = process.env.CC_SB_SESSIONS_DIR || path2.join(CLAUDE_DIR, "sessions");
+var PLUGIN_DATA_BASE = path2.join(HOME2, ".dinotty", "plugin-data");
+if (process.env.CC_SB_DATA_DIR === void 0) migratePluginSettings(PLUGIN_DATA_BASE, "cc-session-browser", "session-browser");
+var DATA_DIR = process.env.CC_SB_DATA_DIR || path2.join(HOME2, ".dinotty/plugin-data/session-browser");
+var INDEX_CACHE_PATH = path2.join(DATA_DIR, "index-cache.json");
+var SESSION_ID_RE2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+var ENCODED_PATH_RE = /^[A-Za-z0-9_-]+$/;
+var HEAD_SCAN_BYTES = 64 * 1024;
+var HEAD_SCAN_LINES = 200;
+var TAIL_SCAN_BYTES = 1024 * 1024;
+var READ_SESSION_MAX_OUTPUT_BYTES2 = 16 * 1024 * 1024;
+var LIVE_WINDOW_MS = 60 * 1e3;
+var INDEX_CACHE_VERSION = 3;
+var TERMINAL_SESSION_STATUSES = /* @__PURE__ */ new Set(["closed", "completed", "dead", "done", "ended", "exited", "failed", "stopped", "terminated"]);
+function output2(value) {
+  console.log(JSON.stringify(value));
+}
+function fail(error, message) {
+  console.error(JSON.stringify({ error, message }));
+  process.exit(1);
+}
+function mutationFailure2(error, message) {
+  return { outcome: "failure", reason: { error, message } };
+}
+function mutationPartial(stage, jsonlPath, artifactPath, error, message) {
+  return {
+    outcome: "partial",
+    stage,
+    jsonlPath: path2.resolve(jsonlPath),
+    artifactPath: path2.resolve(artifactPath),
+    reason: { error, message }
+  };
+}
+function hasInjectedFault(name) {
+  const faults = (process.env.CC_SB_TEST_FAULTS || "").split(",").map((item) => item.trim()).filter(Boolean);
+  return faults.includes(name);
+}
+function injectedFault(name, code = "EIO") {
+  if (hasInjectedFault(name)) {
+    const error = new Error(`Injected fault: ${name}`);
+    error.code = code;
+    throw error;
+  }
+}
+var moveAttempt = 0;
+function readLiveRegistry() {
+  const live = /* @__PURE__ */ new Map();
+  let names;
+  try {
+    names = fs2.readdirSync(SESSIONS_DIR).filter((name) => name.endsWith(".json"));
+  } catch {
+    return live;
+  }
+  for (const name of names) {
+    try {
+      const pidText = path2.basename(name, ".json");
+      if (!/^\d+$/.test(pidText)) continue;
+      const pid = Number(pidText);
+      if (!Number.isSafeInteger(pid) || pid <= 0) continue;
+      const parsed = JSON.parse(fs2.readFileSync(path2.join(SESSIONS_DIR, name), "utf8"));
+      if (!parsed || typeof parsed !== "object" || typeof parsed.sessionId !== "string" || !SESSION_ID_RE2.test(parsed.sessionId)) continue;
+      const status = typeof parsed.status === "string" ? parsed.status.toLocaleLowerCase() : "";
+      if (TERMINAL_SESSION_STATUSES.has(status)) continue;
+      process.kill(pid, 0);
+      const updatedAtValue = typeof parsed.updatedAt === "number" ? parsed.updatedAt : typeof parsed.updatedAt === "string" ? Date.parse(parsed.updatedAt) : Number.NaN;
+      const updatedAt = Number.isFinite(updatedAtValue) ? updatedAtValue : 0;
+      const candidate = {
+        sessionId: parsed.sessionId,
+        cwd: typeof parsed.cwd === "string" && parsed.cwd ? parsed.cwd : void 0,
+        updatedAt
+      };
+      const existing = live.get(candidate.sessionId);
+      if (!existing || candidate.updatedAt > existing.updatedAt) live.set(candidate.sessionId, candidate);
+    } catch {
+    }
+  }
+  return live;
+}
+function overlayLiveRegistry(sessions) {
+  const live = readLiveRegistry();
+  return sessions.map((session) => live.has(session.id) ? { ...session, live: true } : session);
+}
+function validateSessionId2(value) {
+  if (!SESSION_ID_RE2.test(value)) fail("invalid-session-id", "Session id must be a 36-character UUID basename");
+}
+function validateEncodedPath(value) {
+  if (!ENCODED_PATH_RE.test(value)) fail("invalid-encoded-path", "Encoded path contains invalid characters");
+}
+function validateAbsolutePath(value) {
+  if (!path2.isAbsolute(value) || value.split(path2.sep).some((segment) => segment === "." || segment === "..")) {
+    fail("invalid-absolute-path", "Path must be absolute and contain no traversal segments");
+  }
+}
+function fallbackDecode(encodedPath) {
+  return "/" + encodedPath.replace(/^-/, "").replace(/-/g, "/");
+}
+function encodeRootPath(rootPath) {
+  return rootPath.replace(/\//g, "-");
+}
+function readFileRange(filePath, start, length) {
+  if (length <= 0) return "";
+  const fd = fs2.openSync(filePath, "r");
+  try {
+    const buffer = Buffer.allocUnsafe(length);
+    const bytesRead = fs2.readSync(fd, buffer, 0, length, start);
+    return buffer.toString("utf-8", 0, bytesRead);
+  } finally {
+    fs2.closeSync(fd);
+  }
+}
+function readTailLines(filePath, size) {
+  if (size === 0) return { lines: [], trailingPartial: false, start: 0 };
+  const start = Math.max(0, size - TAIL_SCAN_BYTES);
+  const startsMidLine = start > 0 && readFileRange(filePath, start - 1, 1) !== "\n";
+  const raw = readFileRange(filePath, start, size - start);
+  const lines = raw.split("\n");
+  let trailingPartial = false;
+  if (raw.length > 0 && !raw.endsWith("\n")) {
+    try {
+      JSON.parse(lines[lines.length - 1]);
+    } catch {
+      trailingPartial = true;
+      lines.pop();
+    }
+  }
+  if (startsMidLine) lines.shift();
+  return { lines, trailingPartial, start };
+}
+function readBoundedSessionLines(filePath, size) {
+  if (size <= HEAD_SCAN_BYTES + TAIL_SCAN_BYTES) {
+    const raw = readFileRange(filePath, 0, size);
+    const lines = raw.split("\n");
+    let trailingPartial = false;
+    if (raw.length > 0 && !raw.endsWith("\n")) {
+      try {
+        JSON.parse(lines[lines.length - 1]);
+      } catch {
+        trailingPartial = true;
+        lines.pop();
+      }
+    }
+    return { lines, trailingPartial };
+  }
+  const tail = readTailLines(filePath, size);
+  const rawHead = readFileRange(filePath, 0, Math.min(size, HEAD_SCAN_BYTES));
+  const headLines = rawHead.split("\n");
+  if (!rawHead.endsWith("\n")) headLines.pop();
+  return {
+    lines: [...headLines.slice(0, HEAD_SCAN_LINES), ...tail.lines],
+    trailingPartial: tail.trailingPartial
+  };
+}
+function timestampFromLine(line) {
+  if (!line.trim()) return "";
+  try {
+    const obj = JSON.parse(line);
+    return typeof obj.timestamp === "string" && obj.timestamp && !Number.isNaN(Date.parse(obj.timestamp)) ? obj.timestamp : "";
+  } catch {
+    return "";
+  }
+}
+function readLastEventTimestamp(filePath, size, trailingPartial) {
+  if (size === 0) return "";
+  const { lines } = readTailLines(filePath, size);
+  if (trailingPartial && lines.length && !lines[lines.length - 1].trim()) lines.pop();
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const timestamp = timestampFromLine(lines[i]);
+    if (timestamp) return timestamp;
+  }
+  return "";
+}
+function readSessionMeta(filePath, id, attributionKey, partition, stat) {
+  const fileStat = stat || fs2.statSync(filePath);
+  const { lines, trailingPartial } = readBoundedSessionLines(filePath, fileStat.size);
+  let firstCwd = "";
+  let createdAt = "";
+  let title = "";
+  let fallbackTitle = "";
+  let gitBranch = "";
+  let aiTitle;
+  let customTitle;
+  let messageCount = 0;
+  let parseableCount = 0;
+  let headBytes = 0;
+  let headLines = 0;
+  for (const line of lines) {
+    const lineBytes = Buffer.byteLength(line, "utf-8") + 1;
+    const inHead = headLines < HEAD_SCAN_LINES && headBytes + lineBytes <= HEAD_SCAN_BYTES;
+    headLines++;
+    headBytes += lineBytes;
+    if (!line.trim()) continue;
+    try {
+      const obj = JSON.parse(line);
+      parseableCount++;
+      if (inHead) {
+        if (!firstCwd && typeof obj.cwd === "string" && obj.cwd) firstCwd = obj.cwd;
+        if (!createdAt && typeof obj.timestamp === "string" && !Number.isNaN(Date.parse(obj.timestamp))) createdAt = obj.timestamp;
+        if (!gitBranch && typeof obj.gitBranch === "string" && obj.gitBranch) gitBranch = obj.gitBranch;
+        if (!fallbackTitle && obj.type === "last-prompt" && typeof obj.lastPrompt === "string") {
+          fallbackTitle = obj.lastPrompt;
+        }
+      }
+      if (obj.type === "user") {
+        messageCount++;
+        if (inHead && !title && typeof obj.message?.content === "string") {
+          title = obj.message.content;
+        }
+      }
+      if (obj.type === "ai-title" && typeof obj.aiTitle === "string" && obj.aiTitle.trim()) aiTitle = obj.aiTitle.trim();
+      if (obj.type === "custom-title" && typeof obj.customTitle === "string" && obj.customTitle.trim()) customTitle = obj.customTitle.trim();
+    } catch {
+    }
+  }
+  const rootPath = firstCwd || fallbackDecode(attributionKey);
+  const attributionMismatch = firstCwd ? encodeRootPath(rootPath) !== attributionKey : false;
+  const eventTimestamp = readLastEventTimestamp(filePath, fileStat.size, trailingPartial);
+  const timestampSource = eventTimestamp ? "event" : "mtime";
+  const lastActiveAt = eventTimestamp || fileStat.mtime.toISOString();
+  let health;
+  if (parseableCount === 0) health = "empty";
+  else if (!eventTimestamp) health = "truncated";
+  else if (Date.now() - fileStat.mtimeMs < LIVE_WINDOW_MS && trailingPartial) health = "live";
+  else if (trailingPartial) health = "truncated";
+  else health = "ok";
+  return {
+    id,
+    agent: "claude-code",
+    rootPath,
+    attributionKey,
+    title: (title || fallbackTitle).slice(0, 200),
+    createdAt,
+    lastActiveAt,
+    messageCount,
+    gitBranch: gitBranch || void 0,
+    partition,
+    health,
+    lossyPath: !firstCwd || void 0,
+    attributionMismatch: firstCwd && attributionMismatch ? true : void 0,
+    timestampSource,
+    sizeBytes: fileStat.size,
+    aiTitle,
+    customTitle
+  };
+}
+function parseMessage(obj) {
+  if (obj.type === "user") {
+    if (typeof obj.message?.content !== "string") return null;
+    return {
+      uuid: obj.uuid || "",
+      role: "user",
+      content: obj.message.content,
+      timestamp: obj.timestamp || ""
+    };
+  }
+  if (obj.type === "assistant") {
+    const content = obj.message?.content || [];
+    const textParts = [];
+    const toolUses = [];
+    for (const block of content) {
+      if (block.type === "text") textParts.push(block.text);
+      else if (block.type === "tool_use") {
+        const tu = {
+          name: block.name,
+          summary: summarizeTool(block.name, block.input)
+        };
+        if (block.name === "Edit" && block.input) {
+          tu.filePath = block.input.file_path || "";
+          tu.oldString = block.input.old_string || "";
+          tu.newString = block.input.new_string || "";
+          tu.replaceAll = block.input.replace_all || false;
+        } else if (block.name === "Write" && block.input) {
+          tu.filePath = block.input.file_path || "";
+          tu.content = block.input.content || "";
+        }
+        toolUses.push(tu);
+      }
+    }
+    return {
+      uuid: obj.uuid || "",
+      role: "assistant",
+      content: textParts.join("\n"),
+      timestamp: obj.timestamp || "",
+      model: obj.message?.model,
+      toolUses: toolUses.length > 0 ? toolUses : void 0
+    };
+  }
+  return null;
+}
+function summarizeTool(name, input) {
+  if (!input) return name;
+  switch (name) {
+    case "Bash":
+      return (input.command || name).slice(0, 80);
+    case "Read":
+      return input.file_path || name;
+    case "Edit":
+      return input.file_path || name;
+    case "Write":
+      return input.file_path || name;
+    case "Grep":
+      return input.pattern || name;
+    case "Glob":
+      return input.pattern || name;
+    case "Agent":
+      return (input.description || name).slice(0, 60);
+    case "WebFetch":
+      return (input.url || name).slice(0, 60);
+    case "WebSearch":
+      return (input.query || name).slice(0, 60);
+    default:
+      return name;
+  }
+}
+function readCache() {
+  try {
+    const parsed = JSON.parse(fs2.readFileSync(INDEX_CACHE_PATH, "utf-8"));
+    if (!parsed || typeof parsed !== "object" || parsed.version !== INDEX_CACHE_VERSION || !parsed.entries || typeof parsed.entries !== "object") throw new Error("invalid cache");
+    for (const entry of Object.values(parsed.entries)) entry.meta.agent = "claude-code";
+    return parsed;
+  } catch {
+    return { version: INDEX_CACHE_VERSION, entries: {} };
+  }
+}
+function writeCache(cache) {
+  fs2.mkdirSync(DATA_DIR, { recursive: true });
+  const tempPath = `${INDEX_CACHE_PATH}.tmp-${process.pid}-${Date.now()}`;
+  try {
+    fs2.writeFileSync(tempPath, JSON.stringify(cache));
+    fs2.renameSync(tempPath, INDEX_CACHE_PATH);
+  } finally {
+    try {
+      fs2.unlinkSync(tempPath);
+    } catch {
+    }
+  }
+}
+function lstatIfExists(filePath) {
+  try {
+    return fs2.lstatSync(filePath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+function unsafePath(message) {
+  const error = new Error(message);
+  error.code = "unsafe-path";
+  throw error;
+}
+function assertSafePartitionPath(partitionRoot, targetPath) {
+  const resolvedRoot = path2.resolve(partitionRoot);
+  const resolvedTarget = path2.resolve(targetPath);
+  if (!isUnder2(resolvedRoot, resolvedTarget)) unsafePath(`Path escapes partition root: ${resolvedTarget}`);
+  const relative3 = path2.relative(resolvedRoot, resolvedTarget);
+  const components = relative3 ? relative3.split(path2.sep) : [];
+  let current = resolvedRoot;
+  for (let index = -1; index < components.length; index++) {
+    if (index >= 0) current = path2.join(current, components[index]);
+    const stat = lstatIfExists(current);
+    if (!stat) break;
+    if (stat.isSymbolicLink()) unsafePath(`Symlink is not allowed in a session path: ${current}`);
+    if (index < components.length - 1 && !stat.isDirectory()) unsafePath(`Non-directory path component: ${current}`);
+  }
+  const rootStat = lstatIfExists(resolvedRoot);
+  const parentStat = lstatIfExists(path2.dirname(resolvedTarget));
+  if (rootStat && parentStat) {
+    if (!rootStat.isDirectory() || !parentStat.isDirectory()) unsafePath(`Mutation parent is not a directory: ${path2.dirname(resolvedTarget)}`);
+    const canonicalRoot = fs2.realpathSync(resolvedRoot);
+    const canonicalParent = fs2.realpathSync(path2.dirname(resolvedTarget));
+    if (!isUnder2(canonicalRoot, canonicalParent)) unsafePath(`Canonical parent escapes partition root: ${canonicalParent}`);
+  }
+}
+function movePath(sourcePath, destPath, isDirectory) {
+  if (!lstatIfExists(sourcePath)) return false;
+  if (lstatIfExists(destPath)) {
+    const error = new Error(`Destination already exists: ${destPath}`);
+    error.code = "collision";
+    throw error;
+  }
+  try {
+    moveAttempt += 1;
+    injectedFault(`move-exdev-${moveAttempt}`, "EXDEV");
+    injectedFault("move-exdev", "EXDEV");
+    fs2.renameSync(sourcePath, destPath);
+  } catch (error) {
+    if (error?.code !== "EXDEV") throw error;
+    const unsupported = new Error(`Cross-filesystem moves are not supported: ${sourcePath} -> ${destPath}`);
+    unsupported.code = "cross-filesystem-not-supported";
+    throw unsupported;
+  }
+  return true;
+}
+function touchOpenedFile(filePath, expectedStat, atime, mtime) {
+  const fd = fs2.openSync(filePath, fs2.constants.O_RDWR | fs2.constants.O_NOFOLLOW);
+  try {
+    const openedStat = fs2.fstatSync(fd);
+    if (!openedStat.isFile() || openedStat.dev !== expectedStat.dev || openedStat.ino !== expectedStat.ino) {
+      unsafePath(`Session file changed before timestamp update: ${filePath}`);
+    }
+    fs2.futimesSync(fd, atime, mtime);
+    fs2.fsyncSync(fd);
+  } finally {
+    fs2.closeSync(fd);
+  }
+}
+function updateMovedCache(sourceJsonPath, destJsonPath, id, attributionKey, partition) {
+  const cache = readCache();
+  delete cache.entries[sourceJsonPath];
+  const stat = fs2.statSync(destJsonPath);
+  cache.entries[destJsonPath] = {
+    size: stat.size,
+    mtimeMs: stat.mtimeMs,
+    meta: readSessionMeta(destJsonPath, id, attributionKey, partition, stat)
+  };
+  writeCache(cache);
+}
+function dropCachedEntry(filePath) {
+  const cache = readCache();
+  delete cache.entries[filePath];
+  writeCache(cache);
+}
+function indexDiagnostic(filePath, error) {
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(JSON.stringify({ diagnostic: "index-read-failed", path: path2.resolve(filePath), message }));
+}
+function preserveCachedEntry(filePath, cache, nextEntries, sessions) {
+  const cached = cache.entries[filePath];
+  if (!cached || nextEntries[filePath]) return;
+  nextEntries[filePath] = cached;
+  sessions.push(cached.meta);
+}
+function preserveCachedEntriesUnder(dirPath, cache, nextEntries, sessions) {
+  for (const filePath of Object.keys(cache.entries)) {
+    if (isUnder2(dirPath, filePath)) preserveCachedEntry(filePath, cache, nextEntries, sessions);
+  }
+}
+function walkPartition(baseDir, partition, cache, refresh, nextEntries, sessions) {
+  let dirs;
+  try {
+    dirs = fs2.readdirSync(baseDir, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "ENOENT") return;
+    fail("partition-read-failed", error?.message || `Could not read partition root: ${baseDir}`);
+  }
+  for (const dirEntry of dirs) {
+    if (!dirEntry.isDirectory() || dirEntry.name.startsWith(".") || !ENCODED_PATH_RE.test(dirEntry.name)) continue;
+    const attributionKey = dirEntry.name;
+    const dirPath = path2.join(baseDir, attributionKey);
+    let files;
+    try {
+      assertSafePartitionPath(baseDir, dirPath);
+      files = fs2.readdirSync(dirPath).filter((name) => name.endsWith(".jsonl")).sort();
+    } catch (error) {
+      indexDiagnostic(dirPath, error);
+      if (error?.code !== "unsafe-path") preserveCachedEntriesUnder(dirPath, cache, nextEntries, sessions);
+      continue;
+    }
+    for (const fileName of files) {
+      const id = fileName.slice(0, -".jsonl".length);
+      if (!SESSION_ID_RE2.test(id)) continue;
+      const filePath = path2.join(dirPath, fileName);
+      try {
+        assertSafePartitionPath(baseDir, filePath);
+        const stat = fs2.lstatSync(filePath);
+        if (stat.isSymbolicLink() || !stat.isFile()) continue;
+        const cached = cache.entries[filePath];
+        const meta = !refresh && cached && cached.size === stat.size && cached.mtimeMs === stat.mtimeMs ? cached.meta : readSessionMeta(filePath, id, attributionKey, partition, stat);
+        nextEntries[filePath] = { size: stat.size, mtimeMs: stat.mtimeMs, meta };
+        sessions.push(meta);
+      } catch (error) {
+        indexDiagnostic(filePath, error);
+        if (error?.code !== "unsafe-path") preserveCachedEntry(filePath, cache, nextEntries, sessions);
+      }
+    }
+  }
+}
+function buildIndex(refresh = false) {
+  const cache = readCache();
+  const nextEntries = {};
+  const sessions = [];
+  walkPartition(PROJECTS_DIR, "active", cache, refresh, nextEntries, sessions);
+  walkPartition(ARCHIVE_DIR, "archive", cache, refresh, nextEntries, sessions);
+  sessions.sort((a, b) => Date.parse(b.lastActiveAt) - Date.parse(a.lastActiveAt) || a.id.localeCompare(b.id));
+  writeCache({ version: INDEX_CACHE_VERSION, entries: nextEntries });
+  return overlayLiveRegistry(sessions);
+}
+function isUnder2(rootPath, candidatePath) {
+  const relative3 = path2.relative(path2.resolve(rootPath), path2.resolve(candidatePath));
+  return relative3 === "" || !relative3.startsWith(`..${path2.sep}`) && relative3 !== ".." && !path2.isAbsolute(relative3);
+}
+function toLegacySession2(session) {
+  return {
+    id: session.id,
+    project: session.rootPath,
+    encodedPath: session.attributionKey,
+    firstPrompt: session.title,
+    lastTimestamp: session.lastActiveAt,
+    messageCount: session.messageCount,
+    gitBranch: session.gitBranch,
+    live: session.live,
+    aiTitle: session.aiTitle,
+    customTitle: session.customTitle
+  };
+}
+function findOption(args, option) {
+  const index = args.indexOf(option);
+  if (index < 0) return { rest: args };
+  if (!args[index + 1]) fail("missing-option-value", `${option} requires a value`);
+  return { value: args[index + 1], rest: [...args.slice(0, index), ...args.slice(index + 2)] };
+}
+function cmdBuildIndex(refresh) {
+  output2(buildIndex(refresh));
+}
+function cmdListUnder(rootPath, partition) {
+  if (partition && partition !== "active" && partition !== "archive") {
+    fail("invalid-partition", "Partition must be active or archive");
+  }
+  const sessions = buildIndex().filter((session) => (!partition || session.partition === partition) && isUnder2(rootPath, session.rootPath));
+  output2(sessions);
+}
+function cmdListProjects() {
+  const grouped = /* @__PURE__ */ new Map();
+  for (const session of buildIndex().filter((item) => item.partition === "active")) {
+    const existing = grouped.get(session.attributionKey);
+    if (existing) existing.sessionCount++;
+    else grouped.set(session.attributionKey, { path: session.rootPath, encodedPath: session.attributionKey, sessionCount: 1 });
+  }
+  output2([...grouped.values()].sort((a, b) => b.sessionCount - a.sessionCount));
+}
+function cmdListSessions(encodedPath) {
+  validateEncodedPath(encodedPath);
+  output2(buildIndex().filter((session) => session.partition === "active" && session.attributionKey === encodedPath).map(toLegacySession2));
+}
+async function forEachTranscriptLine(filePath, visit) {
+  const input = fs2.createReadStream(filePath, { encoding: "utf-8" });
+  const lines = readline2.createInterface({ input, crlfDelay: Infinity });
+  try {
+    for await (const line of lines) {
+      if (await visit(line) === false) break;
+    }
+  } finally {
+    lines.close();
+    input.destroy();
+  }
+}
+async function cmdReadSession(encodedPath, sessionId) {
+  validateEncodedPath(encodedPath);
+  validateSessionId2(sessionId);
+  const activePath = path2.join(PROJECTS_DIR, encodedPath, `${sessionId}.jsonl`);
+  const archivePath = path2.join(ARCHIVE_DIR, encodedPath, `${sessionId}.jsonl`);
+  let filePath = "";
+  for (const [root, candidate] of [[PROJECTS_DIR, activePath], [ARCHIVE_DIR, archivePath]]) {
+    try {
+      assertSafePartitionPath(root, candidate);
+      const stat = fs2.lstatSync(candidate);
+      if (stat.isSymbolicLink() || !stat.isFile()) fail("read-failed", `Session path is not a regular file: ${candidate}`);
+      filePath = candidate;
+      break;
+    } catch (error) {
+      if (error?.code !== "ENOENT") fail("read-failed", error?.message || `Could not inspect session file: ${candidate}`);
+    }
+  }
+  if (!filePath) fail("not-found", `Session does not exist: ${activePath}`);
+  const messages = [];
+  let outputBytes = 2;
+  try {
+    await forEachTranscriptLine(filePath, (line) => {
+      try {
+        if (Buffer.byteLength(line, "utf-8") > READ_SESSION_MAX_OUTPUT_BYTES2) {
+          fail("session-output-too-large", `Parsed session output exceeds ${READ_SESSION_MAX_OUTPUT_BYTES2} bytes`);
+        }
+        const msg = parseMessage(JSON.parse(line));
+        if (msg) {
+          const messageBytes = Buffer.byteLength(JSON.stringify(msg), "utf-8") + (messages.length ? 1 : 0);
+          if (outputBytes + messageBytes > READ_SESSION_MAX_OUTPUT_BYTES2) {
+            fail("session-output-too-large", `Parsed session output exceeds ${READ_SESSION_MAX_OUTPUT_BYTES2} bytes`);
+          }
+          outputBytes += messageBytes;
+          messages.push(msg);
+        }
+      } catch {
+      }
+    });
+  } catch (error) {
+    fail("read-failed", error?.message || `Could not read session file: ${filePath}`);
+  }
+  output2(messages);
+}
+function cmdMoveSession(encodedPath, sessionId, direction, force = false) {
+  validateEncodedPath(encodedPath);
+  validateSessionId2(sessionId);
+  const sourceRoot = direction === "archive" ? PROJECTS_DIR : ARCHIVE_DIR;
+  const destRoot = direction === "archive" ? ARCHIVE_DIR : PROJECTS_DIR;
+  const sourceDir = path2.join(sourceRoot, encodedPath);
+  const destDir = path2.join(destRoot, encodedPath);
+  const sourceJsonPath = path2.join(sourceDir, `${sessionId}.jsonl`);
+  const destJsonPath = path2.join(destDir, `${sessionId}.jsonl`);
+  const sourceArtifactPath = path2.join(sourceDir, sessionId);
+  const destArtifactPath = path2.join(destDir, sessionId);
+  try {
+    assertSafePartitionPath(sourceRoot, sourceJsonPath);
+    assertSafePartitionPath(sourceRoot, sourceArtifactPath);
+    assertSafePartitionPath(destRoot, destJsonPath);
+    assertSafePartitionPath(destRoot, destArtifactPath);
+  } catch (error) {
+    output2(mutationFailure2(error?.code === "unsafe-path" ? "unsafe-path" : "path-inspection-failed", error?.message || "Could not validate session paths"));
+    return;
+  }
+  let sourceStat;
+  try {
+    sourceStat = fs2.lstatSync(sourceJsonPath);
+    if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) throw new Error("not a regular file");
+  } catch {
+    output2(mutationFailure2("session-not-found", `Source session does not exist: ${sourceJsonPath}`));
+    return;
+  }
+  if (lstatIfExists(destJsonPath)) {
+    output2(mutationFailure2("collision", `Destination already exists: ${destJsonPath}`));
+    return;
+  }
+  const sourceArtifactStat = lstatIfExists(sourceArtifactPath);
+  const destArtifactStat = lstatIfExists(destArtifactPath);
+  if (sourceArtifactStat && !sourceArtifactStat.isDirectory()) {
+    output2(mutationFailure2("unsafe-path", `Source artifact path is not a directory: ${sourceArtifactPath}`));
+    return;
+  }
+  if (destArtifactStat && !destArtifactStat.isDirectory()) {
+    output2(mutationFailure2("unsafe-path", `Destination artifact path is not a directory: ${destArtifactPath}`));
+    return;
+  }
+  if (sourceArtifactStat && destArtifactStat) {
+    output2(mutationFailure2("artifact-collision", `Source and destination artifact directories both exist: ${sourceArtifactPath}; ${destArtifactPath}`));
+    return;
+  }
+  const liveRegistry = readLiveRegistry();
+  try {
+    assertSafePartitionPath(sourceRoot, sourceJsonPath);
+    assertSafePartitionPath(sourceRoot, sourceArtifactPath);
+    assertSafePartitionPath(destRoot, destJsonPath);
+    assertSafePartitionPath(destRoot, destArtifactPath);
+    sourceStat = fs2.lstatSync(sourceJsonPath);
+    if (sourceStat.isSymbolicLink() || !sourceStat.isFile()) throw new Error("not a regular file");
+  } catch (error) {
+    if (error?.code === "unsafe-path") {
+      output2(mutationFailure2("unsafe-path", error.message));
+      return;
+    }
+    output2(mutationFailure2("session-not-found", `Source session disappeared before move: ${sourceJsonPath}`));
+    return;
+  }
+  const liveEntry = liveRegistry.get(sessionId);
+  if (!force && liveEntry) {
+    const attributionNote = liveEntry.cwd && encodeRootPath(liveEntry.cwd) === encodedPath ? "" : "; registry attribution is unverified, so the session UUID match is skipped conservatively";
+    output2(mutationFailure2("session-live", `Session has a validated live registry entry and cannot be ${direction === "archive" ? "archived" : "restored"} while live${attributionNote}`));
+    return;
+  }
+  if (direction === "archive" && !force && Date.now() - sourceStat.mtimeMs < LIVE_WINDOW_MS) {
+    output2(mutationFailure2("possibly-live", "Session was modified within the last 60 seconds; retry with --force after confirmation"));
+    return;
+  }
+  try {
+    fs2.mkdirSync(destDir, { recursive: true });
+    assertSafePartitionPath(destRoot, destJsonPath);
+    assertSafePartitionPath(destRoot, destArtifactPath);
+  } catch (error) {
+    output2(mutationFailure2(error?.code === "unsafe-path" ? "unsafe-path" : "destination-create-failed", error?.message || `Could not create destination: ${destDir}`));
+    return;
+  }
+  let restoreTempPath = null;
+  if (direction === "restore") {
+    restoreTempPath = path2.join(destDir, `.${sessionId}.restore-${process.pid}-${Date.now()}`);
+    try {
+      assertSafePartitionPath(destRoot, restoreTempPath);
+      if (sourceStat.dev !== fs2.statSync(destDir).dev) {
+        const error = new Error(`Cross-filesystem moves are not supported: ${sourceJsonPath} -> ${destJsonPath}`);
+        error.code = "cross-filesystem-not-supported";
+        throw error;
+      }
+      injectedFault("restore-touch");
+      fs2.copyFileSync(sourceJsonPath, restoreTempPath, fs2.constants.COPYFILE_EXCL);
+      const tempStat = fs2.lstatSync(restoreTempPath);
+      if (tempStat.isSymbolicLink() || !tempStat.isFile()) unsafePath(`Restore temporary path is not a regular file: ${restoreTempPath}`);
+      const now = /* @__PURE__ */ new Date();
+      touchOpenedFile(restoreTempPath, tempStat, now, now);
+      injectedFault("restore-post-touch");
+      const revalidated = fs2.lstatSync(sourceJsonPath);
+      if (revalidated.isSymbolicLink() || !revalidated.isFile() || revalidated.dev !== sourceStat.dev || revalidated.ino !== sourceStat.ino || revalidated.size !== sourceStat.size || revalidated.mtimeMs !== sourceStat.mtimeMs) {
+        unsafePath(`Session file changed while preparing restore: ${sourceJsonPath}`);
+      }
+    } catch (error) {
+      if (restoreTempPath) try {
+        fs2.unlinkSync(restoreTempPath);
+      } catch {
+      }
+      output2(mutationFailure2(
+        error?.code === "cross-filesystem-not-supported" ? "cross-filesystem-not-supported" : "restore-touch-failed",
+        error?.message || "Could not prepare restored session timestamp"
+      ));
+      return;
+    }
+  }
+  try {
+    assertSafePartitionPath(sourceRoot, sourceJsonPath);
+    assertSafePartitionPath(sourceRoot, sourceArtifactPath);
+    assertSafePartitionPath(destRoot, destJsonPath);
+    assertSafePartitionPath(destRoot, destArtifactPath);
+  } catch (error) {
+    if (restoreTempPath) try {
+      fs2.unlinkSync(restoreTempPath);
+    } catch {
+    }
+    output2(mutationFailure2(error?.code === "unsafe-path" ? "unsafe-path" : "path-inspection-failed", error?.message || "Could not revalidate session paths"));
+    return;
+  }
+  let artifactMoved = false;
+  try {
+    artifactMoved = movePath(sourceArtifactPath, destArtifactPath, true);
+  } catch (error) {
+    if (restoreTempPath) try {
+      fs2.unlinkSync(restoreTempPath);
+    } catch {
+    }
+    const moveError = error?.code === "collision" ? "artifact-collision" : error?.code === "cross-filesystem-not-supported" ? "cross-filesystem-not-supported" : "artifact-move-failed";
+    output2(mutationFailure2(moveError, error?.message || "Could not move session artifacts"));
+    return;
+  }
+  let jsonPublished = false;
+  try {
+    injectedFault("move-jsonl");
+    if (direction === "restore") {
+      if (!restoreTempPath) throw new Error("Restore temporary file is unavailable");
+      if (hasInjectedFault("restore-publish-collision")) fs2.writeFileSync(destJsonPath, "concurrent destination\n", { flag: "wx" });
+      fs2.linkSync(restoreTempPath, destJsonPath);
+      jsonPublished = true;
+      fs2.unlinkSync(restoreTempPath);
+      restoreTempPath = null;
+      fs2.unlinkSync(sourceJsonPath);
+    } else if (!movePath(sourceJsonPath, destJsonPath, false)) {
+      throw new Error(`Source session disappeared before move: ${sourceJsonPath}`);
+    }
+  } catch (error) {
+    if (restoreTempPath) try {
+      fs2.unlinkSync(restoreTempPath);
+    } catch {
+    }
+    let jsonRollbackFailed = false;
+    if (direction === "restore" && jsonPublished && lstatIfExists(sourceJsonPath) && lstatIfExists(destJsonPath)) {
+      try {
+        fs2.unlinkSync(destJsonPath);
+      } catch {
+        jsonRollbackFailed = true;
+      }
+    }
+    const reason = error?.message || "Could not move session jsonl";
+    const moveError = error?.code === "collision" || error?.code === "EEXIST" ? "collision" : error?.code === "cross-filesystem-not-supported" ? "cross-filesystem-not-supported" : "jsonl-move-failed";
+    if (artifactMoved) {
+      try {
+        injectedFault("rollback-artifact");
+        if (!movePath(destArtifactPath, sourceArtifactPath, true)) throw new Error(`Artifact rollback destination already exists: ${sourceArtifactPath}`);
+        if (jsonRollbackFailed) {
+          output2(mutationPartial("jsonl-rollback", destJsonPath, sourceArtifactPath, "jsonl-rollback-failed", reason));
+          return;
+        }
+        output2(mutationFailure2(moveError, reason));
+        return;
+      } catch (rollbackError) {
+        output2(mutationPartial(
+          "artifact-rollback",
+          lstatIfExists(destJsonPath) ? destJsonPath : sourceJsonPath,
+          lstatIfExists(sourceArtifactPath) ? sourceArtifactPath : destArtifactPath,
+          "artifact-rollback-failed",
+          `${reason}; artifact rollback failed: ${rollbackError?.message || "unknown rollback error"}`
+        ));
+        return;
+      }
+    }
+    if (jsonRollbackFailed) {
+      output2(mutationPartial("jsonl-rollback", destJsonPath, sourceArtifactPath, "jsonl-rollback-failed", reason));
+      return;
+    }
+    if (lstatIfExists(destArtifactPath) && !lstatIfExists(sourceArtifactPath)) {
+      output2(mutationPartial("jsonl-move", sourceJsonPath, destArtifactPath, "jsonl-move-failed", reason));
+    } else {
+      output2(mutationFailure2(moveError, reason));
+    }
+    return;
+  }
+  try {
+    injectedFault("cache-write");
+    updateMovedCache(sourceJsonPath, destJsonPath, sessionId, encodedPath, direction === "archive" ? "archive" : "active");
+    output2({ outcome: "success", cacheRefreshed: true });
+  } catch {
+    output2({ outcome: "success", cacheRefreshed: false });
+  }
+}
+function cmdDeleteArchived(encodedPath, sessionId, force = false) {
+  validateEncodedPath(encodedPath);
+  validateSessionId2(sessionId);
+  const archiveDir = path2.join(ARCHIVE_DIR, encodedPath);
+  const jsonPath = path2.join(archiveDir, `${sessionId}.jsonl`);
+  const artifactPath = path2.join(archiveDir, sessionId);
+  try {
+    assertSafePartitionPath(ARCHIVE_DIR, jsonPath);
+    assertSafePartitionPath(ARCHIVE_DIR, artifactPath);
+    const jsonStat = fs2.lstatSync(jsonPath);
+    if (jsonStat.isSymbolicLink() || !jsonStat.isFile()) throw new Error("not a regular file");
+    const artifactStat = lstatIfExists(artifactPath);
+    if (artifactStat && !artifactStat.isDirectory()) unsafePath(`Artifact path is not a directory: ${artifactPath}`);
+  } catch (error) {
+    if (error?.code === "unsafe-path") {
+      output2(mutationFailure2("unsafe-path", error.message));
+      return;
+    }
+    output2(mutationFailure2("archived-session-not-found", `Archived session does not exist: ${jsonPath}`));
+    return;
+  }
+  const liveEntry = readLiveRegistry().get(sessionId);
+  try {
+    assertSafePartitionPath(ARCHIVE_DIR, jsonPath);
+    assertSafePartitionPath(ARCHIVE_DIR, artifactPath);
+    const jsonStat = fs2.lstatSync(jsonPath);
+    if (jsonStat.isSymbolicLink() || !jsonStat.isFile()) throw new Error("not a regular file");
+    const artifactStat = lstatIfExists(artifactPath);
+    if (artifactStat && !artifactStat.isDirectory()) unsafePath(`Artifact path is not a directory: ${artifactPath}`);
+  } catch (error) {
+    if (error?.code === "unsafe-path") {
+      output2(mutationFailure2("unsafe-path", error.message));
+      return;
+    }
+    output2(mutationFailure2("archived-session-not-found", `Archived session disappeared before deletion: ${jsonPath}`));
+    return;
+  }
+  if (!force && liveEntry) {
+    const attributionNote = liveEntry.cwd && encodeRootPath(liveEntry.cwd) === encodedPath ? "" : "; registry attribution is unverified, so the session UUID match is skipped conservatively";
+    output2(mutationFailure2("session-live", `Session has a validated live registry entry and cannot be deleted while live${attributionNote}`));
+    return;
+  }
+  let artifactDeleted = false;
+  if (lstatIfExists(artifactPath)) {
+    try {
+      fs2.rmSync(artifactPath, { recursive: true, force: false });
+      artifactDeleted = true;
+    } catch (error) {
+      output2(mutationFailure2("artifact-delete-failed", error?.message || "Could not delete archived session artifacts"));
+      return;
+    }
+  }
+  try {
+    injectedFault("delete-jsonl");
+    fs2.unlinkSync(jsonPath);
+  } catch (error) {
+    const message = error?.message || "Could not delete archived session jsonl";
+    if (artifactDeleted) output2(mutationPartial("jsonl-delete", jsonPath, artifactPath, "jsonl-delete-failed", message));
+    else output2(mutationFailure2("jsonl-delete-failed", message));
+    return;
+  }
+  try {
+    injectedFault("cache-write");
+    dropCachedEntry(jsonPath);
+    output2({ outcome: "success", cacheRefreshed: true });
+  } catch {
+    output2({ outcome: "success", cacheRefreshed: false });
+  }
+}
+function extractSearchTexts(line) {
+  try {
+    const obj = JSON.parse(line);
+    if (obj.type === "user" && typeof obj.message?.content === "string") return [obj.message.content];
+    if (obj.type === "assistant" && Array.isArray(obj.message?.content)) {
+      return obj.message.content.filter((block) => block.type === "text" && typeof block.text === "string").map((block) => block.text);
+    }
+  } catch {
+  }
+  return [];
+}
+function searchSnippet(text, matchIndex, needleLength) {
+  const start = Math.max(0, matchIndex - 60);
+  const end = Math.min(text.length, matchIndex + needleLength + 60);
+  return text.slice(start, end).trim();
+}
+async function cmdSearch(query, scope) {
+  const sessions = buildIndex().filter((session) => session.partition === "active" && (!scope || isUnder2(scope, session.rootPath)));
+  const results = [];
+  const needle = query.toLocaleLowerCase();
+  for (const session of sessions) {
+    if (results.length >= 20) break;
+    const filePath = path2.join(PROJECTS_DIR, session.attributionKey, `${session.id}.jsonl`);
+    let matchText = "";
+    try {
+      assertSafePartitionPath(PROJECTS_DIR, filePath);
+      const stat = fs2.lstatSync(filePath);
+      if (stat.isSymbolicLink() || !stat.isFile()) throw new Error(`Session path is not a regular file: ${filePath}`);
+      await forEachTranscriptLine(filePath, (line) => {
+        if (!line.toLocaleLowerCase().includes(needle)) return;
+        for (const text of extractSearchTexts(line)) {
+          const matchIndex = text.toLocaleLowerCase().indexOf(needle);
+          if (matchIndex === -1) continue;
+          matchText = searchSnippet(text, matchIndex, query.length);
+          return false;
+        }
+      });
+    } catch {
+      continue;
+    }
+    if (matchText) results.push({ session, match: matchText });
+  }
+  output2(results);
+}
+function cmdListRecent(limit = 30) {
+  output2(buildIndex().filter((session) => session.partition === "active").slice(0, limit).map(toLegacySession2));
+}
+var claudeCodeConnector = {
+  id: "claude-code",
+  capabilities: {
+    archive: true,
+    // No rename write path exists.
+    rename: false,
+    delete: true,
+    deleteRequiresArchived: true,
+    nativeIndex: false,
+    tokenStats: false,
+    originFilter: false
+  },
+  resume: { argv: ["claude", "--resume"] },
+  isAvailable: () => {
+    try {
+      path2.resolve(PROJECTS_DIR);
+      return { available: true, degraded: false };
+    } catch (error) {
+      return {
+        available: false,
+        degraded: false,
+        reason: `Claude Code projects directory could not be resolved${error?.message ? `: ${error.message}` : ""}`
+      };
+    }
+  },
+  buildIndex: (refresh) => cmdBuildIndex(refresh),
+  listUnder: (rootPath, partition) => cmdListUnder(rootPath, partition),
+  listProjects: () => cmdListProjects(),
+  listSessions: (scopeKey) => cmdListSessions(scopeKey),
+  readSession: (scopeKey, sessionId) => cmdReadSession(scopeKey, sessionId),
+  moveSession: (scopeKey, sessionId, direction, force) => cmdMoveSession(scopeKey, sessionId, direction, force),
+  deleteArchived: (scopeKey, sessionId, force) => cmdDeleteArchived(scopeKey, sessionId, force),
+  search: (query, scope) => cmdSearch(query, scope),
+  listRecent: (limit) => cmdListRecent(limit)
+};
+var CONNECTORS = [claudeCodeConnector, codexConnector];
+function findConnector(args) {
+  const parsed = findOption(args, "--agent");
+  const agent = parsed.value || "claude-code";
+  const connector = CONNECTORS.find((candidate) => candidate.id === agent);
+  if (!connector) fail("invalid-arguments", `Unknown agent: ${agent}`);
+  return { connector, rest: parsed.rest };
+}
+function cmdAgents() {
+  output2(CONNECTORS.map((connector) => {
+    const availability = connector.isAvailable();
+    return {
+      id: connector.id,
+      available: availability.available,
+      ...!availability.available && availability.reason ? { unavailableReason: availability.reason } : {},
+      ...connector.id === "codex" ? { degraded: availability.degraded } : {},
+      ...availability.degraded && availability.reason ? { degradedReason: availability.reason } : {},
+      capabilities: connector.capabilities,
+      resume: connector.resume
+    };
+  }));
+}
+function cmdListDirs(dirPath) {
+  const resolved = dirPath.replace(/^~/, HOME2);
+  try {
+    const stat = fs2.statSync(resolved);
+    if (!stat.isDirectory()) {
+      output2({ error: "not-directory", message: `Path is not a directory: ${resolved}` });
+      return;
+    }
+  } catch (error) {
+    output2({
+      error: error?.code === "ENOENT" ? "not-found" : "unreadable-directory",
+      message: error?.message || `Could not access directory: ${resolved}`
+    });
+    return;
+  }
+  try {
+    const entries = fs2.readdirSync(resolved, { withFileTypes: true });
+    const dirs = [];
+    for (const entry of entries) {
+      if (entry.name.startsWith(".") && entry.name !== ".claude") continue;
+      const entryPath = path2.join(resolved, entry.name);
+      if (entry.isDirectory()) dirs.push({ name: entry.name, path: entryPath });
+      else if (entry.isSymbolicLink()) {
+        try {
+          if (fs2.statSync(entryPath).isDirectory()) dirs.push({ name: entry.name, path: entryPath });
+        } catch {
+        }
+      }
+    }
+    dirs.sort((a, b) => a.name.localeCompare(b.name));
+    output2({ dirs });
+  } catch (error) {
+    output2({ error: "unreadable-directory", message: error?.message || `Could not list directory: ${resolved}` });
+  }
+}
+function cmdCheckDir(dirPath) {
+  validateAbsolutePath(dirPath);
+  try {
+    const stat = fs2.statSync(dirPath);
+    output2({ exists: true, dir: stat.isDirectory() });
+  } catch {
+    output2({ exists: false, dir: false });
+  }
+}
+async function main() {
+  const [, , subcommand, ...args] = process.argv;
+  switch (subcommand) {
+    case "agents":
+      if (args.length) fail("invalid-arguments", "Usage: agents");
+      cmdAgents();
+      break;
+    case "build-index": {
+      const { connector, rest } = findConnector(args);
+      const unknown = rest.filter((arg) => arg !== "--refresh");
+      if (unknown.length) fail("invalid-arguments", "Usage: build-index [--refresh]");
+      connector.buildIndex(rest.includes("--refresh"));
+      break;
+    }
+    case "list-under": {
+      const { connector, rest } = findConnector(args);
+      const parsed = findOption(rest, "--partition");
+      if (parsed.rest.length !== 1) fail("invalid-arguments", "Usage: list-under <realRootPath> [--partition active|archive]");
+      connector.listUnder(parsed.rest[0], parsed.value);
+      break;
+    }
+    case "list-projects": {
+      const { connector } = findConnector(args);
+      connector.listProjects();
+      break;
+    }
+    case "list-sessions": {
+      const { connector, rest } = findConnector(args);
+      if (rest.length !== 1) fail("invalid-arguments", "Usage: list-sessions <encodedPath>");
+      connector.listSessions(rest[0]);
+      break;
+    }
+    case "read-session": {
+      const { connector, rest } = findConnector(args);
+      if (rest.length !== 2) fail("invalid-arguments", "Usage: read-session <encodedPath> <sessionId>");
+      await connector.readSession(rest[0], rest[1]);
+      break;
+    }
+    case "archive": {
+      const parsed = findConnector(args);
+      const force = parsed.rest.includes("--force");
+      const rest = parsed.rest.filter((arg) => arg !== "--force");
+      if (rest.length !== 2 || parsed.rest.filter((arg) => arg === "--force").length > 1) fail("invalid-arguments", "Usage: archive <encodedPath> <sessionId> [--force]");
+      parsed.connector.moveSession(rest[0], rest[1], "archive", force);
+      break;
+    }
+    case "restore": {
+      const { connector, rest } = findConnector(args);
+      if (rest.length !== 2) fail("invalid-arguments", "Usage: restore <encodedPath> <sessionId>");
+      connector.moveSession(rest[0], rest[1], "restore");
+      break;
+    }
+    case "delete-archived": {
+      const parsed = findConnector(args);
+      const force = parsed.rest.includes("--force");
+      const rest = parsed.rest.filter((arg) => arg !== "--force");
+      if (rest.length !== 2 || parsed.rest.filter((arg) => arg === "--force").length > 1) fail("invalid-arguments", "Usage: delete-archived <encodedPath> <sessionId> [--force]");
+      parsed.connector.deleteArchived(rest[0], rest[1], force);
+      break;
+    }
+    case "search": {
+      const { connector, rest } = findConnector(args);
+      const parsed = findOption(rest, "--scope");
+      if (parsed.rest.length === 0) fail("invalid-arguments", "Usage: search <query> [--scope <realRootPath>]");
+      await connector.search(parsed.rest.join(" "), parsed.value);
+      break;
+    }
+    case "list-recent": {
+      const { connector, rest } = findConnector(args);
+      if (rest.length > 1) fail("invalid-arguments", "Usage: list-recent [limit]");
+      connector.listRecent(rest[0] ? parseInt(rest[0], 10) : 30);
+      break;
+    }
+    case "list-dirs":
+      if (args.length !== 1) fail("invalid-arguments", "Usage: list-dirs <path>");
+      cmdListDirs(args[0]);
+      break;
+    case "check-dir":
+      if (args.length !== 1) fail("invalid-arguments", "Usage: check-dir <absolutePath>");
+      cmdCheckDir(args[0]);
+      break;
+    default:
+      fail("unknown-subcommand", `Unknown subcommand: ${subcommand || ""}`);
+  }
+}
+void main().catch((error) => fail("command-failed", error?.message || String(error)));

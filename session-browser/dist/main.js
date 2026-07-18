@@ -35,6 +35,10 @@ var ICON_PATHS = {
   folder: [
     ["path", { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }]
   ],
+  "folder-down": [
+    ["path", { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }],
+    ["path", { d: "m6 9 6 6 6-6" }]
+  ],
   zap: [
     ["path", { d: "M4 14a1 1 0 0 1-.78-1.63l9.9-10.2a.5.5 0 0 1 .86.46l-1.92 6.02A1 1 0 0 0 13 10h7a1 1 0 0 1 .78 1.63l-9.9 10.2a.5.5 0 0 1-.86-.46l1.92-6.02A1 1 0 0 0 11 14z" }]
   ],
@@ -158,6 +162,9 @@ function IconCheck(size) {
 function IconFolder(size) {
   return renderIcon(ICON_PATHS.folder, size);
 }
+function IconFolderDown(size) {
+  return renderIcon(ICON_PATHS["folder-down"], size);
+}
 function IconZap(size) {
   return renderIcon(ICON_PATHS.zap, size);
 }
@@ -166,9 +173,6 @@ function IconHash(size) {
 }
 function IconTerminal(size) {
   return renderIcon(ICON_PATHS.terminal, size);
-}
-function IconPlay(size) {
-  return renderIcon(ICON_PATHS.play, size);
 }
 function IconFileText(size) {
   return renderIcon(ICON_PATHS["file-text"], size);
@@ -205,6 +209,8 @@ function IconClaude(size, cls) {
 var dictionaries = {
   en: {
     "active": "Active",
+    "activity-recent": "Active within",
+    "activity-stale": "Idle beyond",
     "bulk-actions": "Bulk actions",
     "bulk-archive": "Archive {n}",
     "bulk-confirm": "{n} selected \u2014 {m} currently expected to be skipped (possibly live). Continue?",
@@ -214,6 +220,7 @@ var dictionaries = {
     "bulk-result": "Done {done} \xB7 Failed {failed} \xB7 Skipped {skipped}",
     "bulk-refresh-stale": "Refresh failed, view may be stale.",
     "cancel": "Cancel",
+    "clear-selection": "Clear selection",
     "clear-all-filters": "Clear all",
     "date-filter-short": "Dates",
     "date-filters": "Date-range filters",
@@ -224,6 +231,8 @@ var dictionaries = {
     "page-indicator": "Page {page}/{pages}",
     "page-size": "Page size",
     "previous-page": "Previous",
+    "deselect-all": "Deselect all",
+    "dismiss-result": "Dismiss result",
     "select-all-filtered": "Select all {n} filtered",
     "select-mode": "Select mode",
     "select-session": "Select {title}",
@@ -237,15 +246,37 @@ var dictionaries = {
     "after-replace-all": "After \xB7 replace all",
     "all-branches": "All branches",
     "all-time": "All time",
+    "agent-claude-code": "Claude Code",
+    "agent-codex": "Codex",
+    "agent-degraded-notice": "{agent} is using degraded data: {reason}",
+    "agent-degraded-option": "{agent} (degraded)",
+    "agent-degraded-title": "Agent data may be stale",
+    "agent-degraded-tooltip": "Data may be stale.",
+    "agent-discovery-empty": "No session agents are registered.",
+    "agent-discovery-failed": "Could not discover session agents.",
+    "agent-discovery-invalid": "Agent discovery returned invalid data.",
+    "agent-empty-notice": "{agent} has no sessions to display.",
+    "agent-empty-title": "No sessions found",
+    "agent-fallback-notice": "{agent} could not be used ({reason}). Switched to {fallback}.",
+    "agent-fallback-title": "Session agent changed",
+    "agent-load-failed-short": "its sessions could not be loaded",
+    "agent-no-sessions": "No available session agent currently has sessions to display.",
+    "agent-no-sessions-short": "it has no sessions",
+    "agent-none-available": "No registered session agent is currently available.",
+    "agent-not-registered": "it is no longer registered",
+    "agent-switcher": "Session agent",
+    "agent-unavailable-tooltip": "This agent is unavailable.",
     "archive": "Archive",
     "archive-search-p2": "full-text search of Archive lands in P2",
     "archive-session": "Archive session",
     "archive-session-confirm": 'Archive session "{title}"?',
     "archive-session-force-confirm": 'Session "{title}" may be running right now. Archive anyway?',
     "before": "Before",
+    "branch-search-placeholder": "Search branches",
     "building-index": "Building session index\u2026",
     "cancel-changing-root": "Cancel changing root",
     "change-tree-root": "Change tree root",
+    "use-selected-folder-as-tree-root": "Use selected folder as tree root",
     "claude": "Claude",
     "clear-search": "Clear search",
     "cli-error": "Command failed: {msg}",
@@ -260,7 +291,9 @@ var dictionaries = {
     "created-at": "Created {date}",
     "created-unknown": "Created unknown",
     "delete-archived-session": "Delete archived session",
+    "delete-session": "Delete session",
     "delete-session-confirm": 'Permanently delete archived session "{title}"? This cannot be undone.',
+    "delete-session-direct-confirm": 'Permanently delete session "{title}"? This cannot be undone.',
     "dismiss-error": "Dismiss error",
     "dismiss-transcript-error": "Dismiss transcript error",
     "exact-directory": "Exact directory",
@@ -270,6 +303,8 @@ var dictionaries = {
     "filter-by-git-branch": "Filter by git branch",
     "filter-by-last-activity": "Filter by last activity",
     "filter-by-time-range": "Filter by time range",
+    "hide-scripted-sessions": "Hide scripted sessions",
+    "hide-scripted-sessions-tooltip": "Hide tooling-started exec and subagent sessions.",
     "full-text-global": "Full-text search is global",
     "full-text-scoped": "Full-text search uses selected tree scope",
     "global": "Global",
@@ -288,8 +323,10 @@ var dictionaries = {
     "messages": "Messages",
     "message-count-one": "{n} message",
     "message-count-other": "{n} messages",
+    "message-count-unknown": "Message count unavailable",
     "navigate-parent": "Navigate to parent directory",
     "no-branch": "No branch",
+    "no-branch-matches": "No matching branches",
     "no-content": "(no content)",
     "no-full-text-matches": "No full-text matches in this search scope.",
     "no-git-branch": "No git branch",
@@ -312,9 +349,9 @@ var dictionaries = {
     "picker-no-subdirs": "No subdirectories",
     "picker-path-missing": "Directory does not exist: {path}",
     "picker-path-not-directory": "Path is not a directory: {path}",
-    "picker-select-current": "Select \u201C{name}\u201D",
+    "picker-select-current": 'Use "{name}" as the tree root',
     "picker-title": "Select tree root directory",
-    "picker-use-manual-path": "Use entered path",
+    "picker-use-manual-path": "Use the entered path as the tree root",
     "empty": "(empty)",
     "relative-days": "{n}d",
     "relative-hours": "{n}h",
@@ -360,6 +397,8 @@ var dictionaries = {
     "time-24h": "24 hours",
     "time-30d": "30 days",
     "time-7d": "7 days",
+    "time-older-15d": "Older than 15 days",
+    "time-older-30d": "Older than 30 days",
     "time-span-unknown": "Time span unknown",
     "toggle-global-search": "Toggle global full-text search",
     "transcript-empty": "This session has no complete transcript messages.",
@@ -386,6 +425,8 @@ var dictionaries = {
   },
   zh: {
     "active": "\u6D3B\u8DC3",
+    "activity-recent": "\u8FD1\u671F\u6D3B\u8DC3",
+    "activity-stale": "\u95F2\u7F6E\u66F4\u4E45",
     "bulk-actions": "\u6279\u91CF\u64CD\u4F5C",
     "bulk-archive": "\u5F52\u6863 {n}",
     "bulk-confirm": "\u5DF2\u9009\u62E9 {n} \u4E2A \u2014 \u5F53\u524D\u9884\u8BA1\u8DF3\u8FC7 {m} \u4E2A\uFF08\u53EF\u80FD\u4ECD\u5728\u8FD0\u884C\uFF09\u3002\u7EE7\u7EED\u5417\uFF1F",
@@ -395,6 +436,7 @@ var dictionaries = {
     "bulk-result": "\u5B8C\u6210 {done} \xB7 \u5931\u8D25 {failed} \xB7 \u8DF3\u8FC7 {skipped}",
     "bulk-refresh-stale": "\u5237\u65B0\u5931\u8D25\uFF0C\u5F53\u524D\u89C6\u56FE\u53EF\u80FD\u5DF2\u8FC7\u671F\u3002",
     "cancel": "\u53D6\u6D88",
+    "clear-selection": "\u6E05\u9664\u9009\u62E9",
     "clear-all-filters": "\u6E05\u9664\u5168\u90E8",
     "date-filter-short": "\u65E5\u671F",
     "date-filters": "\u65E5\u671F\u8303\u56F4\u7B5B\u9009",
@@ -405,6 +447,8 @@ var dictionaries = {
     "page-indicator": "\u7B2C {page}/{pages} \u9875",
     "page-size": "\u6BCF\u9875\u6570\u91CF",
     "previous-page": "\u4E0A\u4E00\u9875",
+    "deselect-all": "\u53D6\u6D88\u5168\u9009",
+    "dismiss-result": "\u5173\u95ED\u7ED3\u679C",
     "select-all-filtered": "\u9009\u62E9\u5168\u90E8 {n} \u4E2A\u7B5B\u9009\u7ED3\u679C",
     "select-mode": "\u9009\u62E9\u6A21\u5F0F",
     "select-session": "\u9009\u62E9 {title}",
@@ -418,15 +462,37 @@ var dictionaries = {
     "after-replace-all": "\u4E4B\u540E \xB7 \u5168\u90E8\u66FF\u6362",
     "all-branches": "\u6240\u6709\u5206\u652F",
     "all-time": "\u5168\u90E8\u65F6\u95F4",
+    "agent-claude-code": "Claude Code",
+    "agent-codex": "Codex",
+    "agent-degraded-notice": "{agent} \u6B63\u5728\u4F7F\u7528\u964D\u7EA7\u6570\u636E\uFF1A{reason}",
+    "agent-degraded-option": "{agent}\uFF08\u964D\u7EA7\uFF09",
+    "agent-degraded-title": "\u4EE3\u7406\u6570\u636E\u53EF\u80FD\u5DF2\u8FC7\u671F",
+    "agent-degraded-tooltip": "\u6570\u636E\u53EF\u80FD\u5DF2\u8FC7\u671F\u3002",
+    "agent-discovery-empty": "\u6CA1\u6709\u5DF2\u6CE8\u518C\u7684\u4F1A\u8BDD\u4EE3\u7406\u3002",
+    "agent-discovery-failed": "\u65E0\u6CD5\u53D1\u73B0\u4F1A\u8BDD\u4EE3\u7406\u3002",
+    "agent-discovery-invalid": "\u4EE3\u7406\u53D1\u73B0\u8FD4\u56DE\u4E86\u65E0\u6548\u6570\u636E\u3002",
+    "agent-empty-notice": "{agent} \u6CA1\u6709\u53EF\u663E\u793A\u7684\u4F1A\u8BDD\u3002",
+    "agent-empty-title": "\u672A\u627E\u5230\u4F1A\u8BDD",
+    "agent-fallback-notice": "\u65E0\u6CD5\u4F7F\u7528 {agent}\uFF08{reason}\uFF09\u3002\u5DF2\u5207\u6362\u5230 {fallback}\u3002",
+    "agent-fallback-title": "\u4F1A\u8BDD\u4EE3\u7406\u5DF2\u66F4\u6539",
+    "agent-load-failed-short": "\u65E0\u6CD5\u52A0\u8F7D\u5176\u4F1A\u8BDD",
+    "agent-no-sessions": "\u5F53\u524D\u6CA1\u6709\u53EF\u7528\u7684\u4F1A\u8BDD\u4EE3\u7406\u5305\u542B\u53EF\u663E\u793A\u7684\u4F1A\u8BDD\u3002",
+    "agent-no-sessions-short": "\u5B83\u6CA1\u6709\u4F1A\u8BDD",
+    "agent-none-available": "\u5F53\u524D\u6CA1\u6709\u53EF\u7528\u7684\u5DF2\u6CE8\u518C\u4F1A\u8BDD\u4EE3\u7406\u3002",
+    "agent-not-registered": "\u5B83\u5DF2\u4E0D\u518D\u6CE8\u518C",
+    "agent-switcher": "\u4F1A\u8BDD\u4EE3\u7406",
+    "agent-unavailable-tooltip": "\u6B64\u4EE3\u7406\u4E0D\u53EF\u7528\u3002",
     "archive": "\u5F52\u6863",
     "archive-search-p2": "\u5F52\u6863\u5168\u6587\u641C\u7D22\u5C06\u5728 P2 \u63D0\u4F9B",
     "archive-session": "\u5F52\u6863\u4F1A\u8BDD",
     "archive-session-confirm": "\u5F52\u6863\u4F1A\u8BDD\u201C{title}\u201D\uFF1F",
     "archive-session-force-confirm": "\u4F1A\u8BDD\u201C{title}\u201D\u73B0\u5728\u53EF\u80FD\u4ECD\u5728\u8FD0\u884C\u3002\u4ECD\u8981\u5F52\u6863\u5417\uFF1F",
     "before": "\u4E4B\u524D",
+    "branch-search-placeholder": "\u641C\u7D22\u5206\u652F",
     "building-index": "\u6B63\u5728\u6784\u5EFA\u4F1A\u8BDD\u7D22\u5F15\u2026",
     "cancel-changing-root": "\u53D6\u6D88\u66F4\u6539\u6839\u76EE\u5F55",
     "change-tree-root": "\u66F4\u6539\u76EE\u5F55\u6811\u6839\u76EE\u5F55",
+    "use-selected-folder-as-tree-root": "\u4EE5\u9009\u4E2D\u76EE\u5F55\u4E3A\u6811\u6839",
     "claude": "Claude",
     "clear-search": "\u6E05\u9664\u641C\u7D22",
     "cli-error": "\u547D\u4EE4\u5931\u8D25\uFF1A{msg}",
@@ -441,7 +507,9 @@ var dictionaries = {
     "created-at": "\u521B\u5EFA\u4E8E {date}",
     "created-unknown": "\u521B\u5EFA\u65F6\u95F4\u672A\u77E5",
     "delete-archived-session": "\u5220\u9664\u5DF2\u5F52\u6863\u4F1A\u8BDD",
+    "delete-session": "\u5220\u9664\u4F1A\u8BDD",
     "delete-session-confirm": "\u6C38\u4E45\u5220\u9664\u5DF2\u5F52\u6863\u4F1A\u8BDD\u201C{title}\u201D\uFF1F\u6B64\u64CD\u4F5C\u65E0\u6CD5\u64A4\u9500\u3002",
+    "delete-session-direct-confirm": "\u6C38\u4E45\u5220\u9664\u4F1A\u8BDD\u201C{title}\u201D\uFF1F\u6B64\u64CD\u4F5C\u65E0\u6CD5\u64A4\u9500\u3002",
     "dismiss-error": "\u5173\u95ED\u9519\u8BEF",
     "dismiss-transcript-error": "\u5173\u95ED\u5BF9\u8BDD\u9519\u8BEF",
     "exact-directory": "\u7CBE\u786E\u76EE\u5F55",
@@ -451,6 +519,8 @@ var dictionaries = {
     "filter-by-git-branch": "\u6309 Git \u5206\u652F\u7B5B\u9009",
     "filter-by-last-activity": "\u6309\u6700\u540E\u6D3B\u52A8\u65F6\u95F4\u7B5B\u9009",
     "filter-by-time-range": "\u6309\u65F6\u95F4\u8303\u56F4\u7B5B\u9009",
+    "hide-scripted-sessions": "\u9690\u85CF\u811A\u672C\u8C03\u7528\u7684\u4F1A\u8BDD",
+    "hide-scripted-sessions-tooltip": "\u9690\u85CF\u7531\u5DE5\u5177\u542F\u52A8\u7684 exec \u548C\u5B50\u4EE3\u7406\u4F1A\u8BDD\u3002",
     "full-text-global": "\u5168\u6587\u641C\u7D22\u8303\u56F4\u4E3A\u5168\u5C40",
     "full-text-scoped": "\u5168\u6587\u641C\u7D22\u4F7F\u7528\u6240\u9009\u76EE\u5F55\u6811\u8303\u56F4",
     "global": "\u5168\u5C40",
@@ -469,8 +539,10 @@ var dictionaries = {
     "messages": "\u6D88\u606F\u6570",
     "message-count-one": "{n} \u6761\u6D88\u606F",
     "message-count-other": "{n} \u6761\u6D88\u606F",
+    "message-count-unknown": "\u6D88\u606F\u6570\u4E0D\u53EF\u7528",
     "navigate-parent": "\u524D\u5F80\u4E0A\u7EA7\u76EE\u5F55",
     "no-branch": "\u65E0\u5206\u652F",
+    "no-branch-matches": "\u65E0\u5339\u914D\u5206\u652F",
     "no-content": "\uFF08\u65E0\u5185\u5BB9\uFF09",
     "no-full-text-matches": "\u6B64\u641C\u7D22\u8303\u56F4\u5185\u6CA1\u6709\u5168\u6587\u5339\u914D\u9879\u3002",
     "no-git-branch": "\u65E0 Git \u5206\u652F",
@@ -493,9 +565,9 @@ var dictionaries = {
     "picker-no-subdirs": "\u6CA1\u6709\u5B50\u76EE\u5F55",
     "picker-path-missing": "\u76EE\u5F55\u4E0D\u5B58\u5728\uFF1A{path}",
     "picker-path-not-directory": "\u8DEF\u5F84\u4E0D\u662F\u76EE\u5F55\uFF1A{path}",
-    "picker-select-current": "\u9009\u62E9\u201C{name}\u201D",
+    "picker-select-current": '\u9009\u62E9"{name}"\u4F5C\u4E3A\u5DE5\u4F5C\u533A\u6811\u8D77\u59CB\u76EE\u5F55',
     "picker-title": "\u9009\u62E9\u76EE\u5F55\u6811\u6839\u76EE\u5F55",
-    "picker-use-manual-path": "\u4F7F\u7528\u8F93\u5165\u7684\u8DEF\u5F84",
+    "picker-use-manual-path": "\u9009\u62E9\u8F93\u5165\u7684\u8DEF\u5F84\u4F5C\u4E3A\u5DE5\u4F5C\u533A\u6811\u8D77\u59CB\u76EE\u5F55",
     "empty": "\uFF08\u7A7A\uFF09",
     "relative-days": "{n}\u5929",
     "relative-hours": "{n}\u5C0F\u65F6",
@@ -541,6 +613,8 @@ var dictionaries = {
     "time-24h": "24 \u5C0F\u65F6",
     "time-30d": "30 \u5929",
     "time-7d": "7 \u5929",
+    "time-older-15d": "\u65E9\u4E8E 15 \u5929",
+    "time-older-30d": "\u65E9\u4E8E 30 \u5929",
     "time-span-unknown": "\u65F6\u95F4\u8303\u56F4\u672A\u77E5",
     "toggle-global-search": "\u5207\u6362\u5168\u5C40\u5168\u6587\u641C\u7D22",
     "transcript-empty": "\u6B64\u4F1A\u8BDD\u6CA1\u6709\u5B8C\u6574\u7684\u5BF9\u8BDD\u6D88\u606F\u3002",
@@ -596,11 +670,13 @@ function resolveLocale(setting, documentLanguage = "") {
 // src/ui.ts
 var STORAGE_KEYS = {
   locale: "locale",
+  activeAgent: "activeAgent",
   fontScale: "fontScale",
   themeFollowHost: "themeFollowHost",
   paneWidths: "paneWidths",
   treeRoot: "treeRoot",
   treeExpandedPaths: "treeExpandedPaths",
+  hideScriptedSessions: "hideScriptedSessions",
   sessionListSort: "sessionListSort",
   pageSize: "pageSize"
 };
@@ -615,6 +691,33 @@ var TRANSCRIPT_BATCH_SIZE = 50;
 var SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var FONT_SCALE_MULTIPLIERS = { 1: 0.85, 2: 0.93, 3: 1, 4: 1.1, 5: 1.25 };
 var PAGE_SIZES = [20, 50, 100];
+var AGENT_AGNOSTIC = /* @__PURE__ */ new Set(["list-dirs", "check-dir", "agents"]);
+var DEFAULT_AGENT = "claude-code";
+var UNAVAILABLE_CAPABILITIES = {
+  archive: false,
+  rename: false,
+  delete: false,
+  deleteRequiresArchived: true,
+  nativeIndex: true,
+  tokenStats: false,
+  originFilter: false
+};
+var LEGACY_CAPABILITIES = {
+  archive: true,
+  // No rename write path exists.
+  rename: false,
+  delete: true,
+  deleteRequiresArchived: true,
+  nativeIndex: false,
+  tokenStats: false,
+  originFilter: false
+};
+var DEFAULT_RESUME_ARGV_BY_AGENT = /* @__PURE__ */ new Map([
+  ["claude-code", ["claude", "--resume"]],
+  ["codex", ["codex", "resume"]]
+]);
+var LEGACY_RESUME = { argv: ["claude", "--resume"] };
+var RESUME_ARG_TOKEN_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
 function shQuote(value) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -823,9 +926,14 @@ function sortSessions(items, setting) {
     let comparison = 0;
     if (setting.field === "idle") comparison = timestampValue(right.lastActiveAt) - timestampValue(left.lastActiveAt);
     else if (setting.field === "created") comparison = timestampValue(left.createdAt) - timestampValue(right.createdAt);
-    else comparison = left.messageCount - right.messageCount;
+    else comparison = (left.messageCount ?? 0) - (right.messageCount ?? 0);
     return comparison * direction || left.title.localeCompare(right.title) || left.id.localeCompare(right.id);
   });
+}
+function filterBranchOptions(options, query) {
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  if (!normalizedQuery) return options;
+  return options.filter((option) => option.toLocaleLowerCase().includes(normalizedQuery));
 }
 function filterSessions(items, filters, now = Date.now()) {
   const query = filters.query.trim().toLocaleLowerCase();
@@ -834,12 +942,18 @@ function filterSessions(items, filters, now = Date.now()) {
     "7d": 7 * 24 * 60 * 6e4,
     "30d": 30 * 24 * 60 * 6e4
   };
+  const staleThresholds = {
+    "older-15d": 15 * 24 * 60 * 6e4,
+    "older-30d": 30 * 24 * 60 * 6e4
+  };
   return items.filter((session) => {
     if (session.partition !== filters.partition) return false;
     const sessionPath = normalizePath(session.rootPath);
     const inScope = filters.scopeMode === "exact" ? sessionPath === normalizePath(filters.scopePath) : isPathWithin(filters.scopePath, sessionPath);
     if (!inScope) return false;
-    if (filters.timeRange !== "all" && now - timestampValue(session.lastActiveAt) > ranges[filters.timeRange]) return false;
+    const idleDuration = now - timestampValue(session.lastActiveAt);
+    if (filters.timeRange in ranges && idleDuration > ranges[filters.timeRange]) return false;
+    if (filters.timeRange in staleThresholds && idleDuration < staleThresholds[filters.timeRange]) return false;
     if (!dateRangeMatches(session.createdAt, { from: filters.createdFrom || "", to: filters.createdTo || "" })) return false;
     if (!dateRangeMatches(session.lastActiveAt, { from: filters.lastActiveFrom || "", to: filters.lastActiveTo || "" })) return false;
     if (filters.branch && (session.gitBranch || "") !== filters.branch) return false;
@@ -986,6 +1100,8 @@ function activate(ctx) {
   const localeRef = ctx.ref(resolveLocale("auto", documentLanguage));
   const { t, locale } = initI18n(localeRef);
   const fontScale = ctx.ref(3);
+  const activeAgent = ctx.ref(DEFAULT_AGENT);
+  const agents = ctx.ref([]);
   const themeFollowHost = ctx.ref(true);
   const settingsOpen = ctx.ref(false);
   const sessions = ctx.ref([]);
@@ -997,6 +1113,7 @@ function activate(ctx) {
   const searchOverlay = ctx.ref(null);
   const transientHighlightPath = ctx.ref(null);
   const expandedPaths = ctx.ref(/* @__PURE__ */ new Set());
+  const hideScriptedSessions = ctx.ref(false);
   const showRootPicker = ctx.ref(false);
   const pickerCurrentDir = ctx.ref("/");
   const pickerEntries = ctx.ref([]);
@@ -1010,6 +1127,9 @@ function activate(ctx) {
   const sortSettings = ctx.ref(normalizePartitionSortSettings(null));
   const timeRange = ctx.ref("all");
   const branchFilter = ctx.ref("");
+  const branchPickerOpen = ctx.ref(false);
+  const branchPickerQuery = ctx.ref("");
+  const branchSearchRef = ctx.ref(null);
   const createdRange = ctx.ref({ from: "", to: "" });
   const lastActiveRange = ctx.ref({ from: "", to: "" });
   const filtersOpen = ctx.ref(false);
@@ -1049,23 +1169,43 @@ function activate(ctx) {
   let mutationInFlight = false;
   let hasMounted = false;
   let warnedPersistFailure = false;
-  ctx.commands.register("cc-session-browser.open", () => {
+  function runAgent(args, opts) {
+    if (AGENT_AGNOSTIC.has(args[0])) return ctx.exec.run(args, opts);
+    return ctx.exec.run([...args, "--agent", activeAgent.value], opts);
+  }
+  ctx.commands.register("session-browser.open", () => {
     ctx.open();
   });
-  ctx.commands.register("cc-session-browser.search", () => {
+  ctx.commands.register("session-browser.search", () => {
     ctx.open();
     if (compactMode.value) compactView.value = "list";
     settingsOpen.value = false;
     filtersOpen.value = false;
     scheduleMountTimeout(() => searchInputRef.value?.focus(), 0);
   });
-  const tree = ctx.computed(() => deriveSessionPathTree(sessions.value, visibleRoot.value));
+  const activeDescriptor = ctx.computed(() => agents.value.find((agent) => agent.id === activeAgent.value) || null);
+  const activeCapabilities = ctx.computed(() => activeDescriptor.value?.capabilities || UNAVAILABLE_CAPABILITIES);
+  const activeResumeArgv = ctx.computed(() => activeDescriptor.value?.resume.argv || DEFAULT_RESUME_ARGV_BY_AGENT.get(activeAgent.value));
+  const originFilteredSessions = ctx.computed(() => sessions.value.filter((session) => isSessionVisibleByOrigin(session)));
+  const tree = ctx.computed(() => deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value));
   function persist(key, value) {
     ctx.storage.set(key, value).catch((caught) => {
       if (warnedPersistFailure) return;
       warnedPersistFailure = true;
-      console.warn("[cc-session-browser] could not persist plugin setting", caught);
+      console.warn("[session-browser] could not persist plugin setting", caught);
     });
+  }
+  function perAgentStorageKey(key, agent = activeAgent.value) {
+    return `${key}:${agent}`;
+  }
+  async function readPerAgentTreeSetting(key, agent) {
+    const value = await ctx.storage.get(perAgentStorageKey(key, agent));
+    if (value !== void 0 || agent !== DEFAULT_AGENT) return value;
+    return ctx.storage.get(key);
+  }
+  function isSessionVisibleByOrigin(session) {
+    if (!activeCapabilities.value.originFilter || !hideScriptedSessions.value) return true;
+    return session.origin !== "exec" && session.origin !== "subagent";
   }
   function createMountContext() {
     return {
@@ -1119,7 +1259,17 @@ function activate(ctx) {
     return handle;
   }
   function persistExpandedPaths() {
-    persist(STORAGE_KEYS.treeExpandedPaths, Array.from(expandedPaths.value));
+    persist(perAgentStorageKey(STORAGE_KEYS.treeExpandedPaths), Array.from(expandedPaths.value));
+  }
+  function setHideScriptedSessions(value) {
+    hideScriptedSessions.value = value;
+    persist(perAgentStorageKey(STORAGE_KEYS.hideScriptedSessions), value);
+    clearSearchOverlay();
+    if (selectedSession.value && !isSessionVisibleByOrigin(selectedSession.value)) {
+      committedSelection.value = { ...committedSelection.value, sessionId: null };
+      resetTranscript();
+    }
+    applyFilterChange();
   }
   function setLocaleSetting(value) {
     if (activeMount) activeMount.displayGeneration++;
@@ -1223,6 +1373,191 @@ function activate(ctx) {
   function cliError(message) {
     return t("cli-error", { msg: message });
   }
+  function agentLabel(agent) {
+    return t(`agent-${agent.id}`);
+  }
+  function parseAgentDescriptors(stdout) {
+    const parsed = JSON.parse(stdout);
+    if (!Array.isArray(parsed)) throw new Error(t("agent-discovery-invalid"));
+    return parsed.map((value) => {
+      const caps = value?.capabilities;
+      const resumeArgv = value?.resume?.argv;
+      const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id);
+      const validCapabilities = caps && ["archive", "rename", "delete", "deleteRequiresArchived", "nativeIndex", "tokenStats", "originFilter"].every((key) => typeof caps[key] === "boolean");
+      if (!value || typeof value.id !== "string" || typeof value.available !== "boolean" || !validCapabilities) {
+        throw new Error(t("agent-discovery-invalid"));
+      }
+      const validResumeArgv = Array.isArray(resumeArgv) && resumeArgv.length > 0 && resumeArgv.every((arg) => typeof arg === "string" && RESUME_ARG_TOKEN_RE.test(arg));
+      if (!validResumeArgv && !defaultResumeArgv) throw new Error(t("agent-discovery-invalid"));
+      return {
+        id: value.id,
+        available: value.available,
+        degraded: value.degraded === true,
+        unavailableReason: typeof value.unavailableReason === "string" ? value.unavailableReason : void 0,
+        degradedReason: typeof value.degradedReason === "string" ? value.degradedReason : void 0,
+        capabilities: caps,
+        resume: {
+          argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv]
+        }
+      };
+    });
+  }
+  function legacyAgentDescriptor() {
+    return {
+      id: DEFAULT_AGENT,
+      available: true,
+      degraded: false,
+      capabilities: LEGACY_CAPABILITIES,
+      resume: { argv: [...LEGACY_RESUME.argv] }
+    };
+  }
+  function agentTooltip(agent) {
+    if (!agent.available) return agent.unavailableReason || t("agent-unavailable-tooltip");
+    if (agent.degraded) return agent.degradedReason || t("agent-degraded-tooltip");
+    return t("agent-switcher");
+  }
+  function notifyDegradedAgent(agent) {
+    if (!agent.degraded) return;
+    ctx.ui.notify(
+      t("agent-degraded-notice", { agent: agentLabel(agent), reason: agent.degradedReason || t("agent-degraded-tooltip") }),
+      "warn",
+      t("agent-degraded-title")
+    );
+  }
+  function resetForAgentSwitch() {
+    if (activeMount) {
+      activeMount.indexGeneration++;
+      activeMount.searchGeneration++;
+      activeMount.treeGeneration++;
+      activeMount.pickerRequestSeq++;
+      activeMount.pickerValidationSeq++;
+    }
+    clearSearchOverlay(true);
+    resetTranscript();
+    sessions.value = [];
+    committedSelection.value = { path: "/", mode: "subtree", sessionId: null };
+    activePartition.value = "active";
+    page.value = 1;
+    selection.value = selectionReducer(selection.value, { type: "clear-partition" });
+    selectMode.value = false;
+    timeRange.value = "all";
+    branchFilter.value = "";
+    branchPickerOpen.value = false;
+    branchPickerQuery.value = "";
+    createdRange.value = { from: "", to: "" };
+    lastActiveRange.value = { from: "", to: "" };
+    globalSearch.value = false;
+    filtersOpen.value = false;
+    settingsOpen.value = false;
+    showRootPicker.value = false;
+    pickerLoading.value = false;
+    bulkResult.value = null;
+    bulkRefreshFailed.value = false;
+    compactView.value = "list";
+  }
+  async function switchAgent(nextAgent) {
+    const descriptor = agents.value.find((agent) => agent.id === nextAgent);
+    if (!descriptor?.available || nextAgent === activeAgent.value || loading.value || bulkRunning.value || mutationInFlight) return;
+    activeAgent.value = nextAgent;
+    persist(STORAGE_KEYS.activeAgent, nextAgent);
+    resetForAgentSwitch();
+    const loaded = await loadIndex();
+    if (!loaded) return;
+    if (sessions.value.length === 0) {
+      ctx.ui.notify(t("agent-empty-notice", { agent: agentLabel(descriptor) }), "warn", t("agent-empty-title"));
+    }
+    notifyDegradedAgent(descriptor);
+  }
+  async function initializeAgents(preserveState) {
+    const mount = activeMount;
+    if (!isActiveMount(mount)) return;
+    loading.value = true;
+    clearError();
+    try {
+      const [result, storedAgent] = await Promise.all([
+        runAgent(["agents"], { timeout: 1e4 }),
+        ctx.storage.get(STORAGE_KEYS.activeAgent).catch(() => null)
+      ]);
+      if (!isActiveMount(mount)) return;
+      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t("agent-discovery-failed")).message);
+      let discovered;
+      try {
+        discovered = parseAgentDescriptors(result.stdout);
+      } catch (caught) {
+        let legacyResponse = false;
+        try {
+          const parsed = JSON.parse(result.stdout);
+          legacyResponse = Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed) && "outcome" in parsed);
+        } catch {
+        }
+        if (!legacyResponse) throw caught;
+        discovered = [];
+      }
+      if (discovered.length === 0) discovered = [legacyAgentDescriptor()];
+      agents.value = discovered;
+      const requestedId = typeof storedAgent === "string" ? storedAgent : DEFAULT_AGENT;
+      const requested = discovered.find((agent) => agent.id === requestedId);
+      const available = discovered.filter((agent) => agent.available);
+      if (available.length === 0) {
+        activeAgent.value = requested?.id || discovered[0].id;
+        loading.value = false;
+        showError(t("agent-none-available"));
+        return;
+      }
+      const candidates = requested?.available ? [requested, ...available.filter((agent) => agent.id !== requested.id)] : available;
+      const previousAgent = activeAgent.value;
+      let chosen = null;
+      let requestedLoaded = false;
+      for (const candidate of candidates) {
+        const switchedAgent = candidate.id !== activeAgent.value;
+        if (switchedAgent) resetForAgentSwitch();
+        activeAgent.value = candidate.id;
+        const preserveCandidateState = preserveState && !switchedAgent && candidate.id === previousAgent && candidate.id === requestedId;
+        const loaded = await loadIndex(preserveCandidateState);
+        if (!isActiveMount(mount)) return;
+        if (candidate.id === requestedId) requestedLoaded = loaded;
+        if (loaded && sessions.value.length > 0) {
+          chosen = candidate;
+          break;
+        }
+      }
+      if (!chosen) {
+        const emptyAgent = candidates[0];
+        if (activeAgent.value !== emptyAgent.id) {
+          resetForAgentSwitch();
+          activeAgent.value = emptyAgent.id;
+          await loadIndex();
+          if (!isActiveMount(mount)) return;
+        } else if (requestedLoaded && sessions.value.length === 0) {
+          clearSearchOverlay(true);
+          resetTranscript();
+          page.value = 1;
+          selection.value = selectionReducer(selection.value, { type: "clear-partition" });
+          selectMode.value = false;
+        }
+        if (emptyAgent.id !== requestedId) persist(STORAGE_KEYS.activeAgent, emptyAgent.id);
+        ctx.ui.notify(t("agent-no-sessions"), "warn", t("agent-empty-title"));
+        notifyDegradedAgent(emptyAgent);
+        return;
+      }
+      if (chosen.id !== requestedId) {
+        persist(STORAGE_KEYS.activeAgent, chosen.id);
+        const requestedName = requested ? agentLabel(requested) : String(requestedId);
+        const reason = !requested ? t("agent-not-registered") : !requested.available ? requested.unavailableReason || t("agent-unavailable-tooltip") : requestedLoaded ? t("agent-no-sessions-short") : t("agent-load-failed-short");
+        ctx.ui.notify(
+          t("agent-fallback-notice", { agent: requestedName, fallback: agentLabel(chosen), reason }),
+          "warn",
+          t("agent-fallback-title")
+        );
+      }
+      notifyDegradedAgent(chosen);
+    } catch (caught) {
+      if (isActiveMount(mount)) {
+        loading.value = false;
+        showError(cliError(caught?.message || t("agent-discovery-failed")));
+      }
+    }
+  }
   function parseCliFailure(stderr, fallback) {
     try {
       const parsed = JSON.parse(stderr.trim());
@@ -1252,8 +1587,9 @@ function activate(ctx) {
     throw mutationError(result);
   }
   async function refreshCacheIfNeeded(result) {
-    if (result.cacheRefreshed) return;
-    const rebuilt = await ctx.exec.run(["build-index", "--refresh"], { timeout: 3e4 });
+    const caps = activeCapabilities.value;
+    if (result.cacheRefreshed || caps.nativeIndex) return;
+    const rebuilt = await runAgent(["build-index", "--refresh"], { timeout: 3e4 });
     if (rebuilt.code !== 0) throw new Error(parseCliFailure(rebuilt.stderr, "cache rebuild failed").message);
     try {
       if (!Array.isArray(JSON.parse(rebuilt.stdout))) throw new Error("cache rebuild returned invalid JSON");
@@ -1311,7 +1647,7 @@ function activate(ctx) {
     page.value = clampPage(page.value, sessionsForList(activePartition.value).length, pageSize.value);
   }
   function logMutation(action, session, cacheRefreshed) {
-    console.info(`[cc-session-browser] ${action} session`, { id: session.id, cacheRefreshed });
+    console.info(`[session-browser] ${action} session`, { id: session.id, cacheRefreshed });
     const localizedAction = t(`action-${action}`);
     ctx.ui.notify(t("notify-paths-one", {
       action: localizedAction,
@@ -1363,7 +1699,7 @@ function activate(ctx) {
     expandedTools.value = /* @__PURE__ */ new Set();
     copiedSessionId.value = false;
     try {
-      const result = await ctx.exec.run(["read-session", session.attributionKey, session.id], { timeout: 3e4 });
+      const result = await runAgent(["read-session", session.attributionKey, session.id], { timeout: 3e4 });
       if (!isActiveMount(mount) || token !== mount.transcriptLoadToken) return;
       if (result.code !== 0) throw new Error(result.stderr || "read-session failed");
       const parsed = JSON.parse(result.stdout);
@@ -1411,7 +1747,7 @@ function activate(ctx) {
       showError(t("error-invalid-session-id"));
       return false;
     }
-    const command = `cd -- ${shQuote(session.rootPath)} && claude --resume ${session.id}`;
+    const command = `cd -- ${shQuote(session.rootPath)} && ${activeResumeArgv.value.join(" ")} ${session.id}`;
     try {
       await navigator.clipboard.writeText(command);
       if (!isCurrent()) return false;
@@ -1437,9 +1773,11 @@ function activate(ctx) {
     }
   }
   async function restoreSessionCore(session, isCurrent) {
+    const caps = activeCapabilities.value;
+    if (!caps.archive) return null;
     clearError();
     try {
-      const result = await ctx.exec.run(["restore", session.attributionKey, session.id], { timeout: 3e4 });
+      const result = await runAgent(["restore", session.attributionKey, session.id], { timeout: 3e4 });
       if (!isCurrent()) return null;
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, "restore failed").message);
       const mutation = await requireMutationSuccess(parseMutationResult(result.stdout));
@@ -1459,19 +1797,21 @@ function activate(ctx) {
   }
   async function archiveSession(session) {
     await coordinateMutation(void 0, async (isCurrent) => {
+      const caps = activeCapabilities.value;
+      if (!caps.archive) return;
       const title = resolveSessionTitle(session) || t("untitled-session");
       const accepted = await ctx.ui.confirm(t("archive-session-confirm", { title }));
       if (!isCurrent() || !accepted) return;
       clearError();
       try {
-        let result = await ctx.exec.run(["archive", session.attributionKey, session.id], { timeout: 3e4 });
+        let result = await runAgent(["archive", session.attributionKey, session.id], { timeout: 3e4 });
         if (!isCurrent()) return;
         if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, "archive failed").message);
         let mutation = parseMutationResult(result.stdout);
         if (mutation.outcome === "failure" && (mutation.reason.error === "possibly-live" || mutation.reason.error === "session-live")) {
           const forceAccepted = await ctx.ui.confirm(t("archive-session-force-confirm", { title }));
           if (!isCurrent() || !forceAccepted) return;
-          result = await ctx.exec.run(["archive", session.attributionKey, session.id, "--force"], { timeout: 3e4 });
+          result = await runAgent(["archive", session.attributionKey, session.id, "--force"], { timeout: 3e4 });
           if (!isCurrent()) return;
           if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, "forced archive failed").message);
           mutation = parseMutationResult(result.stdout);
@@ -1487,14 +1827,19 @@ function activate(ctx) {
       }
     });
   }
-  async function deleteArchivedSession(session) {
+  async function deleteSession(session) {
     await coordinateMutation(void 0, async (isCurrent) => {
+      const caps = activeCapabilities.value;
+      if (!caps.delete || caps.deleteRequiresArchived && session.partition !== "archive") return;
       const title = resolveSessionTitle(session) || t("untitled-session");
-      const accepted = await ctx.ui.confirm(t("delete-session-confirm", { title }));
+      const accepted = await ctx.ui.confirm(t(
+        caps.deleteRequiresArchived ? "delete-session-confirm" : "delete-session-direct-confirm",
+        { title }
+      ));
       if (!isCurrent() || !accepted) return;
       clearError();
       try {
-        const result = await ctx.exec.run(["delete-archived", session.attributionKey, session.id], { timeout: 3e4 });
+        const result = await runAgent(["delete-archived", session.attributionKey, session.id], { timeout: 3e4 });
         if (!isCurrent()) return;
         if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, "delete-archived failed").message);
         const mutation = await requireMutationSuccess(parseMutationResult(result.stdout));
@@ -1519,7 +1864,7 @@ function activate(ctx) {
       return;
     }
     try {
-      const result = await ctx.exec.run(["check-dir", resumable.rootPath], { timeout: 1e4 });
+      const result = await runAgent(["check-dir", resumable.rootPath], { timeout: 1e4 });
       if (!isCurrent()) return;
       if (result.code !== 0) throw new Error(result.stderr || "check-dir failed");
       const checked = JSON.parse(result.stdout);
@@ -1560,7 +1905,7 @@ function activate(ctx) {
     try {
       await terminal.createTerminalTab({
         cwd: resumable.rootPath,
-        argv: ["claude", "--resume", resumable.id],
+        argv: [...activeResumeArgv.value, resumable.id],
         title: resolveSessionTitle(resumable).slice(0, 24)
       });
     } catch {
@@ -1589,12 +1934,26 @@ function activate(ctx) {
     loading.value = true;
     clearError();
     try {
-      const result = await ctx.exec.run(refresh ? ["build-index", "--refresh"] : ["build-index"], { timeout: 3e4 });
+      const caps = activeCapabilities.value;
+      const result = await runAgent(refresh && !caps.nativeIndex ? ["build-index", "--refresh"] : ["build-index"], { timeout: 3e4 });
       if (!isCurrent()) return false;
       if (result.code !== 0) throw new Error(result.stderr || "build-index failed");
       const parsed = JSON.parse(result.stdout);
       if (!Array.isArray(parsed)) throw new Error("build-index returned invalid JSON");
       sessions.value = parsed;
+      const requestAgent = activeAgent.value;
+      if (caps.originFilter) {
+        try {
+          hideScriptedSessions.value = await ctx.storage.get(
+            perAgentStorageKey(STORAGE_KEYS.hideScriptedSessions, requestAgent)
+          ) === true;
+        } catch {
+          hideScriptedSessions.value = false;
+        }
+      } else {
+        hideScriptedSessions.value = false;
+      }
+      if (!isCurrent()) return false;
       const presentKeys = sessionsForList(activePartition.value).map(sessionKey);
       selection.value = selectionReducer(selection.value, { type: "intersect", keys: presentKeys });
       if (preserveState) {
@@ -1608,23 +1967,25 @@ function activate(ctx) {
       if (!isCurrentTree()) return false;
       let savedRoot = null;
       try {
-        savedRoot = normalizeStoredTreeRoot(await ctx.storage.get(STORAGE_KEYS.treeRoot));
+        savedRoot = normalizeStoredTreeRoot(await readPerAgentTreeSetting(STORAGE_KEYS.treeRoot, requestAgent));
       } catch {
       }
       if (!isCurrentTree()) return false;
-      visibleRoot.value = savedRoot || deepestCommonAncestor(sessions.value.map((session) => session.rootPath));
-      if (!savedRoot) persist(STORAGE_KEYS.treeRoot, visibleRoot.value);
+      visibleRoot.value = savedRoot || deepestCommonAncestor(originFilteredSessions.value.map((session) => session.rootPath));
+      persist(perAgentStorageKey(STORAGE_KEYS.treeRoot, requestAgent), visibleRoot.value);
       committedSelection.value = { path: visibleRoot.value, mode: "subtree", sessionId: null };
       let savedExpanded = null;
       try {
-        savedExpanded = normalizeStoredExpandedPaths(await ctx.storage.get(STORAGE_KEYS.treeExpandedPaths));
+        savedExpanded = normalizeStoredExpandedPaths(
+          await readPerAgentTreeSetting(STORAGE_KEYS.treeExpandedPaths, requestAgent)
+        );
       } catch {
       }
       if (!isCurrentTree()) return false;
       if (savedExpanded) {
         expandedPaths.value = savedExpanded;
       } else {
-        expandedPaths.value = collectTreePaths(deriveSessionPathTree(sessions.value, visibleRoot.value));
+        expandedPaths.value = collectTreePaths(deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value));
         persistExpandedPaths();
       }
       expandedPaths.value.add(visibleRoot.value);
@@ -1694,7 +2055,7 @@ function activate(ctx) {
     applyFilterChange();
     resetTranscript();
     expandedPaths.value = new Set(expandedPaths.value).add(visibleRoot.value);
-    persist(STORAGE_KEYS.treeRoot, visibleRoot.value);
+    persist(perAgentStorageKey(STORAGE_KEYS.treeRoot), visibleRoot.value);
     persistExpandedPaths();
   }
   async function loadPickerDirs(dir) {
@@ -1704,7 +2065,7 @@ function activate(ctx) {
     pickerLoading.value = true;
     pickerError.value = null;
     try {
-      const result = await ctx.exec.run(["list-dirs", dir], { timeout: 1e4 });
+      const result = await runAgent(["list-dirs", dir], { timeout: 1e4 });
       if (!isActiveMount(mount) || requestSeq !== mount.pickerRequestSeq) return;
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, "list-dirs failed").message);
       const parsed = JSON.parse(result.stdout);
@@ -1758,7 +2119,7 @@ function activate(ctx) {
       return;
     }
     try {
-      const result = await ctx.exec.run(["check-dir", nextRoot], { timeout: 1e4 });
+      const result = await runAgent(["check-dir", nextRoot], { timeout: 1e4 });
       if (!isCurrent()) return;
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, "check-dir failed").message);
       const checked = JSON.parse(result.stdout);
@@ -1828,7 +2189,7 @@ function activate(ctx) {
     persist(STORAGE_KEYS.sessionListSort, sortSettings.value);
   }
   function scopedPartitionSessions(partition) {
-    return filterSessions(sessions.value, {
+    return filterSessions(originFilteredSessions.value, {
       partition,
       scopePath: committedSelection.value.path,
       scopeMode: committedSelection.value.mode,
@@ -1838,7 +2199,9 @@ function activate(ctx) {
     });
   }
   function sessionsForList(partition) {
-    return sortSessions(filterSessions(sessions.value, {
+    const setting = sortSettings.value[partition];
+    const effectiveSetting = setting.field === "msgcount" && !messageCountsAvailable() ? { ...setting, field: "idle" } : setting;
+    return sortSessions(filterSessions(originFilteredSessions.value, {
       partition,
       scopePath: committedSelection.value.path,
       scopeMode: committedSelection.value.mode,
@@ -1849,7 +2212,10 @@ function activate(ctx) {
       createdTo: createdRange.value.to,
       lastActiveFrom: lastActiveRange.value.from,
       lastActiveTo: lastActiveRange.value.to
-    }), sortSettings.value[partition]);
+    }), effectiveSetting);
+  }
+  function messageCountsAvailable() {
+    return originFilteredSessions.value.some((session) => session.messageCount !== void 0);
   }
   function branchOptions(partition) {
     return Array.from(new Set(scopedPartitionSessions(partition).map((session) => session.gitBranch || "").filter(Boolean))).sort((left, right) => left.localeCompare(right));
@@ -1918,7 +2284,7 @@ function activate(ctx) {
     try {
       const args = ["search", query];
       if (!global) args.push("--scope", scopePath);
-      const result = await ctx.exec.run(args, { timeout: 3e4 });
+      const result = await runAgent(args, { timeout: 3e4 });
       if (!isCurrent()) return;
       if (result.code !== 0) throw new Error(result.stderr || "search failed");
       const parsed = JSON.parse(result.stdout);
@@ -1926,7 +2292,7 @@ function activate(ctx) {
       searchOverlay.value = {
         query,
         scopePath: global ? null : scopePath,
-        results: parsed,
+        results: parsed.filter((result2) => isSessionVisibleByOrigin(result2.session)),
         selectedSessionId: null
       };
       selection.value = selectionReducer(selection.value, { type: "clear-anchor" });
@@ -1988,6 +2354,9 @@ function activate(ctx) {
   }
   async function executeBulk(action) {
     await coordinateMutation(void 0, async (isCurrent) => {
+      const caps = activeCapabilities.value;
+      if ((action === "archive" || action === "restore") && !caps.archive) return;
+      if (action === "delete" && (!caps.delete || caps.deleteRequiresArchived && activePartition.value !== "archive")) return;
       const confirmationItems = selectedItems();
       if (!confirmationItems.length) return;
       const expectedSkipped = expectedBulkSkips(action, confirmationItems);
@@ -2004,7 +2373,7 @@ function activate(ctx) {
         const outcome = await runBulkSerial({
           action,
           items,
-          run: (args) => ctx.exec.run(args, { timeout: 3e4 }),
+          run: (args) => runAgent(args, { timeout: 3e4 }),
           isCancelled: () => !isCurrent() || bulkCancelRequested.value,
           onProgress: (completed2, total, session) => {
             if (isCurrent()) bulkProgress.value = { completed: completed2, total, title: resolveSessionTitle(session) || t("untitled-session") };
@@ -2108,7 +2477,7 @@ function activate(ctx) {
             class: "ccm-icon-btn",
             title: t("navigate-parent"),
             "aria-label": t("navigate-parent"),
-            disabled: bulkRunning.value || visibleRoot.value === "/",
+            disabled: loading.value || bulkRunning.value || visibleRoot.value === "/",
             onClick: () => setVisibleRoot(parentPath(visibleRoot.value))
           }, [IconArrowLeft(15)]),
           h("button", {
@@ -2128,9 +2497,16 @@ function activate(ctx) {
           }, [committedSelection.value.mode === "subtree" ? IconFolder(15) : IconFileText(15)]),
           h("button", {
             class: "ccm-icon-btn",
+            title: t("use-selected-folder-as-tree-root"),
+            "aria-label": t("use-selected-folder-as-tree-root"),
+            disabled: loading.value || bulkRunning.value || !committedSelection.value.path || committedSelection.value.path === visibleRoot.value,
+            onClick: () => setVisibleRoot(committedSelection.value.path)
+          }, [IconFolderDown(15)]),
+          h("button", {
+            class: "ccm-icon-btn",
             title: t("change-tree-root"),
             "aria-label": t("change-tree-root"),
-            disabled: bulkRunning.value,
+            disabled: loading.value || bulkRunning.value,
             ref: (element) => {
               pickerTriggerRef.value = element;
             },
@@ -2145,13 +2521,18 @@ function activate(ctx) {
     ]);
   }
   function renderCardActions(session) {
-    const actions = session.partition === "active" ? [
-      { label: t("resume-session"), icon: IconPlay, action: "resume" },
-      { label: t("archive-session"), icon: IconArchive, action: "archive" }
-    ] : [
-      { label: t("restore-session"), icon: IconArchiveRestore, action: "restore" },
-      { label: t("delete-archived-session"), icon: IconTrash2, action: "delete" }
-    ];
+    const caps = activeCapabilities.value;
+    const actions = [];
+    if (session.partition === "active") {
+      actions.push({ label: t("resume-session"), icon: IconTerminal, action: "resume" });
+      if (caps.archive) actions.push({ label: t("archive-session"), icon: IconArchive, action: "archive" });
+      if (caps.delete && !caps.deleteRequiresArchived) {
+        actions.push({ label: t("delete-session"), icon: IconTrash2, action: "delete" });
+      }
+    } else {
+      if (caps.archive) actions.push({ label: t("restore-session"), icon: IconArchiveRestore, action: "restore" });
+      if (caps.delete) actions.push({ label: t("delete-archived-session"), icon: IconTrash2, action: "delete" });
+    }
     return h("div", { class: "ccm-browser-session-actions" }, actions.map(({ label, icon, action }) => h("button", {
       class: "ccm-icon-btn ccm-browser-card-action",
       title: label,
@@ -2163,7 +2544,7 @@ function activate(ctx) {
         if (action === "resume") void resumeSession(session);
         else if (action === "archive") void archiveSession(session);
         else if (action === "restore") void restoreSession(session);
-        else void deleteArchivedSession(session);
+        else void deleteSession(session);
       }
     }, [icon(14)])));
   }
@@ -2229,8 +2610,8 @@ function activate(ctx) {
       h("div", { class: "ccm-browser-session-footer" }, [
         h("span", {
           class: "ccm-browser-session-stat",
-          title: t(session.messageCount === 1 ? "message-count-one" : "message-count-other", { n: session.messageCount })
-        }, [IconHash(12), String(session.messageCount)]),
+          title: session.messageCount === void 0 ? t("message-count-unknown") : t(session.messageCount === 1 ? "message-count-one" : "message-count-other", { n: session.messageCount })
+        }, [IconHash(12), session.messageCount === void 0 ? "\u2014" : String(session.messageCount)]),
         h("span", { class: "ccm-browser-session-branch", title: session.gitBranch || t("no-git-branch") }, session.gitBranch || t("no-branch")),
         renderCardActions(session)
       ])
@@ -2267,7 +2648,10 @@ function activate(ctx) {
       ]),
       h("div", { class: "ccm-browser-search-match" }, result.match),
       h("div", { class: "ccm-browser-session-footer" }, [
-        h("span", { class: "ccm-browser-session-stat" }, [IconHash(12), String(session.messageCount)]),
+        h("span", {
+          class: "ccm-browser-session-stat",
+          title: session.messageCount === void 0 ? t("message-count-unknown") : t(session.messageCount === 1 ? "message-count-one" : "message-count-other", { n: session.messageCount })
+        }, [IconHash(12), session.messageCount === void 0 ? "\u2014" : String(session.messageCount)]),
         h("span", { class: "ccm-browser-session-branch" }, session.gitBranch || t("no-branch"))
       ])
     ]);
@@ -2279,7 +2663,14 @@ function activate(ctx) {
     const breadcrumbs = [
       h("span", {
         class: "ccm-picker-crumb",
+        role: "button",
+        tabindex: 0,
         onClick: () => {
+          void navigatePickerDir("/");
+        },
+        onKeydown: (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
           void navigatePickerDir("/");
         }
       }, "/")
@@ -2291,7 +2682,14 @@ function activate(ctx) {
       breadcrumbs.push(h("span", { class: "ccm-picker-crumb-sep" }, "/"));
       breadcrumbs.push(h("span", {
         class: "ccm-picker-crumb",
+        role: "button",
+        tabindex: 0,
         onClick: () => {
+          void navigatePickerDir(target);
+        },
+        onKeydown: (event) => {
+          if (event.key !== "Enter" && event.key !== " ") return;
+          event.preventDefault();
           void navigatePickerDir(target);
         }
       }, segment));
@@ -2343,7 +2741,6 @@ function activate(ctx) {
             }
           }, [IconCheck(14), h("span", {}, t("picker-use-manual-path"))])
         ]),
-        h("div", { class: "ccm-picker-breadcrumb" }, breadcrumbs),
         h("div", { class: "ccm-picker-current" }, [IconFolder(14), h("span", {}, t("picker-current", { path: dir }))]),
         h("div", { class: "ccm-picker-actions" }, [
           h("button", {
@@ -2354,6 +2751,7 @@ function activate(ctx) {
             }
           }, [IconCheck(14), h("span", {}, t("picker-select-current", { name: dir.split("/").pop() || "/" }))])
         ]),
+        h("div", { class: "ccm-picker-breadcrumb" }, breadcrumbs),
         h("div", { class: "ccm-picker-list" }, pickerLoading.value ? h("div", { class: "ccm-picker-empty" }, [h("span", { class: "ccm-browser-spinner" }), h("span", {}, t("picker-loading"))]) : pickerError.value ? h("div", { class: "ccm-picker-empty", role: "alert" }, t("picker-error", { msg: pickerError.value })) : pickerEntries.value.length ? pickerEntries.value.map((entry) => h("div", {
           class: "ccm-picker-item",
           key: entry.path,
@@ -2428,7 +2826,40 @@ function activate(ctx) {
           checked: themeFollowHost.value,
           onChange: (event) => setThemeFollowHost(event.target.checked)
         })
-      ])
+      ]),
+      activeCapabilities.value.originFilter ? h("label", {
+        class: "ccm-browser-settings-row ccm-browser-settings-toggle",
+        title: t("hide-scripted-sessions-tooltip")
+      }, [
+        h("span", { class: "ccm-browser-settings-label" }, t("hide-scripted-sessions")),
+        h("input", {
+          type: "checkbox",
+          checked: hideScriptedSessions.value,
+          "aria-label": t("hide-scripted-sessions"),
+          onChange: (event) => setHideScriptedSessions(event.target.checked)
+        })
+      ]) : null
+    ]);
+  }
+  function renderAgentSwitcher() {
+    const descriptor = activeDescriptor.value;
+    return h("label", {
+      class: "ccm-browser-select-control",
+      title: descriptor ? agentTooltip(descriptor) : t("agent-switcher")
+    }, [
+      IconTerminal(13),
+      h("select", {
+        value: activeAgent.value,
+        disabled: loading.value || bulkRunning.value || mutationInFlight || agents.value.length === 0,
+        "aria-label": t("agent-switcher"),
+        onChange: (event) => {
+          void switchAgent(event.target.value);
+        }
+      }, agents.value.map((agent) => h("option", {
+        value: agent.id,
+        disabled: !agent.available,
+        title: agentTooltip(agent)
+      }, agent.degraded ? t("agent-degraded-option", { agent: agentLabel(agent) }) : agentLabel(agent))))
     ]);
   }
   function renderSessionList() {
@@ -2439,8 +2870,9 @@ function activate(ctx) {
     const maxPage = Math.max(1, Math.ceil(listedSessions.length / pageSize.value));
     const pageSessions = listedSessions.slice((page.value - 1) * pageSize.value, page.value * pageSize.value);
     const pageKeys = pageSessions.map(sessionKey);
+    const allSelected = listedSessions.length > 0 && listedSessions.every((session) => selection.value.selected.has(sessionKey(session)));
     const createdRangeActive = Boolean(createdRange.value.from || createdRange.value.to);
-    const undatedExcluded = createdRangeActive ? sessions.value.filter((session) => {
+    const undatedExcluded = createdRangeActive ? originFilteredSessions.value.filter((session) => {
       if (!Number.isNaN(Date.parse(session.createdAt))) return false;
       return filterSessions([session], {
         partition,
@@ -2454,8 +2886,15 @@ function activate(ctx) {
       }).length > 0;
     }).length : 0;
     const archiveSearchTooltip = t("archive-search-p2");
-    const currentSort = sortSettings.value[partition];
+    const caps = activeCapabilities.value;
+    const savedSort = sortSettings.value[partition];
+    const currentSort = savedSort.field === "msgcount" && !messageCountsAvailable() ? { ...savedSort, field: "idle" } : savedSort;
     const branches = branchOptions(partition);
+    const filteredBranches = filterBranchOptions(branches, branchPickerQuery.value);
+    const dateRangesActive = Boolean(
+      createdRange.value.from || createdRange.value.to || lastActiveRange.value.from || lastActiveRange.value.to
+    );
+    const anyFilterActive = timeRange.value !== "all" || Boolean(branchFilter.value) || Boolean(searchQuery.value.trim()) || dateRangesActive;
     return h("section", {
       class: "ccm-browser-pane ccm-browser-list-pane",
       style: compactMode.value ? void 0 : { width: `calc(${paneWidths.value.middle}px * var(--ccm-fs, 1))` }
@@ -2468,9 +2907,11 @@ function activate(ctx) {
           onClick: () => {
             settingsOpen.value = false;
             filtersOpen.value = false;
+            branchPickerOpen.value = false;
             compactView.value = "tree";
           }
         }, [IconFolder(15)]) : null,
+        renderAgentSwitcher(),
         h("div", { class: "ccm-browser-partition-tabs", role: "tablist", "aria-label": t("session-partition") }, [
           h("button", {
             class: ["ccm-browser-partition-tab", partition === "active" ? "ccm-browser-partition-tab-active" : ""],
@@ -2479,13 +2920,13 @@ function activate(ctx) {
             disabled: bulkRunning.value,
             onClick: () => setPartition("active")
           }, t("active")),
-          h("button", {
+          caps.archive ? h("button", {
             class: ["ccm-browser-partition-tab", partition === "archive" ? "ccm-browser-partition-tab-active" : ""],
             role: "tab",
             "aria-selected": partition === "archive",
             disabled: bulkRunning.value,
             onClick: () => setPartition("archive")
-          }, t("archive"))
+          }, t("archive")) : null
         ]),
         h("div", { class: "ccm-browser-pane-count" }, String(displayedCount)),
         h("button", {
@@ -2495,6 +2936,7 @@ function activate(ctx) {
           disabled: bulkRunning.value || Boolean(overlay),
           onClick: () => {
             selectMode.value = !selectMode.value;
+            if (!selectMode.value) selection.value = selectionReducer(selection.value, { type: "clear-partition" });
           }
         }, [IconCheck(15)]),
         h("div", { class: ["ccm-browser-settings", settingsOpen.value ? "ccm-browser-settings-open" : ""] }, [
@@ -2506,7 +2948,10 @@ function activate(ctx) {
             disabled: bulkRunning.value,
             onClick: () => {
               settingsOpen.value = !settingsOpen.value;
-              if (settingsOpen.value) filtersOpen.value = false;
+              if (settingsOpen.value) {
+                filtersOpen.value = false;
+                branchPickerOpen.value = false;
+              }
             }
           }, [IconSettings(15)]),
           renderSettingsPopover()
@@ -2516,7 +2961,7 @@ function activate(ctx) {
         h("label", { class: "ccm-browser-search-box", title: partition === "archive" ? archiveSearchTooltip : t("type-filter-search") }, [
           IconSearch(14),
           h("input", {
-            id: "cc-session-browser-search-input",
+            id: "session-browser-search-input",
             ref: (element) => {
               searchInputRef.value = element;
             },
@@ -2569,7 +3014,7 @@ function activate(ctx) {
           }, [
             h("option", { value: "idle" }, t("idle")),
             h("option", { value: "created" }, t("created")),
-            h("option", { value: "msgcount" }, t("messages"))
+            messageCountsAvailable() ? h("option", { value: "msgcount" }, t("messages")) : null
           ])
         ]),
         h("button", {
@@ -2588,32 +3033,113 @@ function activate(ctx) {
             onChange: (event) => setTimeRange(event.target.value)
           }, [
             h("option", { value: "all" }, t("all-time")),
-            h("option", { value: "24h" }, t("time-24h")),
-            h("option", { value: "7d" }, t("time-7d")),
-            h("option", { value: "30d" }, t("time-30d"))
+            h("optgroup", { label: t("activity-recent") }, [
+              h("option", { value: "24h" }, t("time-24h")),
+              h("option", { value: "7d" }, t("time-7d")),
+              h("option", { value: "30d" }, t("time-30d"))
+            ]),
+            h("optgroup", { label: t("activity-stale") }, [
+              h("option", { value: "older-15d" }, t("time-older-15d")),
+              h("option", { value: "older-30d" }, t("time-older-30d"))
+            ])
           ])
         ]),
-        h("label", { class: "ccm-browser-select-control ccm-browser-branch-filter", title: t("filter-by-git-branch") }, [
-          IconHash(13),
-          h("select", {
-            value: branchFilter.value,
-            disabled: bulkRunning.value,
+        h("div", { class: ["ccm-browser-settings ccm-browser-branch-filter", branchPickerOpen.value ? "ccm-browser-settings-open" : ""] }, [
+          h("button", {
+            class: "ccm-icon-btn ccm-browser-select-control ccm-browser-branch-trigger",
+            type: "button",
+            title: t("filter-by-git-branch"),
             "aria-label": t("filter-by-git-branch"),
-            onChange: (event) => {
-              branchFilter.value = event.target.value;
-              applyFilterChange();
+            disabled: bulkRunning.value,
+            onClick: () => {
+              branchPickerOpen.value = !branchPickerOpen.value;
+              if (branchPickerOpen.value) {
+                branchPickerQuery.value = "";
+                scheduleMountTimeout(() => branchSearchRef.value?.focus(), 0);
+                filtersOpen.value = false;
+                settingsOpen.value = false;
+              }
             }
-          }, [h("option", { value: "" }, t("all-branches")), ...branches.map((branch) => h("option", { value: branch }, branch))])
+          }, [IconHash(13), h("span", { class: "ccm-browser-branch-current" }, branchFilter.value || t("all-branches"))]),
+          branchPickerOpen.value ? h("div", {
+            class: "ccm-browser-settings-popover ccm-browser-branch-popover",
+            role: "dialog",
+            "aria-label": t("filter-by-git-branch")
+          }, [
+            h("input", {
+              class: "ccm-browser-branch-search",
+              type: "search",
+              ref: (element) => {
+                branchSearchRef.value = element;
+              },
+              value: branchPickerQuery.value,
+              placeholder: t("branch-search-placeholder"),
+              "aria-label": t("branch-search-placeholder"),
+              disabled: bulkRunning.value,
+              onInput: (event) => {
+                branchPickerQuery.value = event.target.value;
+              },
+              onKeydown: (event) => {
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  branchPickerOpen.value = false;
+                } else if (event.key === "Enter" && filteredBranches.length > 0) {
+                  event.preventDefault();
+                  branchFilter.value = filteredBranches[0];
+                  branchPickerOpen.value = false;
+                  branchPickerQuery.value = "";
+                  applyFilterChange();
+                }
+              }
+            }),
+            h("div", { class: "ccm-browser-branch-options", role: "listbox" }, [
+              h("button", {
+                class: ["ccm-browser-branch-option", branchFilter.value === "" ? "is-active" : ""],
+                type: "button",
+                role: "option",
+                "aria-selected": branchFilter.value === "",
+                disabled: bulkRunning.value,
+                onClick: () => {
+                  branchFilter.value = "";
+                  branchPickerOpen.value = false;
+                  branchPickerQuery.value = "";
+                  applyFilterChange();
+                }
+              }, t("all-branches")),
+              ...filteredBranches.map((branch) => h("button", {
+                class: ["ccm-browser-branch-option", branchFilter.value === branch ? "is-active" : ""],
+                type: "button",
+                role: "option",
+                "aria-selected": branchFilter.value === branch,
+                disabled: bulkRunning.value,
+                title: branch,
+                onClick: () => {
+                  branchFilter.value = branch;
+                  branchPickerOpen.value = false;
+                  branchPickerQuery.value = "";
+                  applyFilterChange();
+                }
+              }, branch)),
+              filteredBranches.length === 0 ? h("div", { class: "ccm-browser-branch-empty" }, t("no-branch-matches")) : null
+            ])
+          ]) : null
         ]),
         h("div", { class: ["ccm-browser-settings", filtersOpen.value ? "ccm-browser-settings-open" : ""] }, [
           h("button", {
-            class: ["ccm-icon-btn", filtersOpen.value ? "ccm-icon-btn-active" : ""],
+            class: [
+              "ccm-icon-btn ccm-browser-text-control",
+              filtersOpen.value ? "ccm-icon-btn-active" : "",
+              dateRangesActive ? "ccm-browser-has-active" : ""
+            ],
             title: t("date-filters"),
             "aria-label": t("date-filters"),
             disabled: bulkRunning.value,
             onClick: () => {
               filtersOpen.value = !filtersOpen.value;
-              if (filtersOpen.value) settingsOpen.value = false;
+              if (filtersOpen.value) {
+                settingsOpen.value = false;
+                branchPickerOpen.value = false;
+              }
             }
           }, t("date-filter-short")),
           filtersOpen.value ? h("div", { class: "ccm-browser-settings-popover", role: "dialog", "aria-label": t("date-filters") }, [
@@ -2626,10 +3152,17 @@ function activate(ctx) {
               h("legend", {}, t("last-active")),
               h("label", {}, [t("date-from"), h("input", { type: "date", disabled: bulkRunning.value, value: lastActiveRange.value.from, onChange: (event) => commitDateRange("lastActive", "from", event.target.value) })]),
               h("label", {}, [t("date-to"), h("input", { type: "date", disabled: bulkRunning.value, value: lastActiveRange.value.to, onChange: (event) => commitDateRange("lastActive", "to", event.target.value) })])
-            ]),
-            h("button", { type: "button", disabled: bulkRunning.value, onClick: clearAllFilters }, t("clear-all-filters"))
+            ])
           ]) : null
-        ])
+        ]),
+        anyFilterActive ? h("button", {
+          class: "ccm-icon-btn ccm-browser-text-control ccm-browser-secondary-control ccm-browser-reset-filters",
+          type: "button",
+          title: t("clear-all-filters"),
+          "aria-label": t("clear-all-filters"),
+          disabled: bulkRunning.value,
+          onClick: clearAllFilters
+        }, [IconX(13)]) : null
       ]),
       h("div", {
         class: ["ccm-browser-scope-summary", overlay ? "ccm-browser-search-breadcrumb" : ""],
@@ -2648,34 +3181,56 @@ function activate(ctx) {
       h("div", { class: "ccm-browser-session-list" }, [
         loading.value ? h("div", { class: "ccm-browser-pane-state" }, t("loading-sessions")) : searching.value ? h("div", { class: "ccm-browser-pane-state" }, t("searching-session-text")) : overlay ? overlay.results.length ? overlay.results.map(renderSearchResult) : h("div", { class: "ccm-browser-pane-state" }, t("no-full-text-matches")) : pageSessions.length ? pageSessions.map((session) => renderSessionCard(session, pageKeys)) : h("div", { class: "ccm-browser-pane-state" }, t("no-matching-sessions", { partition: t(partition) }))
       ]),
-      !overlay && selectMode.value ? h("div", { class: "ccm-browser-filter-row" }, [
+      !overlay && selectMode.value ? h("div", { class: "ccm-browser-filter-row ccm-browser-select-bar" }, [
         h("button", {
+          class: "ccm-icon-btn ccm-browser-action-control",
           disabled: bulkRunning.value || listedSessions.length === 0,
           onClick: () => {
-            selection.value = selectionReducer(selection.value, { type: "snapshot-all", keys: listedSessions.map(sessionKey) });
+            selection.value = selectionReducer(selection.value, allSelected ? { type: "clear-partition" } : { type: "snapshot-all", keys: listedSessions.map(sessionKey) });
           }
-        }, t("select-all-filtered", { n: listedSessions.length })),
-        h("span", {}, t("selected-count", { n: selection.value.selected.size }))
+        }, [IconCheck(13), t(allSelected ? "deselect-all" : "select-all-filtered", { n: listedSessions.length })]),
+        h("span", { class: "ccm-browser-selected-count" }, t("selected-count", { n: selection.value.selected.size })),
+        selection.value.selected.size > 0 ? h("button", {
+          class: "ccm-icon-btn ccm-browser-clear-selection",
+          title: t("clear-selection"),
+          "aria-label": t("clear-selection"),
+          disabled: bulkRunning.value,
+          onClick: () => {
+            selection.value = selectionReducer(selection.value, { type: "clear-partition" });
+          }
+        }, [IconX(13)]) : null
       ]) : null,
-      !overlay && selection.value.selected.size ? h("div", { class: "ccm-browser-filter-row", role: "toolbar", "aria-label": t("bulk-actions") }, [
-        partition === "active" ? h("button", { disabled: bulkRunning.value, onClick: () => {
+      !overlay && selection.value.selected.size ? h("div", { class: "ccm-browser-filter-row ccm-browser-bulk-toolbar", role: "toolbar", "aria-label": t("bulk-actions") }, [
+        caps.archive && partition === "active" ? h("button", { class: "ccm-icon-btn ccm-browser-action-control", disabled: bulkRunning.value, onClick: () => {
           void executeBulk("archive");
-        } }, t("bulk-archive", { n: selectedItems().length })) : h("button", { disabled: bulkRunning.value, onClick: () => {
+        } }, [IconArchive(13), t("bulk-archive", { n: selectedItems().length })]) : null,
+        caps.archive && partition === "archive" ? h("button", { class: "ccm-icon-btn ccm-browser-action-control", disabled: bulkRunning.value, onClick: () => {
           void executeBulk("restore");
-        } }, t("bulk-restore", { n: selectedItems().length })),
-        partition === "archive" ? h("button", { disabled: bulkRunning.value, onClick: () => {
+        } }, [IconArchiveRestore(13), t("bulk-restore", { n: selectedItems().length })]) : null,
+        caps.delete && (partition === "archive" || !caps.deleteRequiresArchived) ? h("button", { class: "ccm-icon-btn ccm-browser-action-control ccm-browser-danger-control", disabled: bulkRunning.value, onClick: () => {
           void executeBulk("delete");
-        } }, t("bulk-delete", { n: selectedItems().length })) : null,
-        bulkRunning.value ? h("button", { onClick: () => {
+        } }, [IconTrash2(13), t("bulk-delete", { n: selectedItems().length })]) : null,
+        bulkRunning.value ? h("button", { class: "ccm-icon-btn ccm-browser-action-control ccm-browser-secondary-control", onClick: () => {
           bulkCancelRequested.value = true;
-        } }, t("cancel")) : null
+        } }, [IconX(13), t("cancel")]) : null
       ]) : null,
       bulkRunning.value ? h("div", { role: "status" }, [
         h("progress", { value: bulkProgress.value.completed, max: bulkProgress.value.total }),
         h("span", {}, t("bulk-progress", { n: bulkProgress.value.completed, total: bulkProgress.value.total, title: bulkProgress.value.title }))
       ]) : null,
-      bulkResult.value ? h("div", { role: "status", style: { maxHeight: "10rem", overflow: "auto" } }, [
-        h("div", {}, t("bulk-result", { done: bulkResult.value.done, failed: bulkResult.value.failed, skipped: bulkResult.value.skipped })),
+      bulkResult.value ? h("div", { class: "ccm-browser-bulk-result", role: "status" }, [
+        h("div", { class: "ccm-browser-bulk-result-summary" }, [
+          h("span", {}, t("bulk-result", { done: bulkResult.value.done, failed: bulkResult.value.failed, skipped: bulkResult.value.skipped })),
+          h("button", {
+            class: "ccm-icon-btn",
+            title: t("dismiss-result"),
+            "aria-label": t("dismiss-result"),
+            onClick: () => {
+              bulkResult.value = null;
+              bulkRefreshFailed.value = false;
+            }
+          }, [IconX(13)])
+        ]),
         bulkRefreshFailed.value ? h("div", {}, t("bulk-refresh-stale")) : null,
         ...bulkResult.value.results.filter((result) => result.status !== "done").map((result) => h("div", { key: result.key }, [
           h("strong", {}, resolveSessionTitle(result.session) || t("untitled-session")),
@@ -2900,6 +3455,7 @@ function activate(ctx) {
       ]),
       h("div", { class: "ccm-browser-detail-placeholder" }, t("session-select-prompt"))
     ]);
+    const caps = activeCapabilities.value;
     const unhealthy = session.health === "empty" || session.health === "truncated";
     return h("main", { class: "ccm-browser-pane ccm-browser-detail-pane" }, [
       h("div", { class: "ccm-browser-pane-header ccm-browser-transcript-header" }, [
@@ -2926,7 +3482,7 @@ function activate(ctx) {
           h("div", { class: "ccm-browser-transcript-span", title: `${session.createdAt} \u2192 ${session.lastActiveAt}` }, formatSessionSpan(session.createdAt, session.lastActiveAt, locale(), t))
         ]),
         h("div", { class: "ccm-browser-pane-actions" }, [
-          h("button", {
+          session.partition === "active" || caps.archive ? h("button", {
             class: "ccm-icon-btn",
             title: t("resume-session"),
             "aria-label": t("resume-session"),
@@ -2934,7 +3490,7 @@ function activate(ctx) {
             onClick: () => {
               void resumeSession(session);
             }
-          }, [IconPlay(15)]),
+          }, [IconTerminal(15)]) : null,
           h("button", {
             class: "ccm-icon-btn",
             title: t("copy-resume-command"),
@@ -2994,10 +3550,12 @@ function activate(ctx) {
           if (rootRef.value) observeRootElement(mount, rootRef.value);
           const preserveState = hasMounted;
           hasMounted = true;
-          void loadDisplaySettings();
           void loadPaneWidths();
           void loadSortSettings();
-          void loadIndex(preserveState);
+          void (async () => {
+            await loadDisplaySettings();
+            if (isActiveMount(mount)) await initializeAgents(preserveState);
+          })();
         });
         ctx.onUnmounted(() => {
           bulkCancelRequested.value = true;
@@ -3039,12 +3597,13 @@ function activate(ctx) {
             ...kbAvoid.value ? { "--ccm-kb-w": `${kbAvoidW.value}px`, "--ccm-kb-h": `${kbAvoidH.value}px` } : {}
           }
         }, [
-          settingsOpen.value || filtersOpen.value ? h("div", {
+          settingsOpen.value || filtersOpen.value || branchPickerOpen.value ? h("div", {
             class: "ccm-browser-settings-scrim",
             "aria-hidden": "true",
             onClick: () => {
               settingsOpen.value = false;
               filtersOpen.value = false;
+              branchPickerOpen.value = false;
             }
           }) : null,
           error.value ? h("div", { class: "ccm-browser-error", role: "alert" }, [
@@ -3094,6 +3653,7 @@ export {
   dateRangeMatches,
   deepestCommonAncestor,
   deriveSessionPathTree,
+  filterBranchOptions,
   filterSessions,
   isSafeTranscriptHref,
   localDateBounds,

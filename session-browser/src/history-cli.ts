@@ -1,6 +1,32 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as readline from 'readline'
+import { codexConnector } from './codex-connector'
+
+let settingsMigrationAttempted = false
+
+export function migratePluginSettings(pluginDataBase: string, legacyDirName: string, currentDirName: string): void {
+  if (settingsMigrationAttempted) return
+  settingsMigrationAttempted = true
+
+  try {
+    const legacyDir = path.join(pluginDataBase, legacyDirName)
+    const currentDir = path.join(pluginDataBase, currentDirName)
+    const entries = fs.readdirSync(legacyDir, { withFileTypes: true })
+    fs.mkdirSync(currentDir, { recursive: true })
+
+    for (const entry of entries) {
+      if (!entry.name.endsWith('.json') || !entry.isFile()) continue
+      try {
+        fs.copyFileSync(
+          path.join(legacyDir, entry.name),
+          path.join(currentDir, entry.name),
+          fs.constants.COPYFILE_EXCL,
+        )
+      } catch { /* settings migration is best-effort and never overwrites current files */ }
+    }
+  } catch { /* absent or inaccessible legacy settings are ignored */ }
+}
 
 // --- Paths ---
 const HOME = process.env.HOME || '/root'
@@ -8,21 +34,42 @@ const CLAUDE_DIR = path.join(HOME, '.claude')
 const PROJECTS_DIR = process.env.CC_SB_PROJECTS_DIR || path.join(CLAUDE_DIR, 'projects')
 const ARCHIVE_DIR = process.env.CC_SB_ARCHIVE_DIR || path.join(CLAUDE_DIR, 'projects-archive')
 const SESSIONS_DIR = process.env.CC_SB_SESSIONS_DIR || path.join(CLAUDE_DIR, 'sessions')
-const DATA_DIR = process.env.CC_SB_DATA_DIR || path.join(HOME, '.dinotty/plugin-data/cc-session-browser')
+const PLUGIN_DATA_BASE = path.join(HOME, '.dinotty', 'plugin-data')
+if (process.env.CC_SB_DATA_DIR === undefined) migratePluginSettings(PLUGIN_DATA_BASE, 'cc-session-browser', 'session-browser')
+const DATA_DIR = process.env.CC_SB_DATA_DIR || path.join(HOME, '.dinotty/plugin-data/session-browser')
 const INDEX_CACHE_PATH = path.join(DATA_DIR, 'index-cache.json')
 
 // --- Types ---
+export type AgentId = 'claude-code' | 'codex'
+export interface ConnectorCapabilities { archive: boolean; rename: boolean; delete: boolean; deleteRequiresArchived: boolean; nativeIndex: boolean; tokenStats: boolean; originFilter: boolean }
+export interface ConnectorAvailability { available: boolean; degraded: boolean; reason?: string }
+export interface SessionConnector {
+  id: AgentId
+  capabilities: ConnectorCapabilities
+  resume: { argv: string[] }
+  isAvailable(): ConnectorAvailability
+  buildIndex(refresh: boolean): void
+  listUnder(rootPath: string, partition?: string): void
+  listProjects(): void
+  listSessions(scopeKey: string): void
+  readSession(scopeKey: string, sessionId: string): Promise<void>
+  moveSession(scopeKey: string, sessionId: string, direction: 'archive' | 'restore', force?: boolean): void
+  deleteArchived(scopeKey: string, sessionId: string, force?: boolean): void
+  search(query: string, scope?: string): Promise<void>
+  listRecent(limit?: number): void
+}
 interface Project { path: string; encodedPath: string; sessionCount: number }
-interface Session { id: string; project: string; encodedPath: string; firstPrompt: string; lastTimestamp: string; messageCount: number; gitBranch?: string; live?: true; aiTitle?: string; customTitle?: string }
-interface Message { uuid: string; role: 'user' | 'assistant'; content: string; timestamp: string; model?: string; toolUses?: { name: string; summary: string; filePath?: string; oldString?: string; newString?: string; content?: string; replaceAll?: boolean }[] }
-interface IndexedSession {
+interface Session { id: string; project: string; encodedPath: string; firstPrompt: string; lastTimestamp: string; messageCount?: number; gitBranch?: string; live?: true; aiTitle?: string; customTitle?: string }
+export interface Message { uuid: string; role: 'user' | 'assistant' | 'developer'; content: string; timestamp: string; model?: string; toolUses?: { name: string; summary: string; filePath?: string; oldString?: string; newString?: string; content?: string; replaceAll?: boolean }[] }
+export interface IndexedSession {
   id: string
+  agent: AgentId
   rootPath: string
   attributionKey: string
   title: string
   createdAt: string
   lastActiveAt: string
-  messageCount: number
+  messageCount?: number
   gitBranch?: string
   partition: 'active' | 'archive'
   health: 'ok' | 'live' | 'truncated' | 'empty'
@@ -33,13 +80,14 @@ interface IndexedSession {
   live?: true
   aiTitle?: string
   customTitle?: string
+  origin?: string
 }
 interface SearchResult { session: IndexedSession; match: string }
 interface CacheEntry { size: number; mtimeMs: number; meta: IndexedSession }
 interface IndexCache { version: number; entries: Record<string, CacheEntry> }
 interface LiveRegistryEntry { sessionId: string; cwd?: string; updatedAt: number }
 interface MutationReason { error: string; message: string }
-type MutationResult =
+export type MutationResult =
   | { outcome: 'success'; cacheRefreshed: boolean }
   | { outcome: 'failure'; reason: MutationReason }
   | { outcome: 'partial'; stage: string; jsonlPath: string; artifactPath: string; reason: MutationReason }
@@ -50,7 +98,7 @@ const HEAD_SCAN_BYTES = 64 * 1024
 const HEAD_SCAN_LINES = 200
 const TAIL_SCAN_BYTES = 1024 * 1024
 const READ_SESSION_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
-const LIVE_WINDOW_MS = 60 * 1000
+export const LIVE_WINDOW_MS = 60 * 1000
 const INDEX_CACHE_VERSION = 3
 const TERMINAL_SESSION_STATUSES = new Set(['closed', 'completed', 'dead', 'done', 'ended', 'exited', 'failed', 'stopped', 'terminated'])
 
@@ -293,6 +341,7 @@ function readSessionMeta(filePath: string, id: string, attributionKey: string, p
 
   return {
     id,
+    agent: 'claude-code',
     rootPath,
     attributionKey,
     title: (title || fallbackTitle).slice(0, 200),
@@ -378,6 +427,7 @@ function readCache(): IndexCache {
   try {
     const parsed = JSON.parse(fs.readFileSync(INDEX_CACHE_PATH, 'utf-8'))
     if (!parsed || typeof parsed !== 'object' || parsed.version !== INDEX_CACHE_VERSION || !parsed.entries || typeof parsed.entries !== 'object') throw new Error('invalid cache')
+    for (const entry of Object.values(parsed.entries) as CacheEntry[]) entry.meta.agent = 'claude-code'
     return parsed as IndexCache
   } catch {
     return { version: INDEX_CACHE_VERSION, entries: {} }
@@ -1027,6 +1077,67 @@ function cmdListRecent(limit = 30) {
   output(buildIndex().filter(session => session.partition === 'active').slice(0, limit).map(toLegacySession))
 }
 
+const claudeCodeConnector: SessionConnector = {
+  id: 'claude-code',
+  capabilities: {
+    archive: true,
+    // No rename write path exists.
+    rename: false,
+    delete: true,
+    deleteRequiresArchived: true,
+    nativeIndex: false,
+    tokenStats: false,
+    originFilter: false,
+  },
+  resume: { argv: ['claude', '--resume'] },
+  isAvailable: () => {
+    try {
+      path.resolve(PROJECTS_DIR)
+      return { available: true, degraded: false }
+    } catch (error: any) {
+      return {
+        available: false,
+        degraded: false,
+        reason: `Claude Code projects directory could not be resolved${error?.message ? `: ${error.message}` : ''}`,
+      }
+    }
+  },
+  buildIndex: refresh => cmdBuildIndex(refresh),
+  listUnder: (rootPath, partition) => cmdListUnder(rootPath, partition),
+  listProjects: () => cmdListProjects(),
+  listSessions: scopeKey => cmdListSessions(scopeKey),
+  readSession: (scopeKey, sessionId) => cmdReadSession(scopeKey, sessionId),
+  moveSession: (scopeKey, sessionId, direction, force) => cmdMoveSession(scopeKey, sessionId, direction, force),
+  deleteArchived: (scopeKey, sessionId, force) => cmdDeleteArchived(scopeKey, sessionId, force),
+  search: (query, scope) => cmdSearch(query, scope),
+  listRecent: limit => cmdListRecent(limit),
+}
+
+const CONNECTORS: SessionConnector[] = [claudeCodeConnector, codexConnector]
+
+function findConnector(args: string[]): { connector: SessionConnector; rest: string[] } {
+  const parsed = findOption(args, '--agent')
+  const agent = parsed.value || 'claude-code'
+  const connector = CONNECTORS.find(candidate => candidate.id === agent)
+  if (!connector) fail('invalid-arguments', `Unknown agent: ${agent}`)
+  return { connector, rest: parsed.rest }
+}
+
+function cmdAgents() {
+  output(CONNECTORS.map(connector => {
+    const availability = connector.isAvailable()
+    return {
+      id: connector.id,
+      available: availability.available,
+      ...(!availability.available && availability.reason ? { unavailableReason: availability.reason } : {}),
+      ...(connector.id === 'codex' ? { degraded: availability.degraded } : {}),
+      ...(availability.degraded && availability.reason ? { degradedReason: availability.reason } : {}),
+      capabilities: connector.capabilities,
+      resume: connector.resume,
+    }
+  }))
+}
+
 function cmdListDirs(dirPath: string) {
   const resolved = dirPath.replace(/^~/, HOME)
   try {
@@ -1078,57 +1189,76 @@ async function main() {
   const [,, subcommand, ...args] = process.argv
 
   switch (subcommand) {
+  case 'agents':
+    if (args.length) fail('invalid-arguments', 'Usage: agents')
+    cmdAgents()
+    break
   case 'build-index': {
-    const unknown = args.filter(arg => arg !== '--refresh')
+    const { connector, rest } = findConnector(args)
+    const unknown = rest.filter(arg => arg !== '--refresh')
     if (unknown.length) fail('invalid-arguments', 'Usage: build-index [--refresh]')
-    cmdBuildIndex(args.includes('--refresh'))
+    connector.buildIndex(rest.includes('--refresh'))
     break
   }
   case 'list-under': {
-    const parsed = findOption(args, '--partition')
+    const { connector, rest } = findConnector(args)
+    const parsed = findOption(rest, '--partition')
     if (parsed.rest.length !== 1) fail('invalid-arguments', 'Usage: list-under <realRootPath> [--partition active|archive]')
-    cmdListUnder(parsed.rest[0], parsed.value)
+    connector.listUnder(parsed.rest[0], parsed.value)
     break
   }
-  case 'list-projects':
-    cmdListProjects()
+  case 'list-projects': {
+    const { connector } = findConnector(args)
+    connector.listProjects()
     break
-  case 'list-sessions':
-    if (args.length !== 1) fail('invalid-arguments', 'Usage: list-sessions <encodedPath>')
-    cmdListSessions(args[0])
+  }
+  case 'list-sessions': {
+    const { connector, rest } = findConnector(args)
+    if (rest.length !== 1) fail('invalid-arguments', 'Usage: list-sessions <encodedPath>')
+    connector.listSessions(rest[0])
     break
-  case 'read-session':
-    if (args.length !== 2) fail('invalid-arguments', 'Usage: read-session <encodedPath> <sessionId>')
-    await cmdReadSession(args[0], args[1])
+  }
+  case 'read-session': {
+    const { connector, rest } = findConnector(args)
+    if (rest.length !== 2) fail('invalid-arguments', 'Usage: read-session <encodedPath> <sessionId>')
+    await connector.readSession(rest[0], rest[1])
     break
+  }
   case 'archive': {
-    const force = args.includes('--force')
-    const rest = args.filter(arg => arg !== '--force')
-    if (rest.length !== 2 || args.filter(arg => arg === '--force').length > 1) fail('invalid-arguments', 'Usage: archive <encodedPath> <sessionId> [--force]')
-    cmdMoveSession(rest[0], rest[1], 'archive', force)
+    const parsed = findConnector(args)
+    const force = parsed.rest.includes('--force')
+    const rest = parsed.rest.filter(arg => arg !== '--force')
+    if (rest.length !== 2 || parsed.rest.filter(arg => arg === '--force').length > 1) fail('invalid-arguments', 'Usage: archive <encodedPath> <sessionId> [--force]')
+    parsed.connector.moveSession(rest[0], rest[1], 'archive', force)
     break
   }
-  case 'restore':
-    if (args.length !== 2) fail('invalid-arguments', 'Usage: restore <encodedPath> <sessionId>')
-    cmdMoveSession(args[0], args[1], 'restore')
+  case 'restore': {
+    const { connector, rest } = findConnector(args)
+    if (rest.length !== 2) fail('invalid-arguments', 'Usage: restore <encodedPath> <sessionId>')
+    connector.moveSession(rest[0], rest[1], 'restore')
     break
+  }
   case 'delete-archived': {
-    const force = args.includes('--force')
-    const rest = args.filter(arg => arg !== '--force')
-    if (rest.length !== 2 || args.filter(arg => arg === '--force').length > 1) fail('invalid-arguments', 'Usage: delete-archived <encodedPath> <sessionId> [--force]')
-    cmdDeleteArchived(rest[0], rest[1], force)
+    const parsed = findConnector(args)
+    const force = parsed.rest.includes('--force')
+    const rest = parsed.rest.filter(arg => arg !== '--force')
+    if (rest.length !== 2 || parsed.rest.filter(arg => arg === '--force').length > 1) fail('invalid-arguments', 'Usage: delete-archived <encodedPath> <sessionId> [--force]')
+    parsed.connector.deleteArchived(rest[0], rest[1], force)
     break
   }
   case 'search': {
-    const parsed = findOption(args, '--scope')
+    const { connector, rest } = findConnector(args)
+    const parsed = findOption(rest, '--scope')
     if (parsed.rest.length === 0) fail('invalid-arguments', 'Usage: search <query> [--scope <realRootPath>]')
-    await cmdSearch(parsed.rest.join(' '), parsed.value)
+    await connector.search(parsed.rest.join(' '), parsed.value)
     break
   }
-  case 'list-recent':
-    if (args.length > 1) fail('invalid-arguments', 'Usage: list-recent [limit]')
-    cmdListRecent(args[0] ? parseInt(args[0], 10) : 30)
+  case 'list-recent': {
+    const { connector, rest } = findConnector(args)
+    if (rest.length > 1) fail('invalid-arguments', 'Usage: list-recent [limit]')
+    connector.listRecent(rest[0] ? parseInt(rest[0], 10) : 30)
     break
+  }
   case 'list-dirs':
     if (args.length !== 1) fail('invalid-arguments', 'Usage: list-dirs <path>')
     cmdListDirs(args[0])

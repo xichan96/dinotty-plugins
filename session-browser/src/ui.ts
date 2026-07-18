@@ -13,6 +13,7 @@ import {
   IconEye,
   IconFileText,
   IconFolder,
+  IconFolderDown,
   IconGlobe,
   IconHash,
   IconPencil,
@@ -28,15 +29,17 @@ import {
 import { initI18n, normalizeLocaleSetting, resolveLocale, type LocaleSetting, type PluginLocale } from './i18n'
 
 export type SessionPartition = 'active' | 'archive'
+export type AgentId = 'claude-code' | 'codex'
 
 export interface IndexedSession {
   id: string
+  agent: AgentId
   rootPath: string
   attributionKey: string
   title: string
   createdAt: string
   lastActiveAt: string
-  messageCount: number
+  messageCount?: number
   gitBranch?: string
   partition: SessionPartition
   health: 'ok' | 'live' | 'truncated' | 'empty'
@@ -47,6 +50,7 @@ export interface IndexedSession {
   live?: true
   aiTitle?: string
   customTitle?: string
+  origin?: string
 }
 
 export interface TranscriptToolUse {
@@ -90,7 +94,7 @@ interface PaneWidths {
 
 export type SessionSortField = 'idle' | 'created' | 'msgcount'
 export type SortDirection = 'asc' | 'desc'
-export type TimeRangeFilter = 'all' | '24h' | '7d' | '30d'
+export type TimeRangeFilter = 'all' | '24h' | '7d' | '30d' | 'older-15d' | 'older-30d'
 
 export interface SessionSortSetting {
   field: SessionSortField
@@ -154,6 +158,26 @@ interface CliFailure {
   message: string
 }
 
+interface ConnectorCapabilities {
+  archive: boolean
+  rename: boolean
+  delete: boolean
+  deleteRequiresArchived: boolean
+  nativeIndex: boolean
+  tokenStats: boolean
+  originFilter: boolean
+}
+
+interface AgentDescriptor {
+  id: AgentId
+  available: boolean
+  degraded?: boolean
+  unavailableReason?: string
+  degradedReason?: string
+  capabilities: ConnectorCapabilities
+  resume: { argv: string[] }
+}
+
 interface MutationReason {
   error: string
   message: string
@@ -200,11 +224,13 @@ interface MountContext {
 
 const STORAGE_KEYS = {
   locale: 'locale',
+  activeAgent: 'activeAgent',
   fontScale: 'fontScale',
   themeFollowHost: 'themeFollowHost',
   paneWidths: 'paneWidths',
   treeRoot: 'treeRoot',
   treeExpandedPaths: 'treeExpandedPaths',
+  hideScriptedSessions: 'hideScriptedSessions',
   sessionListSort: 'sessionListSort',
   pageSize: 'pageSize',
 } as const
@@ -220,6 +246,33 @@ export const TRANSCRIPT_BATCH_SIZE = 50
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const FONT_SCALE_MULTIPLIERS: Record<number, number> = { 1: 0.85, 2: 0.93, 3: 1, 4: 1.1, 5: 1.25 }
 export const PAGE_SIZES = [20, 50, 100] as const
+const AGENT_AGNOSTIC = new Set(['list-dirs', 'check-dir', 'agents'])
+const DEFAULT_AGENT: AgentId = 'claude-code'
+const UNAVAILABLE_CAPABILITIES: ConnectorCapabilities = {
+  archive: false,
+  rename: false,
+  delete: false,
+  deleteRequiresArchived: true,
+  nativeIndex: true,
+  tokenStats: false,
+  originFilter: false,
+}
+const LEGACY_CAPABILITIES: ConnectorCapabilities = {
+  archive: true,
+  // No rename write path exists.
+  rename: false,
+  delete: true,
+  deleteRequiresArchived: true,
+  nativeIndex: false,
+  tokenStats: false,
+  originFilter: false,
+}
+const DEFAULT_RESUME_ARGV_BY_AGENT = new Map<AgentId, readonly string[]>([
+  ['claude-code', ['claude', '--resume']],
+  ['codex', ['codex', 'resume']],
+])
+const LEGACY_RESUME = { argv: ['claude', '--resume'] }
+const RESUME_ARG_TOKEN_RE = /^[A-Za-z0-9_@%+=:,./-]+$/
 
 type Translate = ReturnType<typeof initI18n>['t']
 type CompactView = 'tree' | 'list' | 'detail'
@@ -471,17 +524,27 @@ export function sortSessions(items: IndexedSession[], setting: SessionSortSettin
     let comparison = 0
     if (setting.field === 'idle') comparison = timestampValue(right.lastActiveAt) - timestampValue(left.lastActiveAt)
     else if (setting.field === 'created') comparison = timestampValue(left.createdAt) - timestampValue(right.createdAt)
-    else comparison = left.messageCount - right.messageCount
+    else comparison = (left.messageCount ?? 0) - (right.messageCount ?? 0)
     return comparison * direction || left.title.localeCompare(right.title) || left.id.localeCompare(right.id)
   })
 }
 
+export function filterBranchOptions(options: string[], query: string): string[] {
+  const normalizedQuery = query.trim().toLocaleLowerCase()
+  if (!normalizedQuery) return options
+  return options.filter(option => option.toLocaleLowerCase().includes(normalizedQuery))
+}
+
 export function filterSessions(items: IndexedSession[], filters: SessionListFilters, now = Date.now()): IndexedSession[] {
   const query = filters.query.trim().toLocaleLowerCase()
-  const ranges: Record<Exclude<TimeRangeFilter, 'all'>, number> = {
+  const ranges: Record<'24h' | '7d' | '30d', number> = {
     '24h': 24 * 60 * 60_000,
     '7d': 7 * 24 * 60 * 60_000,
     '30d': 30 * 24 * 60 * 60_000,
+  }
+  const staleThresholds: Record<'older-15d' | 'older-30d', number> = {
+    'older-15d': 15 * 24 * 60 * 60_000,
+    'older-30d': 30 * 24 * 60 * 60_000,
   }
   return items.filter(session => {
     if (session.partition !== filters.partition) return false
@@ -490,7 +553,10 @@ export function filterSessions(items: IndexedSession[], filters: SessionListFilt
       ? sessionPath === normalizePath(filters.scopePath)
       : isPathWithin(filters.scopePath, sessionPath)
     if (!inScope) return false
-    if (filters.timeRange !== 'all' && now - timestampValue(session.lastActiveAt) > ranges[filters.timeRange]) return false
+    const idleDuration = now - timestampValue(session.lastActiveAt)
+    // Exact boundaries are included by both recency and staleness presets.
+    if (filters.timeRange in ranges && idleDuration > ranges[filters.timeRange as keyof typeof ranges]) return false
+    if (filters.timeRange in staleThresholds && idleDuration < staleThresholds[filters.timeRange as keyof typeof staleThresholds]) return false
     if (!dateRangeMatches(session.createdAt, { from: filters.createdFrom || '', to: filters.createdTo || '' })) return false
     if (!dateRangeMatches(session.lastActiveAt, { from: filters.lastActiveFrom || '', to: filters.lastActiveTo || '' })) return false
     if (filters.branch && (session.gitBranch || '') !== filters.branch) return false
@@ -667,6 +733,8 @@ export function activate(ctx: PluginContext): PluginExports {
   const localeRef = ctx.ref<PluginLocale>(resolveLocale('auto', documentLanguage))
   const { t, locale } = initI18n(localeRef)
   const fontScale = ctx.ref(3)
+  const activeAgent = ctx.ref<AgentId>(DEFAULT_AGENT)
+  const agents = ctx.ref<AgentDescriptor[]>([])
   const themeFollowHost = ctx.ref(true)
   const settingsOpen = ctx.ref(false)
   const sessions = ctx.ref<IndexedSession[]>([])
@@ -678,6 +746,7 @@ export function activate(ctx: PluginContext): PluginExports {
   const searchOverlay = ctx.ref<SearchOverlay | null>(null)
   const transientHighlightPath = ctx.ref<string | null>(null)
   const expandedPaths = ctx.ref<Set<string>>(new Set())
+  const hideScriptedSessions = ctx.ref(false)
   const showRootPicker = ctx.ref(false)
   const pickerCurrentDir = ctx.ref('/')
   const pickerEntries = ctx.ref<DirectoryEntry[]>([])
@@ -691,6 +760,9 @@ export function activate(ctx: PluginContext): PluginExports {
   const sortSettings = ctx.ref<PartitionSortSettings>(normalizePartitionSortSettings(null))
   const timeRange = ctx.ref<TimeRangeFilter>('all')
   const branchFilter = ctx.ref('')
+  const branchPickerOpen = ctx.ref(false)
+  const branchPickerQuery = ctx.ref('')
+  const branchSearchRef = ctx.ref<HTMLInputElement | null>(null)
   const createdRange = ctx.ref<DateRange>({ from: '', to: '' })
   const lastActiveRange = ctx.ref<DateRange>({ from: '', to: '' })
   const filtersOpen = ctx.ref(false)
@@ -731,8 +803,13 @@ export function activate(ctx: PluginContext): PluginExports {
   let hasMounted = false
   let warnedPersistFailure = false
 
-  ctx.commands.register('cc-session-browser.open', () => { ctx.open() })
-  ctx.commands.register('cc-session-browser.search', () => {
+  function runAgent(args: string[], opts: Parameters<typeof ctx.exec.run>[1]) {
+    if (AGENT_AGNOSTIC.has(args[0])) return ctx.exec.run(args, opts)
+    return ctx.exec.run([...args, '--agent', activeAgent.value], opts)
+  }
+
+  ctx.commands.register('session-browser.open', () => { ctx.open() })
+  ctx.commands.register('session-browser.search', () => {
     ctx.open()
     if (compactMode.value) compactView.value = 'list'
     settingsOpen.value = false
@@ -740,14 +817,34 @@ export function activate(ctx: PluginContext): PluginExports {
     scheduleMountTimeout(() => searchInputRef.value?.focus(), 0)
   })
 
-  const tree = ctx.computed(() => deriveSessionPathTree(sessions.value, visibleRoot.value))
+  const activeDescriptor = ctx.computed(() => agents.value.find(agent => agent.id === activeAgent.value) || null)
+  const activeCapabilities = ctx.computed(() => activeDescriptor.value?.capabilities || UNAVAILABLE_CAPABILITIES)
+  const activeResumeArgv = ctx.computed(() => activeDescriptor.value?.resume.argv
+    || DEFAULT_RESUME_ARGV_BY_AGENT.get(activeAgent.value)!)
+  const originFilteredSessions = ctx.computed(() => sessions.value.filter(session => isSessionVisibleByOrigin(session)))
+  const tree = ctx.computed(() => deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value))
 
   function persist(key: string, value: unknown) {
     ctx.storage.set(key, value).catch((caught: any) => {
       if (warnedPersistFailure) return
       warnedPersistFailure = true
-      console.warn('[cc-session-browser] could not persist plugin setting', caught)
+      console.warn('[session-browser] could not persist plugin setting', caught)
     })
+  }
+
+  function perAgentStorageKey(key: string, agent = activeAgent.value): string {
+    return `${key}:${agent}`
+  }
+
+  async function readPerAgentTreeSetting(key: string, agent: AgentId): Promise<unknown> {
+    const value = await ctx.storage.get(perAgentStorageKey(key, agent))
+    if (value !== undefined || agent !== DEFAULT_AGENT) return value
+    return ctx.storage.get(key)
+  }
+
+  function isSessionVisibleByOrigin(session: IndexedSession): boolean {
+    if (!activeCapabilities.value.originFilter || !hideScriptedSessions.value) return true
+    return session.origin !== 'exec' && session.origin !== 'subagent'
   }
 
   function createMountContext(): MountContext {
@@ -807,7 +904,18 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function persistExpandedPaths() {
-    persist(STORAGE_KEYS.treeExpandedPaths, Array.from(expandedPaths.value))
+    persist(perAgentStorageKey(STORAGE_KEYS.treeExpandedPaths), Array.from(expandedPaths.value))
+  }
+
+  function setHideScriptedSessions(value: boolean) {
+    hideScriptedSessions.value = value
+    persist(perAgentStorageKey(STORAGE_KEYS.hideScriptedSessions), value)
+    clearSearchOverlay()
+    if (selectedSession.value && !isSessionVisibleByOrigin(selectedSession.value)) {
+      committedSelection.value = { ...committedSelection.value, sessionId: null }
+      resetTranscript()
+    }
+    applyFilterChange()
   }
 
   function setLocaleSetting(value: unknown) {
@@ -925,6 +1033,219 @@ export function activate(ctx: PluginContext): PluginExports {
     return t('cli-error', { msg: message })
   }
 
+  function agentLabel(agent: Pick<AgentDescriptor, 'id'>): string {
+    return t(`agent-${agent.id}`)
+  }
+
+  function parseAgentDescriptors(stdout: string): AgentDescriptor[] {
+    const parsed = JSON.parse(stdout) as unknown
+    if (!Array.isArray(parsed)) throw new Error(t('agent-discovery-invalid'))
+    return parsed.map((value: any) => {
+      const caps = value?.capabilities
+      const resumeArgv = value?.resume?.argv
+      const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id)
+      const validCapabilities = caps
+        && ['archive', 'rename', 'delete', 'deleteRequiresArchived', 'nativeIndex', 'tokenStats', 'originFilter']
+          .every(key => typeof caps[key] === 'boolean')
+      if (!value || typeof value.id !== 'string' || typeof value.available !== 'boolean' || !validCapabilities) {
+        throw new Error(t('agent-discovery-invalid'))
+      }
+      const validResumeArgv = Array.isArray(resumeArgv)
+        && resumeArgv.length > 0
+        && resumeArgv.every(arg => typeof arg === 'string' && RESUME_ARG_TOKEN_RE.test(arg))
+      if (!validResumeArgv && !defaultResumeArgv) throw new Error(t('agent-discovery-invalid'))
+      return {
+        id: value.id as AgentId,
+        available: value.available,
+        degraded: value.degraded === true,
+        unavailableReason: typeof value.unavailableReason === 'string' ? value.unavailableReason : undefined,
+        degradedReason: typeof value.degradedReason === 'string' ? value.degradedReason : undefined,
+        capabilities: caps as ConnectorCapabilities,
+        resume: {
+          argv: validResumeArgv
+            ? [...resumeArgv]
+            : [...defaultResumeArgv!],
+        },
+      }
+    })
+  }
+
+  function legacyAgentDescriptor(): AgentDescriptor {
+    return {
+      id: DEFAULT_AGENT,
+      available: true,
+      degraded: false,
+      capabilities: LEGACY_CAPABILITIES,
+      resume: { argv: [...LEGACY_RESUME.argv] },
+    }
+  }
+
+  function agentTooltip(agent: AgentDescriptor): string {
+    if (!agent.available) return agent.unavailableReason || t('agent-unavailable-tooltip')
+    if (agent.degraded) return agent.degradedReason || t('agent-degraded-tooltip')
+    return t('agent-switcher')
+  }
+
+  function notifyDegradedAgent(agent: AgentDescriptor) {
+    if (!agent.degraded) return
+    ctx.ui.notify(
+      t('agent-degraded-notice', { agent: agentLabel(agent), reason: agent.degradedReason || t('agent-degraded-tooltip') }),
+      'warn',
+      t('agent-degraded-title'),
+    )
+  }
+
+  function resetForAgentSwitch() {
+    if (activeMount) {
+      activeMount.indexGeneration++
+      activeMount.searchGeneration++
+      activeMount.treeGeneration++
+      activeMount.pickerRequestSeq++
+      activeMount.pickerValidationSeq++
+    }
+    clearSearchOverlay(true)
+    resetTranscript()
+    sessions.value = []
+    committedSelection.value = { path: '/', mode: 'subtree', sessionId: null }
+    activePartition.value = 'active'
+    page.value = 1
+    selection.value = selectionReducer(selection.value, { type: 'clear-partition' })
+    selectMode.value = false
+    timeRange.value = 'all'
+    branchFilter.value = ''
+    branchPickerOpen.value = false
+    branchPickerQuery.value = ''
+    createdRange.value = { from: '', to: '' }
+    lastActiveRange.value = { from: '', to: '' }
+    globalSearch.value = false
+    filtersOpen.value = false
+    settingsOpen.value = false
+    showRootPicker.value = false
+    pickerLoading.value = false
+    bulkResult.value = null
+    bulkRefreshFailed.value = false
+    compactView.value = 'list'
+  }
+
+  async function switchAgent(nextAgent: AgentId) {
+    const descriptor = agents.value.find(agent => agent.id === nextAgent)
+    if (!descriptor?.available || nextAgent === activeAgent.value || loading.value || bulkRunning.value || mutationInFlight) return
+    activeAgent.value = nextAgent
+    persist(STORAGE_KEYS.activeAgent, nextAgent)
+    resetForAgentSwitch()
+    const loaded = await loadIndex()
+    if (!loaded) return
+    if (sessions.value.length === 0) {
+      ctx.ui.notify(t('agent-empty-notice', { agent: agentLabel(descriptor) }), 'warn', t('agent-empty-title'))
+    }
+    notifyDegradedAgent(descriptor)
+  }
+
+  async function initializeAgents(preserveState: boolean) {
+    const mount = activeMount
+    if (!isActiveMount(mount)) return
+    loading.value = true
+    clearError()
+    try {
+      const [result, storedAgent] = await Promise.all([
+        runAgent(['agents'], { timeout: 10_000 }),
+        ctx.storage.get(STORAGE_KEYS.activeAgent).catch(() => null),
+      ])
+      if (!isActiveMount(mount)) return
+      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t('agent-discovery-failed')).message)
+      let discovered: AgentDescriptor[]
+      try {
+        discovered = parseAgentDescriptors(result.stdout)
+      } catch (caught) {
+        let legacyResponse = false
+        try {
+          const parsed = JSON.parse(result.stdout)
+          legacyResponse = Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'outcome' in parsed)
+        } catch { /* handled by the original discovery error */ }
+        if (!legacyResponse) throw caught
+        discovered = []
+      }
+      if (discovered.length === 0) discovered = [legacyAgentDescriptor()]
+      agents.value = discovered
+
+      const requestedId = (typeof storedAgent === 'string' ? storedAgent : DEFAULT_AGENT) as AgentId
+      const requested = discovered.find(agent => agent.id === requestedId)
+      const available = discovered.filter(agent => agent.available)
+      if (available.length === 0) {
+        activeAgent.value = requested?.id || discovered[0].id
+        loading.value = false
+        showError(t('agent-none-available'))
+        return
+      }
+
+      const candidates = requested?.available
+        ? [requested, ...available.filter(agent => agent.id !== requested.id)]
+        : available
+      const previousAgent = activeAgent.value
+      let chosen: AgentDescriptor | null = null
+      let requestedLoaded = false
+      for (const candidate of candidates) {
+        const switchedAgent = candidate.id !== activeAgent.value
+        if (switchedAgent) resetForAgentSwitch()
+        activeAgent.value = candidate.id
+        const preserveCandidateState = preserveState
+          && !switchedAgent
+          && candidate.id === previousAgent
+          && candidate.id === requestedId
+        const loaded = await loadIndex(preserveCandidateState)
+        if (!isActiveMount(mount)) return
+        if (candidate.id === requestedId) requestedLoaded = loaded
+        if (loaded && sessions.value.length > 0) {
+          chosen = candidate
+          break
+        }
+      }
+
+      if (!chosen) {
+        const emptyAgent = candidates[0]
+        if (activeAgent.value !== emptyAgent.id) {
+          resetForAgentSwitch()
+          activeAgent.value = emptyAgent.id
+          await loadIndex()
+          if (!isActiveMount(mount)) return
+        } else if (requestedLoaded && sessions.value.length === 0) {
+          clearSearchOverlay(true)
+          resetTranscript()
+          page.value = 1
+          selection.value = selectionReducer(selection.value, { type: 'clear-partition' })
+          selectMode.value = false
+        }
+        if (emptyAgent.id !== requestedId) persist(STORAGE_KEYS.activeAgent, emptyAgent.id)
+        ctx.ui.notify(t('agent-no-sessions'), 'warn', t('agent-empty-title'))
+        notifyDegradedAgent(emptyAgent)
+        return
+      }
+
+      if (chosen.id !== requestedId) {
+        persist(STORAGE_KEYS.activeAgent, chosen.id)
+        const requestedName = requested ? agentLabel(requested) : String(requestedId)
+        const reason = !requested
+          ? t('agent-not-registered')
+          : !requested.available
+            ? requested.unavailableReason || t('agent-unavailable-tooltip')
+            : requestedLoaded
+              ? t('agent-no-sessions-short')
+              : t('agent-load-failed-short')
+        ctx.ui.notify(
+          t('agent-fallback-notice', { agent: requestedName, fallback: agentLabel(chosen), reason }),
+          'warn',
+          t('agent-fallback-title'),
+        )
+      }
+      notifyDegradedAgent(chosen)
+    } catch (caught: any) {
+      if (isActiveMount(mount)) {
+        loading.value = false
+        showError(cliError(caught?.message || t('agent-discovery-failed')))
+      }
+    }
+  }
+
   function parseCliFailure(stderr: string, fallback: string): CliFailure {
     try {
       const parsed = JSON.parse(stderr.trim()) as Partial<CliFailure>
@@ -962,8 +1283,9 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   async function refreshCacheIfNeeded(result: Extract<MutationResult, { outcome: 'success' }>) {
-    if (result.cacheRefreshed) return
-    const rebuilt = await ctx.exec.run(['build-index', '--refresh'], { timeout: 30_000 })
+    const caps = activeCapabilities.value
+    if (result.cacheRefreshed || caps.nativeIndex) return
+    const rebuilt = await runAgent(['build-index', '--refresh'], { timeout: 30_000 })
     if (rebuilt.code !== 0) throw new Error(parseCliFailure(rebuilt.stderr, 'cache rebuild failed').message)
     try {
       if (!Array.isArray(JSON.parse(rebuilt.stdout))) throw new Error('cache rebuild returned invalid JSON')
@@ -1029,7 +1351,7 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function logMutation(action: 'archived' | 'restored' | 'deleted', session: IndexedSession, cacheRefreshed: boolean) {
-    console.info(`[cc-session-browser] ${action} session`, { id: session.id, cacheRefreshed })
+    console.info(`[session-browser] ${action} session`, { id: session.id, cacheRefreshed })
     const localizedAction = t(`action-${action}`)
     ctx.ui.notify(t('notify-paths-one', {
       action: localizedAction,
@@ -1088,7 +1410,7 @@ export function activate(ctx: PluginContext): PluginExports {
     copiedSessionId.value = false
 
     try {
-      const result = await ctx.exec.run(['read-session', session.attributionKey, session.id], { timeout: 30_000 })
+      const result = await runAgent(['read-session', session.attributionKey, session.id], { timeout: 30_000 })
       if (!isActiveMount(mount) || token !== mount.transcriptLoadToken) return
       if (result.code !== 0) throw new Error(result.stderr || 'read-session failed')
       const parsed = JSON.parse(result.stdout)
@@ -1140,7 +1462,7 @@ export function activate(ctx: PluginContext): PluginExports {
       return false
     }
 
-    const command = `cd -- ${shQuote(session.rootPath)} && claude --resume ${session.id}`
+    const command = `cd -- ${shQuote(session.rootPath)} && ${activeResumeArgv.value.join(' ')} ${session.id}`
     try {
       await navigator.clipboard.writeText(command)
       if (!isCurrent()) return false
@@ -1168,9 +1490,11 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   async function restoreSessionCore(session: IndexedSession, isCurrent: () => boolean): Promise<IndexedSession | null> {
+    const caps = activeCapabilities.value
+    if (!caps.archive) return null
     clearError()
     try {
-      const result = await ctx.exec.run(['restore', session.attributionKey, session.id], { timeout: 30_000 })
+      const result = await runAgent(['restore', session.attributionKey, session.id], { timeout: 30_000 })
       if (!isCurrent()) return null
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, 'restore failed').message)
       const mutation = await requireMutationSuccess(parseMutationResult(result.stdout))
@@ -1192,20 +1516,22 @@ export function activate(ctx: PluginContext): PluginExports {
 
   async function archiveSession(session: IndexedSession): Promise<void> {
     await coordinateMutation(undefined, async isCurrent => {
+      const caps = activeCapabilities.value
+      if (!caps.archive) return
       const title = resolveSessionTitle(session) || t('untitled-session')
       const accepted = await ctx.ui.confirm(t('archive-session-confirm', { title }))
       if (!isCurrent() || !accepted) return
 
       clearError()
       try {
-        let result = await ctx.exec.run(['archive', session.attributionKey, session.id], { timeout: 30_000 })
+        let result = await runAgent(['archive', session.attributionKey, session.id], { timeout: 30_000 })
         if (!isCurrent()) return
         if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, 'archive failed').message)
         let mutation = parseMutationResult(result.stdout)
         if (mutation.outcome === 'failure' && (mutation.reason.error === 'possibly-live' || mutation.reason.error === 'session-live')) {
           const forceAccepted = await ctx.ui.confirm(t('archive-session-force-confirm', { title }))
           if (!isCurrent() || !forceAccepted) return
-          result = await ctx.exec.run(['archive', session.attributionKey, session.id, '--force'], { timeout: 30_000 })
+          result = await runAgent(['archive', session.attributionKey, session.id, '--force'], { timeout: 30_000 })
           if (!isCurrent()) return
           if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, 'forced archive failed').message)
           mutation = parseMutationResult(result.stdout)
@@ -1223,15 +1549,20 @@ export function activate(ctx: PluginContext): PluginExports {
     })
   }
 
-  async function deleteArchivedSession(session: IndexedSession): Promise<void> {
+  async function deleteSession(session: IndexedSession): Promise<void> {
     await coordinateMutation(undefined, async isCurrent => {
+      const caps = activeCapabilities.value
+      if (!caps.delete || (caps.deleteRequiresArchived && session.partition !== 'archive')) return
       const title = resolveSessionTitle(session) || t('untitled-session')
-      const accepted = await ctx.ui.confirm(t('delete-session-confirm', { title }))
+      const accepted = await ctx.ui.confirm(t(
+        caps.deleteRequiresArchived ? 'delete-session-confirm' : 'delete-session-direct-confirm',
+        { title },
+      ))
       if (!isCurrent() || !accepted) return
 
       clearError()
       try {
-        const result = await ctx.exec.run(['delete-archived', session.attributionKey, session.id], { timeout: 30_000 })
+        const result = await runAgent(['delete-archived', session.attributionKey, session.id], { timeout: 30_000 })
         if (!isCurrent()) return
         if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, 'delete-archived failed').message)
         const mutation = await requireMutationSuccess(parseMutationResult(result.stdout))
@@ -1260,7 +1591,7 @@ export function activate(ctx: PluginContext): PluginExports {
     }
 
     try {
-      const result = await ctx.exec.run(['check-dir', resumable.rootPath], { timeout: 10_000 })
+      const result = await runAgent(['check-dir', resumable.rootPath], { timeout: 10_000 })
       if (!isCurrent()) return
       if (result.code !== 0) throw new Error(result.stderr || 'check-dir failed')
       const checked = JSON.parse(result.stdout) as { exists?: boolean; dir?: boolean }
@@ -1307,7 +1638,7 @@ export function activate(ctx: PluginContext): PluginExports {
     try {
       await terminal.createTerminalTab({
         cwd: resumable.rootPath,
-        argv: ['claude', '--resume', resumable.id],
+        argv: [...activeResumeArgv.value, resumable.id],
         title: resolveSessionTitle(resumable).slice(0, 24),
       })
     } catch {
@@ -1336,12 +1667,24 @@ export function activate(ctx: PluginContext): PluginExports {
     loading.value = true
     clearError()
     try {
-      const result = await ctx.exec.run(refresh ? ['build-index', '--refresh'] : ['build-index'], { timeout: 30_000 })
+      const caps = activeCapabilities.value
+      const result = await runAgent(refresh && !caps.nativeIndex ? ['build-index', '--refresh'] : ['build-index'], { timeout: 30_000 })
       if (!isCurrent()) return false
       if (result.code !== 0) throw new Error(result.stderr || 'build-index failed')
       const parsed = JSON.parse(result.stdout)
       if (!Array.isArray(parsed)) throw new Error('build-index returned invalid JSON')
       sessions.value = parsed as IndexedSession[]
+      const requestAgent = activeAgent.value
+      if (caps.originFilter) {
+        try {
+          hideScriptedSessions.value = await ctx.storage.get(
+            perAgentStorageKey(STORAGE_KEYS.hideScriptedSessions, requestAgent),
+          ) === true
+        } catch { hideScriptedSessions.value = false }
+      } else {
+        hideScriptedSessions.value = false
+      }
+      if (!isCurrent()) return false
       const presentKeys = sessionsForList(activePartition.value).map(sessionKey)
       selection.value = selectionReducer(selection.value, { type: 'intersect', keys: presentKeys })
 
@@ -1356,22 +1699,24 @@ export function activate(ctx: PluginContext): PluginExports {
       if (!isCurrentTree()) return false
       let savedRoot: string | null = null
       try {
-        savedRoot = normalizeStoredTreeRoot(await ctx.storage.get(STORAGE_KEYS.treeRoot))
+        savedRoot = normalizeStoredTreeRoot(await readPerAgentTreeSetting(STORAGE_KEYS.treeRoot, requestAgent))
       } catch { /* use the indexed common ancestor */ }
       if (!isCurrentTree()) return false
-      visibleRoot.value = savedRoot || deepestCommonAncestor(sessions.value.map(session => session.rootPath))
-      if (!savedRoot) persist(STORAGE_KEYS.treeRoot, visibleRoot.value)
+      visibleRoot.value = savedRoot || deepestCommonAncestor(originFilteredSessions.value.map(session => session.rootPath))
+      persist(perAgentStorageKey(STORAGE_KEYS.treeRoot, requestAgent), visibleRoot.value)
       committedSelection.value = { path: visibleRoot.value, mode: 'subtree', sessionId: null }
 
       let savedExpanded: Set<string> | null = null
       try {
-        savedExpanded = normalizeStoredExpandedPaths(await ctx.storage.get(STORAGE_KEYS.treeExpandedPaths))
+        savedExpanded = normalizeStoredExpandedPaths(
+          await readPerAgentTreeSetting(STORAGE_KEYS.treeExpandedPaths, requestAgent),
+        )
       } catch { /* use the indexed tree paths */ }
       if (!isCurrentTree()) return false
       if (savedExpanded) {
         expandedPaths.value = savedExpanded
       } else {
-        expandedPaths.value = collectTreePaths(deriveSessionPathTree(sessions.value, visibleRoot.value))
+        expandedPaths.value = collectTreePaths(deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value))
         persistExpandedPaths()
       }
       expandedPaths.value.add(visibleRoot.value)
@@ -1444,7 +1789,7 @@ export function activate(ctx: PluginContext): PluginExports {
     applyFilterChange()
     resetTranscript()
     expandedPaths.value = new Set(expandedPaths.value).add(visibleRoot.value)
-    persist(STORAGE_KEYS.treeRoot, visibleRoot.value)
+    persist(perAgentStorageKey(STORAGE_KEYS.treeRoot), visibleRoot.value)
     persistExpandedPaths()
   }
 
@@ -1455,7 +1800,7 @@ export function activate(ctx: PluginContext): PluginExports {
     pickerLoading.value = true
     pickerError.value = null
     try {
-      const result = await ctx.exec.run(['list-dirs', dir], { timeout: 10_000 })
+      const result = await runAgent(['list-dirs', dir], { timeout: 10_000 })
       if (!isActiveMount(mount) || requestSeq !== mount.pickerRequestSeq) return
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, 'list-dirs failed').message)
       const parsed = JSON.parse(result.stdout) as ListDirsResult
@@ -1513,7 +1858,7 @@ export function activate(ctx: PluginContext): PluginExports {
       return
     }
     try {
-      const result = await ctx.exec.run(['check-dir', nextRoot], { timeout: 10_000 })
+      const result = await runAgent(['check-dir', nextRoot], { timeout: 10_000 })
       if (!isCurrent()) return
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, 'check-dir failed').message)
       const checked = JSON.parse(result.stdout) as { exists?: boolean; dir?: boolean }
@@ -1590,7 +1935,7 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function scopedPartitionSessions(partition: SessionPartition): IndexedSession[] {
-    return filterSessions(sessions.value, {
+    return filterSessions(originFilteredSessions.value, {
       partition,
       scopePath: committedSelection.value.path,
       scopeMode: committedSelection.value.mode,
@@ -1601,7 +1946,11 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function sessionsForList(partition: SessionPartition): IndexedSession[] {
-    return sortSessions(filterSessions(sessions.value, {
+    const setting = sortSettings.value[partition]
+    const effectiveSetting = setting.field === 'msgcount' && !messageCountsAvailable()
+      ? { ...setting, field: 'idle' as const }
+      : setting
+    return sortSessions(filterSessions(originFilteredSessions.value, {
       partition,
       scopePath: committedSelection.value.path,
       scopeMode: committedSelection.value.mode,
@@ -1612,7 +1961,11 @@ export function activate(ctx: PluginContext): PluginExports {
       createdTo: createdRange.value.to,
       lastActiveFrom: lastActiveRange.value.from,
       lastActiveTo: lastActiveRange.value.to,
-    }), sortSettings.value[partition])
+    }), effectiveSetting)
+  }
+
+  function messageCountsAvailable(): boolean {
+    return originFilteredSessions.value.some(session => session.messageCount !== undefined)
   }
 
   function branchOptions(partition: SessionPartition): string[] {
@@ -1695,7 +2048,7 @@ export function activate(ctx: PluginContext): PluginExports {
     try {
       const args = ['search', query]
       if (!global) args.push('--scope', scopePath)
-      const result = await ctx.exec.run(args, { timeout: 30_000 })
+      const result = await runAgent(args, { timeout: 30_000 })
       if (!isCurrent()) return
       if (result.code !== 0) throw new Error(result.stderr || 'search failed')
       const parsed = JSON.parse(result.stdout)
@@ -1703,7 +2056,7 @@ export function activate(ctx: PluginContext): PluginExports {
       searchOverlay.value = {
         query,
         scopePath: global ? null : scopePath,
-        results: parsed as SearchResult[],
+        results: (parsed as SearchResult[]).filter(result => isSessionVisibleByOrigin(result.session)),
         selectedSessionId: null,
       }
       selection.value = selectionReducer(selection.value, { type: 'clear-anchor' })
@@ -1775,6 +2128,9 @@ export function activate(ctx: PluginContext): PluginExports {
 
   async function executeBulk(action: BulkAction) {
     await coordinateMutation(undefined, async isCurrent => {
+      const caps = activeCapabilities.value
+      if ((action === 'archive' || action === 'restore') && !caps.archive) return
+      if (action === 'delete' && (!caps.delete || (caps.deleteRequiresArchived && activePartition.value !== 'archive'))) return
       const confirmationItems = selectedItems()
       if (!confirmationItems.length) return
       const expectedSkipped = expectedBulkSkips(action, confirmationItems)
@@ -1791,7 +2147,7 @@ export function activate(ctx: PluginContext): PluginExports {
         const outcome = await runBulkSerial({
           action,
           items,
-          run: args => ctx.exec.run(args, { timeout: 30_000 }),
+          run: args => runAgent(args, { timeout: 30_000 }),
           isCancelled: () => !isCurrent() || bulkCancelRequested.value,
           onProgress: (completed, total, session) => {
             if (isCurrent()) bulkProgress.value = { completed, total, title: resolveSessionTitle(session) || t('untitled-session') }
@@ -1905,7 +2261,7 @@ export function activate(ctx: PluginContext): PluginExports {
             class: 'ccm-icon-btn',
             title: t('navigate-parent'),
             'aria-label': t('navigate-parent'),
-            disabled: bulkRunning.value || visibleRoot.value === '/',
+            disabled: loading.value || bulkRunning.value || visibleRoot.value === '/',
             onClick: () => setVisibleRoot(parentPath(visibleRoot.value)),
           }, [IconArrowLeft(15)]),
           h('button', {
@@ -1925,9 +2281,19 @@ export function activate(ctx: PluginContext): PluginExports {
           }, [committedSelection.value.mode === 'subtree' ? IconFolder(15) : IconFileText(15)]),
           h('button', {
             class: 'ccm-icon-btn',
+            title: t('use-selected-folder-as-tree-root'),
+            'aria-label': t('use-selected-folder-as-tree-root'),
+            disabled: loading.value
+              || bulkRunning.value
+              || !committedSelection.value.path
+              || committedSelection.value.path === visibleRoot.value,
+            onClick: () => setVisibleRoot(committedSelection.value.path),
+          }, [IconFolderDown(15)]),
+          h('button', {
+            class: 'ccm-icon-btn',
             title: t('change-tree-root'),
             'aria-label': t('change-tree-root'),
-            disabled: bulkRunning.value,
+            disabled: loading.value || bulkRunning.value,
             ref: (element: HTMLElement | null) => { pickerTriggerRef.value = element },
             onClick: openRootPicker,
           }, [IconPencil(15)]),
@@ -1945,15 +2311,22 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function renderCardActions(session: IndexedSession): any {
-    const actions = session.partition === 'active'
-      ? [
-          { label: t('resume-session'), icon: IconTerminal, action: 'resume' },
-          { label: t('archive-session'), icon: IconArchive, action: 'archive' },
-        ]
-      : [
-          { label: t('restore-session'), icon: IconArchiveRestore, action: 'restore' },
-          { label: t('delete-archived-session'), icon: IconTrash2, action: 'delete' },
-        ]
+    const caps = activeCapabilities.value
+    const actions: Array<{
+      label: string
+      icon: typeof IconTerminal
+      action: 'resume' | 'archive' | 'restore' | 'delete'
+    }> = []
+    if (session.partition === 'active') {
+      actions.push({ label: t('resume-session'), icon: IconTerminal, action: 'resume' })
+      if (caps.archive) actions.push({ label: t('archive-session'), icon: IconArchive, action: 'archive' })
+      if (caps.delete && !caps.deleteRequiresArchived) {
+        actions.push({ label: t('delete-session'), icon: IconTrash2, action: 'delete' })
+      }
+    } else {
+      if (caps.archive) actions.push({ label: t('restore-session'), icon: IconArchiveRestore, action: 'restore' })
+      if (caps.delete) actions.push({ label: t('delete-archived-session'), icon: IconTrash2, action: 'delete' })
+    }
     return h('div', { class: 'ccm-browser-session-actions' }, actions.map(({ label, icon, action }) => h('button', {
       class: 'ccm-icon-btn ccm-browser-card-action',
       title: label,
@@ -1965,7 +2338,7 @@ export function activate(ctx: PluginContext): PluginExports {
         if (action === 'resume') void resumeSession(session)
         else if (action === 'archive') void archiveSession(session)
         else if (action === 'restore') void restoreSession(session)
-        else void deleteArchivedSession(session)
+        else void deleteSession(session)
       },
     }, [icon(14)])))
   }
@@ -2034,8 +2407,10 @@ export function activate(ctx: PluginContext): PluginExports {
       h('div', { class: 'ccm-browser-session-footer' }, [
         h('span', {
           class: 'ccm-browser-session-stat',
-          title: t(session.messageCount === 1 ? 'message-count-one' : 'message-count-other', { n: session.messageCount }),
-        }, [IconHash(12), String(session.messageCount)]),
+          title: session.messageCount === undefined
+            ? t('message-count-unknown')
+            : t(session.messageCount === 1 ? 'message-count-one' : 'message-count-other', { n: session.messageCount }),
+        }, [IconHash(12), session.messageCount === undefined ? '—' : String(session.messageCount)]),
         h('span', { class: 'ccm-browser-session-branch', title: session.gitBranch || t('no-git-branch') }, session.gitBranch || t('no-branch')),
         renderCardActions(session),
       ]),
@@ -2075,7 +2450,12 @@ export function activate(ctx: PluginContext): PluginExports {
       ]),
       h('div', { class: 'ccm-browser-search-match' }, result.match),
       h('div', { class: 'ccm-browser-session-footer' }, [
-        h('span', { class: 'ccm-browser-session-stat' }, [IconHash(12), String(session.messageCount)]),
+        h('span', {
+          class: 'ccm-browser-session-stat',
+          title: session.messageCount === undefined
+            ? t('message-count-unknown')
+            : t(session.messageCount === 1 ? 'message-count-one' : 'message-count-other', { n: session.messageCount }),
+        }, [IconHash(12), session.messageCount === undefined ? '—' : String(session.messageCount)]),
         h('span', { class: 'ccm-browser-session-branch' }, session.gitBranch || t('no-branch')),
       ]),
     ])
@@ -2088,7 +2468,14 @@ export function activate(ctx: PluginContext): PluginExports {
     const breadcrumbs: any[] = [
       h('span', {
         class: 'ccm-picker-crumb',
+        role: 'button',
+        tabindex: 0,
         onClick: () => { void navigatePickerDir('/') },
+        onKeydown: (event: KeyboardEvent) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          void navigatePickerDir('/')
+        },
       }, '/'),
     ]
     let accumulated = ''
@@ -2098,7 +2485,14 @@ export function activate(ctx: PluginContext): PluginExports {
       breadcrumbs.push(h('span', { class: 'ccm-picker-crumb-sep' }, '/'))
       breadcrumbs.push(h('span', {
         class: 'ccm-picker-crumb',
+        role: 'button',
+        tabindex: 0,
         onClick: () => { void navigatePickerDir(target) },
+        onKeydown: (event: KeyboardEvent) => {
+          if (event.key !== 'Enter' && event.key !== ' ') return
+          event.preventDefault()
+          void navigatePickerDir(target)
+        },
       }, segment))
     }
 
@@ -2143,7 +2537,6 @@ export function activate(ctx: PluginContext): PluginExports {
             onClick: () => { void validateAndCommitRoot(pickerManualPath.value) },
           }, [IconCheck(14), h('span', {}, t('picker-use-manual-path'))]),
         ]),
-        h('div', { class: 'ccm-picker-breadcrumb' }, breadcrumbs),
         h('div', { class: 'ccm-picker-current' }, [IconFolder(14), h('span', {}, t('picker-current', { path: dir }))]),
         h('div', { class: 'ccm-picker-actions' }, [
           h('button', {
@@ -2152,6 +2545,7 @@ export function activate(ctx: PluginContext): PluginExports {
             onClick: () => { void validateAndCommitRoot(dir) },
           }, [IconCheck(14), h('span', {}, t('picker-select-current', { name: dir.split('/').pop() || '/' }))]),
         ]),
+        h('div', { class: 'ccm-picker-breadcrumb' }, breadcrumbs),
         h('div', { class: 'ccm-picker-list' }, pickerLoading.value
           ? h('div', { class: 'ccm-picker-empty' }, [h('span', { class: 'ccm-browser-spinner' }), h('span', {}, t('picker-loading'))])
           : pickerError.value
@@ -2232,6 +2626,42 @@ export function activate(ctx: PluginContext): PluginExports {
           onChange: (event: Event) => setThemeFollowHost((event.target as HTMLInputElement).checked),
         }),
       ]),
+      activeCapabilities.value.originFilter ? h('label', {
+        class: 'ccm-browser-settings-row ccm-browser-settings-toggle',
+        title: t('hide-scripted-sessions-tooltip'),
+      }, [
+        h('span', { class: 'ccm-browser-settings-label' }, t('hide-scripted-sessions')),
+        h('input', {
+          type: 'checkbox',
+          checked: hideScriptedSessions.value,
+          'aria-label': t('hide-scripted-sessions'),
+          onChange: (event: Event) => setHideScriptedSessions((event.target as HTMLInputElement).checked),
+        }),
+      ]) : null,
+    ])
+  }
+
+  function renderAgentSwitcher(): any {
+    const descriptor = activeDescriptor.value
+    return h('label', {
+      class: 'ccm-browser-select-control',
+      title: descriptor ? agentTooltip(descriptor) : t('agent-switcher'),
+    }, [
+      IconTerminal(13),
+      h('select', {
+        value: activeAgent.value,
+        disabled: loading.value || bulkRunning.value || mutationInFlight || agents.value.length === 0,
+        'aria-label': t('agent-switcher'),
+        onChange: (event: Event) => {
+          void switchAgent((event.target as HTMLSelectElement).value as AgentId)
+        },
+      }, agents.value.map(agent => h('option', {
+        value: agent.id,
+        disabled: !agent.available,
+        title: agentTooltip(agent),
+      }, agent.degraded
+        ? t('agent-degraded-option', { agent: agentLabel(agent) })
+        : agentLabel(agent)))),
     ])
   }
 
@@ -2243,8 +2673,9 @@ export function activate(ctx: PluginContext): PluginExports {
     const maxPage = Math.max(1, Math.ceil(listedSessions.length / pageSize.value))
     const pageSessions = listedSessions.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
     const pageKeys = pageSessions.map(sessionKey)
+    const allSelected = listedSessions.length > 0 && listedSessions.every(session => selection.value.selected.has(sessionKey(session)))
     const createdRangeActive = Boolean(createdRange.value.from || createdRange.value.to)
-    const undatedExcluded = createdRangeActive ? sessions.value.filter(session => {
+    const undatedExcluded = createdRangeActive ? originFilteredSessions.value.filter(session => {
       if (!Number.isNaN(Date.parse(session.createdAt))) return false
       return filterSessions([session], {
         partition,
@@ -2258,8 +2689,20 @@ export function activate(ctx: PluginContext): PluginExports {
       }).length > 0
     }).length : 0
     const archiveSearchTooltip = t('archive-search-p2')
-    const currentSort = sortSettings.value[partition]
+    const caps = activeCapabilities.value
+    const savedSort = sortSettings.value[partition]
+    const currentSort = savedSort.field === 'msgcount' && !messageCountsAvailable()
+      ? { ...savedSort, field: 'idle' as const }
+      : savedSort
     const branches = branchOptions(partition)
+    const filteredBranches = filterBranchOptions(branches, branchPickerQuery.value)
+    const dateRangesActive = Boolean(
+      createdRange.value.from || createdRange.value.to || lastActiveRange.value.from || lastActiveRange.value.to,
+    )
+    const anyFilterActive = timeRange.value !== 'all'
+      || Boolean(branchFilter.value)
+      || Boolean(searchQuery.value.trim())
+      || dateRangesActive
     return h('section', {
       class: 'ccm-browser-pane ccm-browser-list-pane',
       style: compactMode.value ? undefined : { width: `calc(${paneWidths.value.middle}px * var(--ccm-fs, 1))` },
@@ -2272,9 +2715,11 @@ export function activate(ctx: PluginContext): PluginExports {
           onClick: () => {
             settingsOpen.value = false
             filtersOpen.value = false
+            branchPickerOpen.value = false
             compactView.value = 'tree'
           },
         }, [IconFolder(15)]) : null,
+        renderAgentSwitcher(),
         h('div', { class: 'ccm-browser-partition-tabs', role: 'tablist', 'aria-label': t('session-partition') }, [
           h('button', {
             class: ['ccm-browser-partition-tab', partition === 'active' ? 'ccm-browser-partition-tab-active' : ''],
@@ -2283,13 +2728,13 @@ export function activate(ctx: PluginContext): PluginExports {
             disabled: bulkRunning.value,
             onClick: () => setPartition('active'),
           }, t('active')),
-          h('button', {
+          caps.archive ? h('button', {
             class: ['ccm-browser-partition-tab', partition === 'archive' ? 'ccm-browser-partition-tab-active' : ''],
             role: 'tab',
             'aria-selected': partition === 'archive',
             disabled: bulkRunning.value,
             onClick: () => setPartition('archive'),
-          }, t('archive')),
+          }, t('archive')) : null,
         ]),
         h('div', { class: 'ccm-browser-pane-count' }, String(displayedCount)),
         h('button', {
@@ -2297,7 +2742,10 @@ export function activate(ctx: PluginContext): PluginExports {
           title: t('select-mode'),
           'aria-label': t('select-mode'),
           disabled: bulkRunning.value || Boolean(overlay),
-          onClick: () => { selectMode.value = !selectMode.value },
+          onClick: () => {
+            selectMode.value = !selectMode.value
+            if (!selectMode.value) selection.value = selectionReducer(selection.value, { type: 'clear-partition' })
+          },
         }, [IconCheck(15)]),
         h('div', { class: ['ccm-browser-settings', settingsOpen.value ? 'ccm-browser-settings-open' : ''] }, [
           h('button', {
@@ -2306,7 +2754,13 @@ export function activate(ctx: PluginContext): PluginExports {
             'aria-label': t('settings'),
             'aria-expanded': settingsOpen.value,
             disabled: bulkRunning.value,
-            onClick: () => { settingsOpen.value = !settingsOpen.value; if (settingsOpen.value) filtersOpen.value = false },
+            onClick: () => {
+              settingsOpen.value = !settingsOpen.value
+              if (settingsOpen.value) {
+                filtersOpen.value = false
+                branchPickerOpen.value = false
+              }
+            },
           }, [IconSettings(15)]),
           renderSettingsPopover(),
         ]),
@@ -2315,7 +2769,7 @@ export function activate(ctx: PluginContext): PluginExports {
         h('label', { class: 'ccm-browser-search-box', title: partition === 'archive' ? archiveSearchTooltip : t('type-filter-search') }, [
           IconSearch(14),
           h('input', {
-            id: 'cc-session-browser-search-input',
+            id: 'session-browser-search-input',
             ref: (element: HTMLInputElement | null) => { searchInputRef.value = element },
             value: searchQuery.value,
             disabled: bulkRunning.value,
@@ -2368,7 +2822,7 @@ export function activate(ctx: PluginContext): PluginExports {
           }, [
             h('option', { value: 'idle' }, t('idle')),
             h('option', { value: 'created' }, t('created')),
-            h('option', { value: 'msgcount' }, t('messages')),
+            messageCountsAvailable() ? h('option', { value: 'msgcount' }, t('messages')) : null,
           ]),
         ]),
         h('button', {
@@ -2387,27 +2841,110 @@ export function activate(ctx: PluginContext): PluginExports {
             onChange: (event: Event) => setTimeRange((event.target as HTMLSelectElement).value as TimeRangeFilter),
           }, [
             h('option', { value: 'all' }, t('all-time')),
-            h('option', { value: '24h' }, t('time-24h')),
-            h('option', { value: '7d' }, t('time-7d')),
-            h('option', { value: '30d' }, t('time-30d')),
+            h('optgroup', { label: t('activity-recent') }, [
+              h('option', { value: '24h' }, t('time-24h')),
+              h('option', { value: '7d' }, t('time-7d')),
+              h('option', { value: '30d' }, t('time-30d')),
+            ]),
+            h('optgroup', { label: t('activity-stale') }, [
+              h('option', { value: 'older-15d' }, t('time-older-15d')),
+              h('option', { value: 'older-30d' }, t('time-older-30d')),
+            ]),
           ]),
         ]),
-        h('label', { class: 'ccm-browser-select-control ccm-browser-branch-filter', title: t('filter-by-git-branch') }, [
-          IconHash(13),
-          h('select', {
-            value: branchFilter.value,
-            disabled: bulkRunning.value,
+        h('div', { class: ['ccm-browser-settings ccm-browser-branch-filter', branchPickerOpen.value ? 'ccm-browser-settings-open' : ''] }, [
+          h('button', {
+            class: 'ccm-icon-btn ccm-browser-select-control ccm-browser-branch-trigger',
+            type: 'button',
+            title: t('filter-by-git-branch'),
             'aria-label': t('filter-by-git-branch'),
-            onChange: (event: Event) => { branchFilter.value = (event.target as HTMLSelectElement).value; applyFilterChange() },
-          }, [h('option', { value: '' }, t('all-branches')), ...branches.map(branch => h('option', { value: branch }, branch))]),
+            disabled: bulkRunning.value,
+            onClick: () => {
+              branchPickerOpen.value = !branchPickerOpen.value
+              if (branchPickerOpen.value) {
+                branchPickerQuery.value = ''
+                scheduleMountTimeout(() => branchSearchRef.value?.focus(), 0)
+                filtersOpen.value = false
+                settingsOpen.value = false
+              }
+            },
+          }, [IconHash(13), h('span', { class: 'ccm-browser-branch-current' }, branchFilter.value || t('all-branches'))]),
+          branchPickerOpen.value ? h('div', {
+            class: 'ccm-browser-settings-popover ccm-browser-branch-popover',
+            role: 'dialog',
+            'aria-label': t('filter-by-git-branch'),
+          }, [
+            h('input', {
+              class: 'ccm-browser-branch-search',
+              type: 'search',
+              ref: (element: HTMLInputElement | null) => { branchSearchRef.value = element },
+              value: branchPickerQuery.value,
+              placeholder: t('branch-search-placeholder'),
+              'aria-label': t('branch-search-placeholder'),
+              disabled: bulkRunning.value,
+              onInput: (event: Event) => { branchPickerQuery.value = (event.target as HTMLInputElement).value },
+              onKeydown: (event: KeyboardEvent) => {
+                if (event.key === 'Escape') {
+                  event.preventDefault()
+                  branchPickerOpen.value = false
+                } else if (event.key === 'Enter' && filteredBranches.length > 0) {
+                  event.preventDefault()
+                  branchFilter.value = filteredBranches[0]
+                  branchPickerOpen.value = false
+                  branchPickerQuery.value = ''
+                  applyFilterChange()
+                }
+              },
+            }),
+            h('div', { class: 'ccm-browser-branch-options', role: 'listbox' }, [
+              h('button', {
+                class: ['ccm-browser-branch-option', branchFilter.value === '' ? 'is-active' : ''],
+                type: 'button',
+                role: 'option',
+                'aria-selected': branchFilter.value === '',
+                disabled: bulkRunning.value,
+                onClick: () => {
+                  branchFilter.value = ''
+                  branchPickerOpen.value = false
+                  branchPickerQuery.value = ''
+                  applyFilterChange()
+                },
+              }, t('all-branches')),
+              ...filteredBranches.map(branch => h('button', {
+                class: ['ccm-browser-branch-option', branchFilter.value === branch ? 'is-active' : ''],
+                type: 'button',
+                role: 'option',
+                'aria-selected': branchFilter.value === branch,
+                disabled: bulkRunning.value,
+                title: branch,
+                onClick: () => {
+                  branchFilter.value = branch
+                  branchPickerOpen.value = false
+                  branchPickerQuery.value = ''
+                  applyFilterChange()
+                },
+              }, branch)),
+              filteredBranches.length === 0 ? h('div', { class: 'ccm-browser-branch-empty' }, t('no-branch-matches')) : null,
+            ]),
+          ]) : null,
         ]),
         h('div', { class: ['ccm-browser-settings', filtersOpen.value ? 'ccm-browser-settings-open' : ''] }, [
           h('button', {
-            class: ['ccm-icon-btn', filtersOpen.value ? 'ccm-icon-btn-active' : ''],
+            class: [
+              'ccm-icon-btn ccm-browser-text-control',
+              filtersOpen.value ? 'ccm-icon-btn-active' : '',
+              dateRangesActive ? 'ccm-browser-has-active' : '',
+            ],
             title: t('date-filters'),
             'aria-label': t('date-filters'),
             disabled: bulkRunning.value,
-            onClick: () => { filtersOpen.value = !filtersOpen.value; if (filtersOpen.value) settingsOpen.value = false },
+            onClick: () => {
+              filtersOpen.value = !filtersOpen.value
+              if (filtersOpen.value) {
+                settingsOpen.value = false
+                branchPickerOpen.value = false
+              }
+            },
           }, t('date-filter-short')),
           filtersOpen.value ? h('div', { class: 'ccm-browser-settings-popover', role: 'dialog', 'aria-label': t('date-filters') }, [
             h('fieldset', {}, [
@@ -2420,9 +2957,16 @@ export function activate(ctx: PluginContext): PluginExports {
               h('label', {}, [t('date-from'), h('input', { type: 'date', disabled: bulkRunning.value, value: lastActiveRange.value.from, onChange: (event: Event) => commitDateRange('lastActive', 'from', (event.target as HTMLInputElement).value) })]),
               h('label', {}, [t('date-to'), h('input', { type: 'date', disabled: bulkRunning.value, value: lastActiveRange.value.to, onChange: (event: Event) => commitDateRange('lastActive', 'to', (event.target as HTMLInputElement).value) })]),
             ]),
-            h('button', { type: 'button', disabled: bulkRunning.value, onClick: clearAllFilters }, t('clear-all-filters')),
           ]) : null,
         ]),
+        anyFilterActive ? h('button', {
+          class: 'ccm-icon-btn ccm-browser-text-control ccm-browser-secondary-control ccm-browser-reset-filters',
+          type: 'button',
+          title: t('clear-all-filters'),
+          'aria-label': t('clear-all-filters'),
+          disabled: bulkRunning.value,
+          onClick: clearAllFilters,
+        }, [IconX(13)]) : null,
       ]),
       h('div', {
         class: ['ccm-browser-scope-summary', overlay ? 'ccm-browser-search-breadcrumb' : ''],
@@ -2455,28 +2999,51 @@ export function activate(ctx: PluginContext): PluginExports {
                 ? pageSessions.map(session => renderSessionCard(session, pageKeys))
                 : h('div', { class: 'ccm-browser-pane-state' }, t('no-matching-sessions', { partition: t(partition) })),
       ]),
-      !overlay && selectMode.value ? h('div', { class: 'ccm-browser-filter-row' }, [
+      !overlay && selectMode.value ? h('div', { class: 'ccm-browser-filter-row ccm-browser-select-bar' }, [
         h('button', {
+          class: 'ccm-icon-btn ccm-browser-action-control',
           disabled: bulkRunning.value || listedSessions.length === 0,
-          onClick: () => { selection.value = selectionReducer(selection.value, { type: 'snapshot-all', keys: listedSessions.map(sessionKey) }) },
-        }, t('select-all-filtered', { n: listedSessions.length })),
-        h('span', {}, t('selected-count', { n: selection.value.selected.size })),
+          onClick: () => {
+            selection.value = selectionReducer(selection.value, allSelected
+              ? { type: 'clear-partition' }
+              : { type: 'snapshot-all', keys: listedSessions.map(sessionKey) })
+          },
+        }, [IconCheck(13), t(allSelected ? 'deselect-all' : 'select-all-filtered', { n: listedSessions.length })]),
+        h('span', { class: 'ccm-browser-selected-count' }, t('selected-count', { n: selection.value.selected.size })),
+        selection.value.selected.size > 0 ? h('button', {
+          class: 'ccm-icon-btn ccm-browser-clear-selection',
+          title: t('clear-selection'),
+          'aria-label': t('clear-selection'),
+          disabled: bulkRunning.value,
+          onClick: () => { selection.value = selectionReducer(selection.value, { type: 'clear-partition' }) },
+        }, [IconX(13)]) : null,
       ]) : null,
-      !overlay && selection.value.selected.size ? h('div', { class: 'ccm-browser-filter-row', role: 'toolbar', 'aria-label': t('bulk-actions') }, [
-        partition === 'active'
-          ? h('button', { disabled: bulkRunning.value, onClick: () => { void executeBulk('archive') } }, t('bulk-archive', { n: selectedItems().length }))
-          : h('button', { disabled: bulkRunning.value, onClick: () => { void executeBulk('restore') } }, t('bulk-restore', { n: selectedItems().length })),
-        partition === 'archive'
-          ? h('button', { disabled: bulkRunning.value, onClick: () => { void executeBulk('delete') } }, t('bulk-delete', { n: selectedItems().length }))
+      !overlay && selection.value.selected.size ? h('div', { class: 'ccm-browser-filter-row ccm-browser-bulk-toolbar', role: 'toolbar', 'aria-label': t('bulk-actions') }, [
+        caps.archive && partition === 'active'
+          ? h('button', { class: 'ccm-icon-btn ccm-browser-action-control', disabled: bulkRunning.value, onClick: () => { void executeBulk('archive') } }, [IconArchive(13), t('bulk-archive', { n: selectedItems().length })])
           : null,
-        bulkRunning.value ? h('button', { onClick: () => { bulkCancelRequested.value = true } }, t('cancel')) : null,
+        caps.archive && partition === 'archive'
+          ? h('button', { class: 'ccm-icon-btn ccm-browser-action-control', disabled: bulkRunning.value, onClick: () => { void executeBulk('restore') } }, [IconArchiveRestore(13), t('bulk-restore', { n: selectedItems().length })])
+          : null,
+        caps.delete && (partition === 'archive' || !caps.deleteRequiresArchived)
+          ? h('button', { class: 'ccm-icon-btn ccm-browser-action-control ccm-browser-danger-control', disabled: bulkRunning.value, onClick: () => { void executeBulk('delete') } }, [IconTrash2(13), t('bulk-delete', { n: selectedItems().length })])
+          : null,
+        bulkRunning.value ? h('button', { class: 'ccm-icon-btn ccm-browser-action-control ccm-browser-secondary-control', onClick: () => { bulkCancelRequested.value = true } }, [IconX(13), t('cancel')]) : null,
       ]) : null,
       bulkRunning.value ? h('div', { role: 'status' }, [
         h('progress', { value: bulkProgress.value.completed, max: bulkProgress.value.total }),
         h('span', {}, t('bulk-progress', { n: bulkProgress.value.completed, total: bulkProgress.value.total, title: bulkProgress.value.title })),
       ]) : null,
-      bulkResult.value ? h('div', { role: 'status', style: { maxHeight: '10rem', overflow: 'auto' } }, [
-        h('div', {}, t('bulk-result', { done: bulkResult.value.done, failed: bulkResult.value.failed, skipped: bulkResult.value.skipped })),
+      bulkResult.value ? h('div', { class: 'ccm-browser-bulk-result', role: 'status' }, [
+        h('div', { class: 'ccm-browser-bulk-result-summary' }, [
+          h('span', {}, t('bulk-result', { done: bulkResult.value.done, failed: bulkResult.value.failed, skipped: bulkResult.value.skipped })),
+          h('button', {
+            class: 'ccm-icon-btn',
+            title: t('dismiss-result'),
+            'aria-label': t('dismiss-result'),
+            onClick: () => { bulkResult.value = null; bulkRefreshFailed.value = false },
+          }, [IconX(13)]),
+        ]),
         bulkRefreshFailed.value ? h('div', {}, t('bulk-refresh-stale')) : null,
         ...bulkResult.value.results.filter(result => result.status !== 'done').map(result => h('div', { key: result.key }, [
           h('strong', {}, resolveSessionTitle(result.session) || t('untitled-session')),
@@ -2700,6 +3267,7 @@ export function activate(ctx: PluginContext): PluginExports {
       h('div', { class: 'ccm-browser-detail-placeholder' }, t('session-select-prompt')),
     ])
 
+    const caps = activeCapabilities.value
     const unhealthy = session.health === 'empty' || session.health === 'truncated'
     return h('main', { class: 'ccm-browser-pane ccm-browser-detail-pane' }, [
       h('div', { class: 'ccm-browser-pane-header ccm-browser-transcript-header' }, [
@@ -2724,13 +3292,13 @@ export function activate(ctx: PluginContext): PluginExports {
           h('div', { class: 'ccm-browser-transcript-span', title: `${session.createdAt} → ${session.lastActiveAt}` }, formatSessionSpan(session.createdAt, session.lastActiveAt, locale(), t)),
         ]),
         h('div', { class: 'ccm-browser-pane-actions' }, [
-          h('button', {
+          session.partition === 'active' || caps.archive ? h('button', {
             class: 'ccm-icon-btn',
             title: t('resume-session'),
             'aria-label': t('resume-session'),
             disabled: bulkRunning.value,
             onClick: () => { void resumeSession(session) },
-          }, [IconTerminal(15)]),
+          }, [IconTerminal(15)]) : null,
           h('button', {
             class: 'ccm-icon-btn',
             title: t('copy-resume-command'),
@@ -2787,10 +3355,12 @@ export function activate(ctx: PluginContext): PluginExports {
           if (rootRef.value) observeRootElement(mount, rootRef.value)
           const preserveState = hasMounted
           hasMounted = true
-          void loadDisplaySettings()
           void loadPaneWidths()
           void loadSortSettings()
-          void loadIndex(preserveState)
+          void (async () => {
+            await loadDisplaySettings()
+            if (isActiveMount(mount)) await initializeAgents(preserveState)
+          })()
         })
         ctx.onUnmounted(() => {
           bulkCancelRequested.value = true
@@ -2834,11 +3404,11 @@ export function activate(ctx: PluginContext): PluginExports {
               : {}),
           },
         }, [
-          (settingsOpen.value || filtersOpen.value)
+          (settingsOpen.value || filtersOpen.value || branchPickerOpen.value)
             ? h('div', {
                 class: 'ccm-browser-settings-scrim',
                 'aria-hidden': 'true',
-                onClick: () => { settingsOpen.value = false; filtersOpen.value = false },
+                onClick: () => { settingsOpen.value = false; filtersOpen.value = false; branchPickerOpen.value = false },
               })
             : null,
           error.value

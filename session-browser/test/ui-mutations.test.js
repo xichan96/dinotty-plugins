@@ -5,7 +5,7 @@ const path = require('node:path')
 const test = require('node:test')
 const esbuild = require('esbuild')
 
-const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-session-browser-ui-mutations-'))
+const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-browser-ui-mutations-'))
 const bundlePath = path.join(bundleDir, 'ui.cjs')
 esbuild.buildSync({
   entryPoints: [path.resolve(__dirname, '../src/ui.ts')],
@@ -453,7 +453,7 @@ test('a full-text response is dropped when its request-time scope changes', asyn
   })
   try {
     let nodes = flatten(harness.plugin.component.render())
-    const input = nodes.find(node => node?.tag === 'input' && node.props?.id === 'cc-session-browser-search-input')
+    const input = nodes.find(node => node?.tag === 'input' && node.props?.id === 'session-browser-search-input')
     input.props.onInput({ target: { value: 'needle' } })
     nodes = flatten(harness.plugin.component.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Run full-text search').props.onClick()
@@ -607,7 +607,7 @@ test('unmount resets transcript, search, and picker loading flags before remount
   try {
     let nodes = flatten(harness.plugin.component.render())
     nodes.find(node => node?.tag === 'article').props.onClick()
-    nodes.find(node => node?.tag === 'input' && node.props?.id === 'cc-session-browser-search-input').props.onInput({ target: { value: 'needle' } })
+    nodes.find(node => node?.tag === 'input' && node.props?.id === 'session-browser-search-input').props.onInput({ target: { value: 'needle' } })
     nodes = flatten(harness.plugin.component.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Run full-text search').props.onClick()
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
@@ -637,7 +637,7 @@ test('a tree root change during build-index is not overwritten by that request',
   const harness = await mount([], async args => {
     if (args[0] === 'build-index') return build.promise
   }, undefined, {
-    storageGet: (key, fallback) => key === 'treeRoot' ? '/stored' : fallback(),
+    storageGet: (key, fallback) => key === 'treeRoot:claude-code' ? '/stored' : fallback(),
   })
   try {
     let nodes = flatten(harness.plugin.component.render())
@@ -646,7 +646,7 @@ test('a tree root change during build-index is not overwritten by that request',
     const input = nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input')
     input.props.onInput({ target: { value: '/chosen' } })
     nodes = flatten(harness.plugin.component.render())
-    nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use entered path').props.onClick()
+    nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root').props.onClick()
     await flush()
 
     build.resolve({ code: 0, stdout: JSON.stringify([indexed]), stderr: '' })
@@ -662,7 +662,7 @@ test('tree invalidation during stored-root loading clears the index loading flag
   const storedRoot = deferred()
   const indexed = session('13131313-1313-1313-1313-131313131313', 'active', { rootPath: '/indexed' })
   const harness = await mount([indexed], undefined, undefined, {
-    storageGet: (key, fallback) => key === 'treeRoot' ? storedRoot.promise : fallback(),
+    storageGet: (key, fallback) => key === 'treeRoot:claude-code' ? storedRoot.promise : fallback(),
   })
   try {
     let nodes = flatten(harness.plugin.component.render())
@@ -670,7 +670,7 @@ test('tree invalidation during stored-root loading clears the index loading flag
     nodes = flatten(harness.plugin.component.render())
     nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input').props.onInput({ target: { value: '/chosen' } })
     nodes = flatten(harness.plugin.component.render())
-    nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use entered path').props.onClick()
+    nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root').props.onClick()
     await flush()
 
     storedRoot.resolve('/stored')
@@ -695,7 +695,7 @@ test('an older root validation cannot overwrite a newer accepted picker root', a
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
     nodes = flatten(harness.plugin.component.render())
     const input = nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input')
-    const usePath = () => flatten(harness.plugin.component.render()).find(node => node?.tag === 'button' && textOf(node) === 'Use entered path')
+    const usePath = () => flatten(harness.plugin.component.render()).find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root')
     input.props.onInput({ target: { value: '/older' } })
     usePath().props.onClick()
     input.props.onInput({ target: { value: '/newer' } })
@@ -708,6 +708,50 @@ test('an older root validation cannot overwrite a newer accepted picker root', a
     await flush()
     const root = flatten(harness.plugin.component.render()).find(node => node?.props?.class === 'ccm-browser-root-path')
     assert.equal(textOf(root), '/newer')
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('a stored tree root for one agent does not leak into another agent', async () => {
+  const claudeSession = session('14141414-1414-1414-1414-141414141414', 'active', { rootPath: '/claude-indexed' })
+  const codexSession = session('15151515-1515-1515-1515-151515151515', 'active', { rootPath: '/codex-indexed' })
+  const capabilities = {
+    archive: true,
+    rename: false,
+    delete: true,
+    deleteRequiresArchived: true,
+    nativeIndex: true,
+    tokenStats: false,
+    originFilter: false,
+  }
+  const harness = await mount([], async args => {
+    if (args[0] === 'agents') {
+      return {
+        code: 0,
+        stdout: JSON.stringify([
+          { id: 'claude-code', available: true, capabilities },
+          { id: 'codex', available: true, capabilities },
+        ]),
+        stderr: '',
+      }
+    }
+    if (args[0] === 'build-index') {
+      const indexed = args[args.indexOf('--agent') + 1] === 'codex' ? [codexSession] : [claudeSession]
+      return { code: 0, stdout: JSON.stringify(indexed), stderr: '' }
+    }
+  }, undefined, {
+    storageGet: (key, fallback) => key === 'treeRoot:claude-code' ? '/claude-stored' : fallback(),
+  })
+  try {
+    let nodes = flatten(harness.plugin.component.render())
+    assert.equal(textOf(nodes.find(node => node?.props?.class === 'ccm-browser-root-path')), '/claude-stored')
+
+    nodes.find(node => node?.tag === 'select' && node.props?.value === 'claude-code').props.onChange({ target: { value: 'codex' } })
+    await flush()
+
+    nodes = flatten(harness.plugin.component.render())
+    assert.equal(textOf(nodes.find(node => node?.props?.class === 'ccm-browser-root-path')), '/codex-indexed')
   } finally {
     harness.cleanup()
   }

@@ -5,7 +5,7 @@ const path = require('node:path')
 const test = require('node:test')
 const esbuild = require('esbuild')
 
-const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-session-browser-ui-test-'))
+const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-browser-ui-test-'))
 const bundlePath = path.join(bundleDir, 'ui.cjs')
 const diffBundlePath = path.join(bundleDir, 'diff.cjs')
 const uiSource = fs.readFileSync(path.resolve(__dirname, '../src/ui.ts'), 'utf8')
@@ -29,6 +29,7 @@ const {
   cleanFirstPrompt,
   DEFAULT_PARTITION_SORT,
   deriveSessionPathTree,
+  filterBranchOptions,
   filterSessions,
   isSafeTranscriptHref,
   nextTranscriptBatchEnd,
@@ -44,6 +45,13 @@ const {
 const { computeEditDiff, DIFF_MAX_LINES, isFullDiffSafe } = require(diffBundlePath)
 
 test.after(() => fs.rmSync(bundleDir, { recursive: true, force: true }))
+
+test('filterBranchOptions filters case-insensitive substrings and preserves empty queries', () => {
+  const options = ['feature/Search', 'main', 'Release']
+  assert.deepEqual(filterBranchOptions(options, 'SEAr'), ['feature/Search'])
+  assert.deepEqual(filterBranchOptions(options, '  '), options)
+  assert.deepEqual(filterBranchOptions(options, 'missing'), [])
+})
 
 test('transcript batches advance by 50 without exceeding the parsed message count', () => {
   assert.equal(nextTranscriptBatchEnd(132, 0), 50)
@@ -222,6 +230,24 @@ test('filterSessions applies last-active time, branch, and quick title search', 
   }, Date.parse('2026-07-16T12:00:00.000Z'))
 
   assert.deepEqual(filtered.map(item => item.id), ['matching'])
+})
+
+test('filterSessions applies staleness presets with inclusive boundaries', () => {
+  const now = Date.parse('2026-07-16T12:00:00.000Z')
+  const fresh = session('fresh', '/work', 'active', new Date(now - 1 * 24 * 60 * 60_000).toISOString())
+  const old = session('old', '/work', 'active', new Date(now - 20 * 24 * 60 * 60_000).toISOString())
+  const boundary = session('boundary', '/work', 'active', new Date(now - 15 * 24 * 60 * 60_000).toISOString())
+  const filters = {
+    partition: 'active',
+    scopePath: '/work',
+    scopeMode: 'exact',
+    branch: '',
+    query: '',
+  }
+
+  assert.deepEqual(filterSessions([fresh, old], { ...filters, timeRange: 'older-15d' }, now).map(item => item.id), ['old'])
+  assert.deepEqual(filterSessions([fresh, old], { ...filters, timeRange: 'older-30d' }, now).map(item => item.id), [])
+  assert.deepEqual(filterSessions([boundary], { ...filters, timeRange: 'older-15d' }, now).map(item => item.id), ['boundary'])
 })
 
 test('deriveSessionPathTree builds a sparse tree with subtree counts and newest activity', () => {

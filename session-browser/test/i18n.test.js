@@ -5,7 +5,7 @@ const path = require('node:path')
 const test = require('node:test')
 const esbuild = require('esbuild')
 
-const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-session-browser-i18n-test-'))
+const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-browser-i18n-test-'))
 const i18nBundlePath = path.join(bundleDir, 'i18n.cjs')
 const uiBundlePath = path.join(bundleDir, 'ui.cjs')
 esbuild.buildSync({
