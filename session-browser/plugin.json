@@ -1,0 +1,15 @@
+{
+  "id": "session-browser",
+  "name": "Session Browser",
+  "version": "0.1.0",
+  "description": "Read-only session browser for Claude Code and Codex — browse, search, archive/restore history sessions (no composer)",
+  "description_zh": "Claude Code 与 Codex 的只读会话浏览器 — 浏览、搜索、归档/恢复会话（无输入框）",
+  "icon": "history",
+  "entry": "./dist/main.js",
+  "bin": { "mode": "cli", "entry": "dist/cli-wrapper" },
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "session-browser.open", "title": "Open Session Browser" },
+    { "id": "session-browser.search", "title": "Search Sessions" }
+  ]
+}

@@ -5,7 +5,7 @@ const path = require('node:path')
 const test = require('node:test')
 const esbuild = require('esbuild')
 
-const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-session-browser-batch3-'))
+const bundleDir = fs.mkdtempSync(path.join(os.tmpdir(), 'session-browser-batch3-'))
 const bundlePath = path.join(bundleDir, 'ui.cjs')
 esbuild.buildSync({
   entryPoints: [path.resolve(__dirname, '../src/ui.ts')],

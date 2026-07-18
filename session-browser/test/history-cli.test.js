@@ -48,7 +48,7 @@ function runJson(args) {
 }
 
 beforeEach(() => {
-  fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'cc-session-browser-'))
+  fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'session-browser-'))
   env = {
     ...process.env,
     HOME: path.join(fixture, 'home'),
