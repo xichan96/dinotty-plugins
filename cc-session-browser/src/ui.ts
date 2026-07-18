@@ -16,7 +16,6 @@ import {
   IconGlobe,
   IconHash,
   IconPencil,
-  IconPlay,
   IconRefresh,
   IconSearch,
   IconSettings,
@@ -1948,7 +1947,7 @@ export function activate(ctx: PluginContext): PluginExports {
   function renderCardActions(session: IndexedSession): any {
     const actions = session.partition === 'active'
       ? [
-          { label: t('resume-session'), icon: IconPlay, action: 'resume' },
+          { label: t('resume-session'), icon: IconTerminal, action: 'resume' },
           { label: t('archive-session'), icon: IconArchive, action: 'archive' },
         ]
       : [
@@ -2731,7 +2730,7 @@ export function activate(ctx: PluginContext): PluginExports {
             'aria-label': t('resume-session'),
             disabled: bulkRunning.value,
             onClick: () => { void resumeSession(session) },
-          }, [IconPlay(15)]),
+          }, [IconTerminal(15)]),
           h('button', {
             class: 'ccm-icon-btn',
             title: t('copy-resume-command'),
