@@ -592,6 +592,7 @@ export const codexConnector: SessionConnector = {
     }
   },
   buildIndex: () => output(listThreads()),
+  indexSessions: () => listThreads(),
   listUnder: (rootPath, partition) => {
     if (partition && partition !== 'active' && partition !== 'archive') {
       fatal('invalid-partition', 'Partition must be active or archive')
@@ -612,7 +613,7 @@ export const codexConnector: SessionConnector = {
     validateSessionId(sessionId)
     const thread = findThread(sessionId)
     if (!thread) fatal('not-found', `Codex session does not exist: ${sessionId}`)
-    output(await readMessages(thread.rollout_path))
+    return readMessages(thread.rollout_path)
   },
   moveSession: (_scopeKey, sessionId, direction, force) => runMutation(direction === 'archive' ? 'archive' : 'unarchive', sessionId, force),
   deleteArchived: (_scopeKey, sessionId, force) => runMutation('delete', sessionId, force),

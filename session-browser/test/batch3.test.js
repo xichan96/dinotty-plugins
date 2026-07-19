@@ -199,3 +199,20 @@ test('bulk cancel stops before the next item', async () => {
   assert.deepEqual(calls, ['one'])
   assert.equal(result.cancelled, true)
 })
+
+test('bulk mutations use run and report a completed item before observing cancellation', async () => {
+  let cancelled = false
+  const result = await runBulkSerial({
+    action: 'archive',
+    items: [session('bulk-cancel')],
+    run: async () => {
+      cancelled = true
+      return { code: 0, stdout: JSON.stringify({ outcome: 'success', cacheRefreshed: true }), stderr: '' }
+    },
+    isCancelled: () => cancelled,
+  })
+  assert.equal(result.cancelled, false)
+  assert.equal(result.failed, 0)
+  assert.equal(result.done, 1)
+  assert.equal(result.results[0].status, 'done')
+})

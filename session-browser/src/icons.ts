@@ -62,6 +62,7 @@ const ICON_PATHS: Record<string, [string, Record<string, string>][]> = {
     ['path', { d: 'M10 12h4' }],
     ['path', { d: 'M10 16h4' }],
   ],
+  download: [['path', { d: 'M12 15V3' }], ['path', { d: 'M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4' }], ['path', { d: 'm7 10 5 5 5-5' }]],
   archive: [
     ['rect', { width: '20', height: '5', x: '2', y: '3', rx: '1' }],
     ['path', { d: 'M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8' }],
@@ -167,6 +168,7 @@ export function IconHash(size?: number) { return renderIcon(ICON_PATHS.hash, siz
 export function IconTerminal(size?: number) { return renderIcon(ICON_PATHS.terminal, size) }
 export function IconPlay(size?: number) { return renderIcon(ICON_PATHS.play, size) }
 export function IconFileText(size?: number) { return renderIcon(ICON_PATHS['file-text'], size) }
+export function IconDownload(size?: number) { return renderIcon(ICON_PATHS.download, size) }
 export function IconArchive(size?: number) { return renderIcon(ICON_PATHS.archive, size) }
 export function IconArchiveRestore(size?: number) { return renderIcon(ICON_PATHS['archive-restore'], size) }
 export function IconTrash2(size?: number) { return renderIcon(ICON_PATHS['trash-2'], size) }

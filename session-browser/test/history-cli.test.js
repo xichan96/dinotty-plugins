@@ -4,8 +4,9 @@ const os = require('node:os')
 const path = require('node:path')
 const { spawnSync } = require('node:child_process')
 const { afterEach, beforeEach, test } = require('node:test')
+const esbuild = require('esbuild')
 
-const CLI = path.resolve(__dirname, '../dist/cli')
+const CLI = process.env.CC_SB_TEST_CLI || path.resolve(__dirname, '../dist/cli')
 const IDS = {
   normal: '11111111-1111-1111-1111-111111111111',
   archive: '22222222-2222-2222-2222-222222222222',
@@ -30,6 +31,18 @@ function artifactPath(partitionDir, attributionKey, id) {
   return path.join(partitionDir, attributionKey, id)
 }
 
+function findUnusedPid() {
+  for (let candidate = 1_000_000; candidate < 2_147_483_647; candidate += 1) {
+    try {
+      process.kill(candidate, 0)
+    } catch (error) {
+      if (error?.code === 'ESRCH') return candidate
+      if (error?.code !== 'EPERM') throw error
+    }
+  }
+  throw new Error('Could not find an unused pid')
+}
+
 function writeSession(partitionDir, attributionKey, id, lines, trailingNewline = true) {
   const filePath = sessionPath(partitionDir, attributionKey, id)
   fs.mkdirSync(path.dirname(filePath), { recursive: true })
@@ -45,6 +58,34 @@ function runJson(args) {
   const result = run(args)
   assert.equal(result.status, 0, result.stderr)
   return JSON.parse(result.stdout)
+}
+
+function localDateSegment(value = new Date()) {
+  const date = value instanceof Date ? value : new Date(value)
+  const year = ((date.getFullYear() % 100) + 100) % 100
+  return `${String(year).padStart(2, '0')}${String(date.getMonth() + 1).padStart(2, '0')}${String(date.getDate()).padStart(2, '0')}`
+}
+
+function loadExportFilenameHelpers() {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/history-cli.ts'), 'utf8')
+  const constants = ['EXPORT_FILENAME_MAX_BYTES', 'EXPORT_FILENAME_ATTEMPTS'].map(name => {
+    const match = source.match(new RegExp(`^const ${name} = .+$`, 'm'))
+    assert.ok(match, `missing ${name}`)
+    return match[0]
+  })
+  const functions = ['legalizeFilenameTitle', 'truncateUtf8', 'exportDateSegment', 'exportFilenameBase', 'exportFilename'].map(name => {
+    const match = source.match(new RegExp(`function ${name}\\([^]*?^}`, 'm'))
+    assert.ok(match, `missing ${name}`)
+    return match[0]
+  })
+  const compiled = esbuild.transformSync([
+    ...constants,
+    ...functions,
+    'module.exports = { exportFilenameBase, exportFilename }',
+  ].join('\n'), { loader: 'ts', format: 'cjs', target: 'node18' })
+  const loaded = { exports: {} }
+  Function('module', 'exports', 'require', compiled.code)(loaded, loaded.exports, require)
+  return loaded.exports
 }
 
 beforeEach(() => {
@@ -303,6 +344,18 @@ test('check-dir reports existing and missing paths and rejects relative or trave
   assert.match(traversal.stderr, /invalid-absolute-path/)
 })
 
+test('export destination classification resolves traversal, absolute home paths, and symlinks', () => {
+  const homeChild = path.join(env.HOME, 'exports')
+  const outside = path.join(fixture, 'outside')
+  fs.mkdirSync(homeChild, { recursive: true })
+  fs.mkdirSync(outside, { recursive: true })
+  fs.symlinkSync(outside, path.join(env.HOME, 'linked-outside'))
+
+  assert.deepEqual(runJson(['classify-export-destination', homeChild]), { outsideHome: false })
+  assert.deepEqual(runJson(['classify-export-destination', '~/../outside']), { outsideHome: true })
+  assert.deepEqual(runJson(['classify-export-destination', '~/linked-outside']), { outsideHome: true })
+})
+
 test('list-dirs returns structured errors and includes symlinked directories', () => {
   const root = path.join(fixture, 'picker-root')
   const target = path.join(fixture, 'picker-target')
@@ -474,6 +527,457 @@ test('read-session rejects parsed output above the bounded response limit', () =
   const result = run(['read-session', key, IDS.normal])
   assert.equal(result.status, 1)
   assert.equal(JSON.parse(result.stderr).error, 'session-output-too-large')
+})
+
+test('session exports to Markdown and contains its turns and tool summaries', () => {
+  const key = '-export-session'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/session', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Export this conversation' } }),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-07-01T00:01:00.000Z', message: { content: [
+      { type: 'text', text: 'Here is the exported answer.' },
+      { type: 'tool_use', name: 'Read', input: { file_path: '/tmp/example.txt' } },
+    ] } }),
+  ])
+
+  const exported = runJson(['export-session', key, IDS.normal, '--dest', '~/exports'])
+  assert.equal(exported.ok, true)
+  assert.equal(path.isAbsolute(exported.path), true)
+  assert.equal(path.dirname(exported.path), fs.realpathSync(path.join(env.HOME, 'exports')))
+  const markdown = fs.readFileSync(exported.path, 'utf8')
+  assert.match(markdown, /^# Export this conversation/m)
+  assert.match(markdown, /## User\n\nExport this conversation/)
+  assert.match(markdown, /## Assistant\n\nHere is the exported answer\./)
+  assert.match(markdown, /- Tool: \/tmp\/example\.txt/)
+  assert.deepEqual(fs.readdirSync(path.dirname(exported.path)).filter(name => name.startsWith('.')), [])
+})
+
+test('export filename uses the local session creation date and omits the session id', () => {
+  const key = '-export-created-date'
+  const createdAt = '2026-07-01T18:30:00.000Z'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/created-date', timestamp: createdAt, message: { content: 'Dated export' } }),
+  ])
+
+  const exported = runJson(['export-session', key, IDS.normal, '--dest', path.join(env.HOME, 'exports')])
+  const filename = path.basename(exported.path)
+  assert.equal(filename, `${localDateSegment(createdAt)}_Dated export.md`)
+  assert.equal(filename.includes(IDS.normal.slice(0, 8)), false)
+})
+
+test('export filename falls back to a valid current local date for missing and invalid createdAt', () => {
+  const key = '-export-fallback-date'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.noTimestamp, [
+    JSON.stringify({ type: 'user', cwd: '/export/fallback-date', message: { content: 'Missing date' } }),
+  ])
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.partial, [
+    JSON.stringify({ type: 'user', cwd: '/export/fallback-date', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Invalid date' } }),
+  ])
+  runJson(['build-index'])
+  const cachePath = path.join(env.CC_SB_DATA_DIR, 'index-cache.json')
+  const cache = JSON.parse(fs.readFileSync(cachePath, 'utf8'))
+  const invalidEntry = Object.values(cache.entries).find(entry => entry.meta.id === IDS.partial)
+  assert.ok(invalidEntry)
+  invalidEntry.meta.createdAt = 'Infinity'
+  fs.writeFileSync(cachePath, JSON.stringify(cache))
+
+  const before = localDateSegment()
+  const missing = runJson(['export-session', key, IDS.noTimestamp, '--dest', path.join(env.HOME, 'exports')])
+  const invalid = runJson(['export-session', key, IDS.partial, '--dest', path.join(env.HOME, 'exports')])
+  const after = localDateSegment()
+  const validTodaySegments = new Set([before, after])
+  for (const [exported, title] of [[missing, 'Missing date'], [invalid, 'Invalid date']]) {
+    const filename = path.basename(exported.path)
+    const match = /^(\d{6})_(.+)\.md$/.exec(filename)
+    assert.ok(match, filename)
+    assert.equal(validTodaySegments.has(match[1]), true)
+    assert.equal(match[2], title)
+    assert.doesNotMatch(filename, /NaN|undefined|^_/)
+  }
+})
+
+test('export removes every Windows-illegal character from the filename', () => {
+  const key = '-export-illegal-title'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/illegal-title', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Why? colon: star* "quote" <less> >greater | pipe' } }),
+  ])
+
+  const exported = runJson(['export-session', key, IDS.normal, '--dest', path.join(env.HOME, 'exports')])
+  assert.doesNotMatch(path.basename(exported.path), /[<>:"|?*\\/]/)
+  assert.equal(fs.existsSync(exported.path), true)
+})
+
+test('export strips pictographic glyphs and bracketed machine tokens from the filename', () => {
+  const key = '-export-clean-title'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/clean-title', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Review ↓ ⏺ [ACTION-PROPOSE abc123] customer export notes' } }),
+  ])
+
+  const exported = runJson(['export-session', key, IDS.normal, '--dest', path.join(env.HOME, 'exports')])
+  assert.equal(path.basename(exported.path), '260701_Review customer export notes.md')
+  assert.doesNotMatch(path.basename(exported.path), /↓|⏺|ACTION-PROPOSE/)
+})
+
+test('export makes reserved and trailing-dot titles usable on Windows', () => {
+  const key = '-export-windows-title'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/windows-title', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'CON' } }),
+  ])
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.archive, [
+    JSON.stringify({ type: 'user', cwd: '/export/windows-title', timestamp: '2026-07-01T00:01:00.000Z', message: { content: 'Trailing title.' } }),
+  ])
+  const dest = path.join(env.HOME, 'exports')
+
+  const reserved = runJson(['export-session', key, IDS.normal, '--dest', dest])
+  const trailing = runJson(['export-session', key, IDS.archive, '--dest', dest])
+  assert.equal(path.basename(reserved.path), '260701__CON.md')
+  assert.equal(path.basename(trailing.path), '260701_Trailing title.md')
+  assert.equal(fs.statSync(reserved.path).isFile(), true)
+  assert.equal(fs.statSync(trailing.path).isFile(), true)
+})
+
+test('CJK export titles are truncated at a UTF-8 boundary within the filename cap', () => {
+  const key = '-export-cjk'
+  const title = '漢'.repeat(100)
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/cjk', timestamp: '2026-07-01T00:00:00.000Z', message: { content: title } }),
+  ])
+
+  const exported = runJson(['export-session', key, IDS.normal, '--dest', path.join(env.HOME, 'exports')])
+  const filename = path.basename(exported.path)
+  assert.ok(Buffer.byteLength(filename, 'utf8') <= 255)
+  assert.match(filename, /^260701_漢+\.md$/)
+  assert.equal(filename.includes('\uFFFD'), false)
+  const markdown = fs.readFileSync(exported.path, 'utf8')
+  assert.equal(markdown.includes(`# ${title}\n`), true)
+  assert.equal(markdown.includes(`## User\n\n${title}\n`), true)
+  assert.deepEqual(fs.readdirSync(path.dirname(exported.path)).filter(name => name.startsWith('.export-tmp-')), [])
+})
+
+test('long export titles stop at a readable boundary within 60 characters', () => {
+  const key = '-export-readable-title'
+  const title = 'Readable export filenames should stop cleanly at the final available word boundary instead of splitting anotherword'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/readable-title', timestamp: '2026-07-01T00:00:00.000Z', message: { content: title } }),
+  ])
+
+  const exported = runJson(['export-session', key, IDS.normal, '--dest', path.join(env.HOME, 'exports')])
+  const filename = path.basename(exported.path)
+  const filenameTitle = filename.slice('260701_'.length, -'.md'.length)
+  assert.equal(filenameTitle, 'Readable export filenames should stop cleanly at the final')
+  assert.ok(Array.from(filenameTitle).length <= 60)
+  assert.equal(filenameTitle.endsWith(' a'), false)
+})
+
+test('export rechecks title legality after character truncation and preserves the empty-title fallback', () => {
+  const key = '-export-post-truncation-title'
+  const title = `${'a'.repeat(50)}.${'b'.repeat(20)}`
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/post-truncation-title', timestamp: '2026-07-01T00:00:00.000Z', message: { content: title } }),
+  ])
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.archive, [
+    JSON.stringify({ type: 'user', cwd: '/export/post-truncation-title', timestamp: '2026-07-01T00:01:00.000Z', message: { content: '...' } }),
+  ])
+  const dest = path.join(env.HOME, 'exports')
+
+  const truncated = runJson(['export-session', key, IDS.normal, '--dest', dest])
+  const fallback = runJson(['export-session', key, IDS.archive, '--dest', dest])
+  const titleComponent = path.basename(truncated.path).slice('260701_'.length, -'.md'.length)
+  assert.equal(path.basename(truncated.path), `260701_${'a'.repeat(50)}.md`)
+  assert.equal(titleComponent, 'a'.repeat(50))
+  assert.equal(titleComponent.endsWith('.'), false)
+  assert.equal(path.basename(fallback.path), '260701_session.md')
+})
+
+test('long export filenames reserve room for the date and largest collision suffix', () => {
+  const key = '-export-max-filename'
+  const title = '𐐀'.repeat(60)
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/max-filename', timestamp: '2026-07-01T00:00:00.000Z', message: { content: title } }),
+  ])
+
+  const exported = runJson(['export-session', key, IDS.normal, '--dest', path.join(env.HOME, 'exports')])
+  const filename = path.basename(exported.path)
+  const base = path.basename(exported.path, '.md')
+  assert.equal(filename, `260701_${'𐐀'.repeat(59)}.md`)
+  assert.equal(Buffer.byteLength(filename, 'utf8'), 246)
+  assert.equal(Buffer.byteLength(`${base} (1000).md`, 'utf8'), 253)
+  assert.equal(filename.includes('\uFFFD'), false)
+})
+
+test('reserved export title stays within the byte cap at collision attempt 1000', () => {
+  const { exportFilenameBase, exportFilename } = loadExportFilenameHelpers()
+  const hostileTitle = `con.${'a'.repeat(234)}`
+  assert.equal(Buffer.byteLength(hostileTitle, 'utf8'), 238)
+
+  const base = exportFilenameBase(hostileTitle, '2026-07-19T12:00:00')
+  const filename = exportFilename(base, 1000)
+  assert.ok(Buffer.byteLength(filename, 'utf8') <= 255)
+  assert.equal(filename.endsWith('.md'), true)
+  assert.doesNotMatch(filename, /[. ](?: \(1000\))?\.md$/)
+})
+
+test('benign export title uses the full byte cap at collision attempt 1000', () => {
+  const { exportFilenameBase, exportFilename } = loadExportFilenameHelpers()
+  const benignTitle = 'a'.repeat(238)
+  assert.equal(Buffer.byteLength(benignTitle, 'utf8'), 238)
+
+  const base = exportFilenameBase(benignTitle, '2026-07-19T12:00:00')
+  const filename = exportFilename(base, 1000)
+  assert.equal(Buffer.byteLength(filename, 'utf8'), 255)
+  assert.equal(filename.endsWith('.md'), true)
+  assert.doesNotMatch(filename, /[. ](?: \(1000\))?\.md$/)
+})
+
+test('colliding export filenames receive numeric suffixes without overwriting', () => {
+  const key = '-export-collision'
+  const title = '𐐀'.repeat(80)
+  const createdAt = '2026-07-01T00:00:00.000Z'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/collision', timestamp: createdAt, message: { content: title } }),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-07-01T00:01:00.000Z', message: { content: [{ type: 'text', text: 'first distinct session' }] } }),
+  ])
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.archive, [
+    JSON.stringify({ type: 'user', cwd: '/export/collision', timestamp: createdAt, message: { content: title } }),
+    JSON.stringify({ type: 'assistant', timestamp: '2026-07-01T00:02:00.000Z', message: { content: [{ type: 'text', text: 'second distinct session' }] } }),
+  ])
+  const dest = path.join(env.HOME, 'exports')
+
+  const first = runJson(['export-session', key, IDS.normal, '--dest', dest])
+  const firstContents = fs.readFileSync(first.path, 'utf8')
+  const second = runJson(['export-session', key, IDS.archive, '--dest', dest])
+  const expectedBase = `260701_${'𐐀'.repeat(59)}`
+  const firstBase = path.basename(first.path, '.md')
+  const secondBase = path.basename(second.path, '.md').slice(0, -' (2)'.length)
+  assert.equal(path.basename(first.path), `${expectedBase}.md`)
+  assert.equal(path.basename(second.path), `${expectedBase} (2).md`)
+  assert.deepEqual(Buffer.from(secondBase), Buffer.from(firstBase))
+  assert.match(firstContents, new RegExp(`Session ID: ${IDS.normal}`))
+  assert.match(fs.readFileSync(second.path, 'utf8'), new RegExp(`Session ID: ${IDS.archive}`))
+  assert.equal(fs.readFileSync(first.path, 'utf8'), firstContents)
+  assert.notEqual(second.path, first.path)
+})
+
+test('export falls back to reserve and rename when hard links are not permitted', () => {
+  const key = '-export-link-fallback'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/link-fallback', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Fallback export content' } }),
+  ])
+  const dest = path.join(env.HOME, 'exports')
+  const preload = path.join(fixture, 'reject-export-links.cjs')
+  fs.writeFileSync(preload, [
+    "const fs = require('node:fs')",
+    'fs.linkSync = function () {',
+    "  const error = new Error('hard links are not permitted')",
+    "  error.code = 'ENOTSUP'",
+    '  throw error',
+    '}',
+  ].join('\n'))
+  const originalNodeOptions = env.NODE_OPTIONS
+  env.NODE_OPTIONS = `${originalNodeOptions || ''} --require=${preload}`.trim()
+
+  let exported
+  try {
+    exported = runJson(['export-session', key, IDS.normal, '--dest', dest])
+  } finally {
+    if (originalNodeOptions === undefined) delete env.NODE_OPTIONS
+    else env.NODE_OPTIONS = originalNodeOptions
+  }
+
+  assert.equal(exported.ok, true)
+  assert.match(fs.readFileSync(exported.path, 'utf8'), /## User\n\nFallback export content/)
+  assert.deepEqual(fs.readdirSync(dest).filter(name => name.startsWith('.')), [])
+})
+
+test('export leaves the source session mtime unchanged', () => {
+  const key = '-export-read-only'
+  const source = writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/read-only', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Read only source' } }),
+  ])
+  const old = new Date('2025-01-01T00:00:00.000Z')
+  fs.utimesSync(source, old, old)
+  const before = fs.statSync(source).mtimeMs
+
+  runJson(['export-session', key, IDS.normal, '--dest', path.join(env.HOME, 'exports')])
+  assert.equal(fs.statSync(source).mtimeMs, before)
+})
+
+test('export rejects a destination that is not a directory with structured error JSON', () => {
+  const key = '-export-not-directory'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/not-directory', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Destination error' } }),
+  ])
+  fs.mkdirSync(env.HOME, { recursive: true })
+  const dest = path.join(env.HOME, 'not-a-directory')
+  fs.writeFileSync(dest, 'keep')
+
+  const result = run(['export-session', key, IDS.normal, '--dest', dest])
+  assert.equal(result.status, 1)
+  assert.equal(JSON.parse(result.stderr).error, 'export-destination-not-directory')
+  assert.equal(fs.readFileSync(dest, 'utf8'), 'keep')
+})
+
+test('export requires an override for destinations outside home', () => {
+  const key = '-export-outside-home'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/outside-home', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Outside home' } }),
+  ])
+  const dest = path.join(fixture, 'outside-home')
+
+  const rejected = run(['export-session', key, IDS.normal, '--dest', dest])
+  assert.equal(rejected.status, 1)
+  assert.equal(JSON.parse(rejected.stderr).error, 'export-destination-outside-home')
+
+  const accepted = runJson(['export-session', key, IDS.normal, '--dest', dest, '--allow-outside-home'])
+  assert.equal(accepted.ok, true)
+  assert.equal(path.dirname(accepted.path), fs.realpathSync(dest))
+})
+
+test('rejected outside-home export does not create the destination directory', () => {
+  const key = '-export-outside-home-no-create'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/outside-home-no-create', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Outside home no create' } }),
+  ])
+  const outsideRoot = path.join(fixture, 'outside-home-no-create')
+  const dest = path.join(outsideRoot, 'nested', 'exports')
+
+  const rejected = run(['export-session', key, IDS.normal, '--dest', dest])
+  assert.equal(rejected.status, 1)
+  assert.equal(JSON.parse(rejected.stderr).error, 'export-destination-outside-home')
+  assert.equal(fs.existsSync(dest), false)
+  assert.equal(fs.existsSync(outsideRoot), false)
+})
+
+test('post-check outside-home rejection removes directories created after an ancestor symlink swap', () => {
+  const key = '-export-outside-home-swap'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/outside-home-swap', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Outside home swap' } }),
+  ])
+  const ancestor = path.join(env.HOME, 'swap-ancestor')
+  const outside = path.join(fixture, 'swap-target')
+  const dest = path.join(ancestor, 'created', 'exports')
+  fs.mkdirSync(ancestor, { recursive: true })
+  fs.mkdirSync(outside, { recursive: true })
+  const preload = path.join(fixture, 'swap-before-mkdir.cjs')
+  fs.writeFileSync(preload, [
+    "const fs = require('node:fs')",
+    "const path = require('node:path')",
+    'const originalMkdirSync = fs.mkdirSync',
+    'fs.mkdirSync = function (target, options) {',
+    '  if (path.resolve(target) === path.resolve(process.env.CC_SB_TEST_SWAP_DEST)) {',
+    '    fs.rmdirSync(process.env.CC_SB_TEST_SWAP_ANCESTOR)',
+    "    fs.symlinkSync(process.env.CC_SB_TEST_SWAP_OUTSIDE, process.env.CC_SB_TEST_SWAP_ANCESTOR, 'dir')",
+    '  }',
+    '  return originalMkdirSync.apply(this, arguments)',
+    '}',
+  ].join('\n'))
+  env.CC_SB_TEST_SWAP_DEST = dest
+  env.CC_SB_TEST_SWAP_ANCESTOR = ancestor
+  env.CC_SB_TEST_SWAP_OUTSIDE = outside
+  env.NODE_OPTIONS = `${env.NODE_OPTIONS || ''} --require=${preload}`.trim()
+
+  const rejected = run(['export-session', key, IDS.normal, '--dest', dest])
+  assert.equal(rejected.status, 1)
+  assert.equal(JSON.parse(rejected.stderr).error, 'export-destination-outside-home')
+  assert.equal(fs.existsSync(dest), false)
+  assert.equal(fs.existsSync(path.join(outside, 'created')), false)
+})
+
+test('export sweeps stale export temps at the destination but retains recent ones', () => {
+  const key = '-export-temp-sweep'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/temp/sweep', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Sweep destination export temps' } }),
+  ])
+  const dest = path.join(env.HOME, 'exports')
+  fs.mkdirSync(dest, { recursive: true })
+  const unusedPid = findUnusedPid()
+  const stale = path.join(dest, `.export-tmp-${unusedPid}-1000-1`)
+  const recent = path.join(dest, `.export-tmp-${unusedPid}-2000-2`)
+  fs.writeFileSync(stale, 'stale export')
+  fs.writeFileSync(recent, 'recent export')
+  const old = new Date(Date.now() - (24 * 60 * 60 * 1000) - 5000)
+  fs.utimesSync(stale, old, old)
+
+  runJson(['export-session', key, IDS.normal, '--dest', dest])
+  assert.equal(fs.existsSync(stale), false)
+  assert.equal(fs.readFileSync(recent, 'utf8'), 'recent export')
+})
+
+test('export temp sweep retains a stale temp from a live pid and removes one from an unused pid', () => {
+  const key = '-export-temp-live-writer'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/export/temp/live-writer', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Protect live export temps' } }),
+  ])
+  const dest = path.join(env.HOME, 'exports')
+  fs.mkdirSync(dest, { recursive: true })
+  const live = path.join(dest, `.export-tmp-${process.pid}-1000-1`)
+  const dead = path.join(dest, `.export-tmp-${findUnusedPid()}-2000-2`)
+  fs.writeFileSync(live, 'live export')
+  fs.writeFileSync(dead, 'dead export')
+  const old = new Date(Date.now() - (24 * 60 * 60 * 1000) - 5000)
+  fs.utimesSync(live, old, old)
+  fs.utimesSync(dead, old, old)
+
+  runJson(['export-session', key, IDS.normal, '--dest', dest])
+  assert.equal(fs.readFileSync(live, 'utf8'), 'live export')
+  assert.equal(fs.existsSync(dead), false)
+})
+
+test('bulk export temp sweep revisits older run directories without following symlinks or exceeding its depth bound', () => {
+  const key = '-bulk-export-temp-sweep'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/bulk/export/temp/sweep', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Sweep old bulk run temps' } }),
+  ])
+  const exportRoot = path.join(env.HOME, 'exports', 'claude-code_exp')
+  const current = path.join(exportRoot, '20260719-120000', 'current-project')
+  const older = path.join(exportRoot, '20260718-120000', 'older-project')
+  const tooDeep = path.join(exportRoot, 'one', 'two', 'three')
+  const outside = path.join(env.HOME, 'outside-export-tree')
+  fs.mkdirSync(current, { recursive: true })
+  fs.mkdirSync(older, { recursive: true })
+  fs.mkdirSync(tooDeep, { recursive: true })
+  fs.mkdirSync(outside, { recursive: true })
+  const unusedPid = findUnusedPid()
+  const oldOrphan = path.join(older, `.export-tmp-${unusedPid}-1000-1`)
+  const deepOrphan = path.join(tooDeep, `.export-tmp-${unusedPid}-1000-2`)
+  const outsideOrphan = path.join(outside, `.export-tmp-${unusedPid}-1000-3`)
+  const linkedDir = path.join(exportRoot, 'linked-outside')
+  fs.writeFileSync(oldOrphan, 'old orphan')
+  fs.writeFileSync(deepOrphan, 'bounded orphan')
+  fs.writeFileSync(outsideOrphan, 'outside orphan')
+  fs.symlinkSync(outside, linkedDir, 'dir')
+  const old = new Date(Date.now() - (24 * 60 * 60 * 1000) - 5000)
+  for (const file of [oldOrphan, deepOrphan, outsideOrphan]) fs.utimesSync(file, old, old)
+
+  runJson(['export-session', key, IDS.normal, '--dest', current])
+  assert.equal(fs.existsSync(oldOrphan), false)
+  assert.equal(fs.readFileSync(deepOrphan, 'utf8'), 'bounded orphan')
+  assert.equal(fs.readFileSync(outsideOrphan, 'utf8'), 'outside orphan')
+})
+
+test('export temp sweep descent relies on directory entries without a later lstat race', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/history-cli.ts'), 'utf8')
+  const sweep = source.match(/function sweepOrphanedExportTemps\([^]*?^}/m)?.[0]
+  assert.ok(sweep)
+  assert.match(sweep, /readdirSync\(dirPath, \{ withFileTypes: true \}\)/)
+  assert.doesNotMatch(sweep, /lstatSync\(childPath\)/)
+})
+
+test('index walk never deletes any file in session storage', () => {
+  const key = '-restore-temp-nonmatch'
+  const source = writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', cwd: '/restore/temp/nonmatch', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Keep dot files' } }),
+  ])
+  const unrelated = path.join(path.dirname(source), '.keep-me')
+  const restoreTemp = path.join(path.dirname(source), `.${IDS.normal}.restore-123-1000`)
+  fs.writeFileSync(unrelated, 'never delete')
+  fs.writeFileSync(restoreTemp, 'never delete')
+  const old = new Date(Date.now() - (48 * 60 * 60 * 1000))
+  fs.utimesSync(unrelated, old, old)
+  fs.utimesSync(restoreTemp, old, old)
+
+  runJson(['build-index'])
+  assert.equal(fs.readFileSync(unrelated, 'utf8'), 'never delete')
+  assert.equal(fs.readFileSync(restoreTemp, 'utf8'), 'never delete')
 })
 
 test('archive, restore, and delete-archived complete the full lifecycle with artifacts', () => {
