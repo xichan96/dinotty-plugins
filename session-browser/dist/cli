@@ -682,24 +682,18 @@ function isPinStore(value) {
   return candidate.pins.every((pin) => {
     if (!pin || typeof pin !== "object") return false;
     const item = pin;
-    return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0 && Array.isArray(item.matchKeys) && item.matchKeys.length > 0 && item.matchKeys.every((key) => typeof key === "string" && key.length > 0);
-  });
-}
-function isPinStoreForListing(value) {
-  if (!value || typeof value !== "object") return false;
-  const candidate = value;
-  if (candidate.version !== 1 || !Array.isArray(candidate.pins)) return false;
-  return candidate.pins.every((pin) => {
-    if (!pin || typeof pin !== "object") return false;
-    const item = pin;
-    return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0;
+    return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0 && (item.matchKeys === void 0 || Array.isArray(item.matchKeys) && item.matchKeys.every((key) => typeof key === "string" && key.length > 0));
   });
 }
 function prunePinSidecars(agent) {
   const prefix = `${agent}.json.corrupt.`;
-  const sidecars = fs2.readdirSync(PINS_DIR).filter((name) => name.startsWith(prefix)).map((name) => {
+  const sidecars = fs2.readdirSync(PINS_DIR).filter((name) => name.startsWith(prefix)).flatMap((name) => {
     const sidecarPath = path2.join(PINS_DIR, name);
-    return { path: sidecarPath, name, mtimeMs: fs2.statSync(sidecarPath).mtimeMs };
+    try {
+      return [{ path: sidecarPath, name, mtimeMs: fs2.statSync(sidecarPath).mtimeMs }];
+    } catch {
+      return [];
+    }
   }).sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
   for (const sidecar of sidecars.slice(0, Math.max(0, sidecars.length - 10))) {
     try {
@@ -725,8 +719,9 @@ function preserveCorruptPinBytes(agent, bytes) {
     if (fd !== void 0) {
       fs2.writeFileSync(fd, bytes);
       fs2.fsyncSync(fd);
-      fs2.closeSync(fd);
+      const descriptor = fd;
       fd = void 0;
+      fs2.closeSync(descriptor);
     }
   } catch (error) {
     if (fd !== void 0) {
@@ -763,22 +758,6 @@ function readPinStore(agent) {
     return { kind: "corrupt", sidecar: preserveCorruptPinBytes(agent, bytes) };
   }
 }
-function readPinStoreForListing(agent) {
-  let bytes;
-  try {
-    bytes = fs2.readFileSync(pinStorePath(agent));
-  } catch (error) {
-    if (error?.code === "ENOENT") return { kind: "ok", pins: [] };
-    fail("pin-list-read-failed", error?.message || `Could not read pin list for ${agent}`);
-  }
-  try {
-    const parsed = JSON.parse(bytes.toString("utf8"));
-    if (!isPinStoreForListing(parsed)) throw new Error("Pin list schema is invalid");
-    return { kind: "ok", pins: parsed.pins };
-  } catch {
-    return { kind: "corrupt", sidecar: preserveCorruptPinBytes(agent, bytes) };
-  }
-}
 function loadPinsForMutation(agent, resetCorrupt) {
   const loaded = readPinStore(agent);
   if (loaded.kind === "ok") return { pins: loaded.pins, resetCorrupt: false };
@@ -800,8 +779,9 @@ function writePinStore(agent, pins) {
     created = true;
     fs2.writeFileSync(fd, serialized, { encoding: "utf8" });
     fs2.fsyncSync(fd);
-    fs2.closeSync(fd);
+    const descriptor = fd;
     fd = void 0;
+    fs2.closeSync(descriptor);
     fs2.renameSync(tempPath, destination);
     const directoryFd = fs2.openSync(PINS_DIR, "r");
     try {
@@ -845,7 +825,7 @@ function findPinPath(pins, requestedPath) {
 }
 function cmdListPins(agentValue) {
   validatePinAgent(agentValue);
-  const loaded = readPinStoreForListing(agentValue);
+  const loaded = readPinStore(agentValue);
   if (loaded.kind === "corrupt") {
     output2({ pins: [], corrupt: true, sidecar: loaded.sidecar });
     return;
@@ -857,7 +837,7 @@ function cmdListPins(agentValue) {
         exists = fs2.statSync(pin.path).isDirectory();
       } catch {
       }
-      const matchKeys = Array.isArray(pin.matchKeys) && pin.matchKeys.length > 0 && pin.matchKeys.every((key) => typeof key === "string" && key.length > 0) ? [...pin.matchKeys] : [];
+      const matchKeys = pin.matchKeys ? [...pin.matchKeys] : [];
       return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys };
     })
   });
@@ -872,16 +852,21 @@ function cmdAddPin(agentValue, suppliedPath, resetCorrupt) {
     if (error?.code === "pin-path-not-directory") throw error;
     fail("pin-path-unavailable", error?.message || `Could not resolve pin path: ${suppliedPath}`);
   }
+  const suppliedAbsolutePath = path2.resolve(suppliedPath);
+  const incomingMatchKeys = Array.from(/* @__PURE__ */ new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]));
   const state = loadPinsForMutation(agentValue, resetCorrupt);
-  if (state.pins.some((pin) => pin.path === canonicalPath)) {
-    if (state.resetCorrupt) writePinStore(agentValue, state.pins);
-    output2({ canonicalPath, outcome: "duplicate" });
+  const existing = state.pins.find((pin) => pin.path === canonicalPath);
+  if (existing) {
+    const storedMatchKeys = existing.matchKeys || [];
+    const mergedMatchKeys = Array.from(/* @__PURE__ */ new Set([...storedMatchKeys, ...incomingMatchKeys]));
+    const matchKeysMerged = mergedMatchKeys.length !== storedMatchKeys.length;
+    if (matchKeysMerged) existing.matchKeys = mergedMatchKeys;
+    if (state.resetCorrupt || matchKeysMerged) writePinStore(agentValue, state.pins);
+    output2({ canonicalPath, outcome: "duplicate", matchKeysMerged });
     return;
   }
   if (state.pins.length >= 500) fail("pin-limit-reached", "Cannot add pin: the 500-pin limit has been reached");
-  const suppliedAbsolutePath = path2.resolve(suppliedPath);
-  const matchKeys = Array.from(/* @__PURE__ */ new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]));
-  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys }, ...state.pins]);
+  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys: incomingMatchKeys }, ...state.pins]);
   output2({ canonicalPath, outcome: "applied" });
 }
 function cmdRemovePins(agentValue, requestedPaths, resetCorrupt) {

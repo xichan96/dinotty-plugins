@@ -116,7 +116,7 @@ let pinTempCounter = 0
 interface StoredPin {
   path: string
   addedAt: number
-  matchKeys: string[]
+  matchKeys?: string[]
 }
 
 interface PinStore {
@@ -124,18 +124,8 @@ interface PinStore {
   pins: StoredPin[]
 }
 
-interface ListableStoredPin {
-  path: string
-  addedAt: number
-  matchKeys?: unknown
-}
-
 type PinReadResult =
   | { kind: 'ok'; pins: StoredPin[] }
-  | { kind: 'corrupt'; sidecar: string }
-
-type PinListingReadResult =
-  | { kind: 'ok'; pins: ListableStoredPin[] }
   | { kind: 'corrupt'; sidecar: string }
 
 type PinMutationState = { pins: StoredPin[]; resetCorrupt: boolean }
@@ -220,24 +210,9 @@ function isPinStore(value: unknown): value is PinStore {
       && typeof item.addedAt === 'number'
       && Number.isSafeInteger(item.addedAt)
       && item.addedAt >= 0
-      && Array.isArray(item.matchKeys)
-      && item.matchKeys.length > 0
-      && item.matchKeys.every(key => typeof key === 'string' && key.length > 0)
-  })
-}
-
-function isPinStoreForListing(value: unknown): value is { version: 1; pins: ListableStoredPin[] } {
-  if (!value || typeof value !== 'object') return false
-  const candidate = value as Record<string, unknown>
-  if (candidate.version !== 1 || !Array.isArray(candidate.pins)) return false
-  return candidate.pins.every(pin => {
-    if (!pin || typeof pin !== 'object') return false
-    const item = pin as Record<string, unknown>
-    return typeof item.path === 'string'
-      && path.isAbsolute(item.path)
-      && typeof item.addedAt === 'number'
-      && Number.isSafeInteger(item.addedAt)
-      && item.addedAt >= 0
+      && (item.matchKeys === undefined
+        || (Array.isArray(item.matchKeys)
+          && item.matchKeys.every(key => typeof key === 'string' && key.length > 0)))
   })
 }
 
@@ -245,9 +220,13 @@ function prunePinSidecars(agent: AgentId) {
   const prefix = `${agent}.json.corrupt.`
   const sidecars = fs.readdirSync(PINS_DIR)
     .filter(name => name.startsWith(prefix))
-    .map(name => {
+    .flatMap(name => {
       const sidecarPath = path.join(PINS_DIR, name)
-      return { path: sidecarPath, name, mtimeMs: fs.statSync(sidecarPath).mtimeMs }
+      try {
+        return [{ path: sidecarPath, name, mtimeMs: fs.statSync(sidecarPath).mtimeMs }]
+      } catch {
+        return []
+      }
     })
     .sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
   for (const sidecar of sidecars.slice(0, Math.max(0, sidecars.length - 10))) {
@@ -275,8 +254,9 @@ function preserveCorruptPinBytes(agent: AgentId, bytes: Buffer): string {
     if (fd !== undefined) {
       fs.writeFileSync(fd, bytes)
       fs.fsyncSync(fd)
-      fs.closeSync(fd)
+      const descriptor = fd
       fd = undefined
+      fs.closeSync(descriptor)
     }
   } catch (error) {
     if (fd !== undefined) {
@@ -310,24 +290,6 @@ function readPinStore(agent: AgentId): PinReadResult {
   }
 }
 
-function readPinStoreForListing(agent: AgentId): PinListingReadResult {
-  let bytes: Buffer
-  try {
-    bytes = fs.readFileSync(pinStorePath(agent))
-  } catch (error: any) {
-    if (error?.code === 'ENOENT') return { kind: 'ok', pins: [] }
-    fail('pin-list-read-failed', error?.message || `Could not read pin list for ${agent}`)
-  }
-
-  try {
-    const parsed: unknown = JSON.parse(bytes.toString('utf8'))
-    if (!isPinStoreForListing(parsed)) throw new Error('Pin list schema is invalid')
-    return { kind: 'ok', pins: parsed.pins }
-  } catch {
-    return { kind: 'corrupt', sidecar: preserveCorruptPinBytes(agent, bytes) }
-  }
-}
-
 function loadPinsForMutation(agent: AgentId, resetCorrupt: boolean): PinMutationState {
   const loaded = readPinStore(agent)
   if (loaded.kind === 'ok') return { pins: loaded.pins, resetCorrupt: false }
@@ -350,8 +312,9 @@ function writePinStore(agent: AgentId, pins: StoredPin[]) {
     created = true
     fs.writeFileSync(fd, serialized, { encoding: 'utf8' })
     fs.fsyncSync(fd)
-    fs.closeSync(fd)
+    const descriptor = fd
     fd = undefined
+    fs.closeSync(descriptor)
     fs.renameSync(tempPath, destination)
 
     const directoryFd = fs.openSync(PINS_DIR, 'r')
@@ -395,7 +358,7 @@ function findPinPath(pins: StoredPin[], requestedPath: string): string | undefin
 
 function cmdListPins(agentValue: string) {
   validatePinAgent(agentValue)
-  const loaded = readPinStoreForListing(agentValue)
+  const loaded = readPinStore(agentValue)
   if (loaded.kind === 'corrupt') {
     output({ pins: [], corrupt: true, sidecar: loaded.sidecar })
     return
@@ -404,11 +367,7 @@ function cmdListPins(agentValue: string) {
     pins: loaded.pins.map(pin => {
       let exists = false
       try { exists = fs.statSync(pin.path).isDirectory() } catch { /* missing and unreadable pins remain listed */ }
-      const matchKeys = Array.isArray(pin.matchKeys)
-        && pin.matchKeys.length > 0
-        && pin.matchKeys.every(key => typeof key === 'string' && key.length > 0)
-        ? [...pin.matchKeys] as string[]
-        : []
+      const matchKeys = pin.matchKeys ? [...pin.matchKeys] : []
       return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys }
     }),
   })
@@ -425,17 +384,22 @@ function cmdAddPin(agentValue: string, suppliedPath: string, resetCorrupt: boole
     fail('pin-path-unavailable', error?.message || `Could not resolve pin path: ${suppliedPath}`)
   }
 
+  const suppliedAbsolutePath = path.resolve(suppliedPath)
+  const incomingMatchKeys = Array.from(new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]))
   const state = loadPinsForMutation(agentValue, resetCorrupt)
-  if (state.pins.some(pin => pin.path === canonicalPath)) {
-    if (state.resetCorrupt) writePinStore(agentValue, state.pins)
-    output({ canonicalPath, outcome: 'duplicate' })
+  const existing = state.pins.find(pin => pin.path === canonicalPath)
+  if (existing) {
+    const storedMatchKeys = existing.matchKeys || []
+    const mergedMatchKeys = Array.from(new Set([...storedMatchKeys, ...incomingMatchKeys]))
+    const matchKeysMerged = mergedMatchKeys.length !== storedMatchKeys.length
+    if (matchKeysMerged) existing.matchKeys = mergedMatchKeys
+    if (state.resetCorrupt || matchKeysMerged) writePinStore(agentValue, state.pins)
+    output({ canonicalPath, outcome: 'duplicate', matchKeysMerged })
     return
   }
   if (state.pins.length >= 500) fail('pin-limit-reached', 'Cannot add pin: the 500-pin limit has been reached')
 
-  const suppliedAbsolutePath = path.resolve(suppliedPath)
-  const matchKeys = Array.from(new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]))
-  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys }, ...state.pins])
+  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys: incomingMatchKeys }, ...state.pins])
   output({ canonicalPath, outcome: 'applied' })
 }
 

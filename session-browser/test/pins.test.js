@@ -220,7 +220,38 @@ test('symlink identity deduplicates and stores canonical plus supplied-form matc
   assert.notEqual(first.canonicalPath, link)
   assert.equal(runJson(['add-pin', AGENT, target]).outcome, 'duplicate')
   const [pin] = readStore().pins
-  assert.deepEqual(new Set(pin.matchKeys), new Set([matchKey(first.canonicalPath), matchKey(link)]))
+  assert.deepEqual(new Set(pin.matchKeys), new Set([
+    matchKey(first.canonicalPath),
+    matchKey(link),
+    matchKey(target),
+  ]))
+})
+
+test('duplicate add merges a new symlink spelling once and reports whether storage changed', () => {
+  const target = mkdir('duplicate-merge-target')
+  const link = path.join(fixture, 'duplicate-merge-link')
+  fs.symlinkSync(target, link, 'dir')
+  const first = runJson(['add-pin', AGENT, target])
+
+  assert.deepEqual(runJson(['add-pin', AGENT, link]), {
+    canonicalPath: first.canonicalPath,
+    outcome: 'duplicate',
+    matchKeysMerged: true,
+  })
+  const afterMerge = readStore()
+  assert.equal(afterMerge.pins.length, 1)
+  assert.deepEqual(new Set(afterMerge.pins[0].matchKeys), new Set([
+    matchKey(first.canonicalPath),
+    matchKey(target),
+    matchKey(link),
+  ]))
+
+  assert.deepEqual(runJson(['add-pin', AGENT, link]), {
+    canonicalPath: first.canonicalPath,
+    outcome: 'duplicate',
+    matchKeysMerged: false,
+  })
+  assert.deepEqual(readStore(), afterMerge)
 })
 
 test('match keys normalize case, Unicode composition, and the supplied symlink form', () => {
@@ -470,6 +501,55 @@ test('temp fd fsync occurs before rename and containing-directory fsync', () => 
   assert.ok(directoryFsync > rename, events.join('\n'))
 })
 
+test('pin temp and corrupt-sidecar descriptors are relinquished before a failing close', () => {
+  const preload = writePreload('close-failure.cjs', [
+    "const fs = require('node:fs')",
+    'const originalOpen = fs.openSync',
+    'const originalClose = fs.closeSync',
+    'const originalAppend = fs.appendFileSync',
+    'const descriptors = new Map()',
+    'const failed = new Set()',
+    'fs.openSync = function(target) { const fd = originalOpen.apply(this, arguments); descriptors.set(fd, String(target)); return fd }',
+    'fs.closeSync = function(fd) {',
+    '  const target = descriptors.get(fd) || ""',
+    '  if (target.includes(process.env.PIN_CLOSE_TARGET)) {',
+    '    originalAppend(process.env.PIN_CLOSE_LOG, `${fd}:${target}\\n`)',
+    '    if (!failed.has(fd)) {',
+    '      failed.add(fd)',
+    '      originalClose.call(this, fd)',
+    '      throw new Error("synthetic close failure")',
+    '    }',
+    '  }',
+    '  return originalClose.apply(this, arguments)',
+    '}',
+  ].join('\n'))
+  const closeAttempts = (target, args, prepare) => {
+    const log = path.join(fixture, `${target.replaceAll('.', '')}.log`)
+    prepare()
+    const result = run(args, {
+      NODE_OPTIONS: nodeOptions(preload),
+      PIN_CLOSE_TARGET: target,
+      PIN_CLOSE_LOG: log,
+    })
+    assert.equal(result.status, 1)
+    assert.match(result.stderr, /synthetic close failure/)
+    return fs.readFileSync(log, 'utf8').trim().split('\n')
+  }
+
+  const tempAttempts = closeAttempts('.json.tmp.', ['add-pin', AGENT, mkdir('close-failure-add')], () => {})
+  const sidecarAttempts = closeAttempts('.json.corrupt.', ['list-pins', AGENT], () => {
+    fs.mkdirSync(pinsDir(), { recursive: true })
+    fs.writeFileSync(pinFile(), 'close-failure-corrupt')
+  })
+  assert.deepEqual({
+    temp: tempAttempts.length,
+    corruptSidecar: sidecarAttempts.length,
+  }, {
+    temp: 1,
+    corruptSidecar: 1,
+  }, [...tempAttempts, ...sidecarAttempts].join('\n'))
+})
+
 test('SIGKILL during the write protocol leaves the previous file byte-intact', async () => {
   const originalFolder = mkdir('crash-original')
   const newFolder = mkdir('crash-new')
@@ -541,6 +621,25 @@ test('schema-invalid input is corrupt rather than an empty or missing list', () 
   assert.equal(typeof listed.sidecar, 'string')
 })
 
+test('legacy missing matchKeys is mutable while a present malformed field is corrupt everywhere', () => {
+  writeStore([{ path: '/legacy-pin', addedAt: 1 }])
+  assert.deepEqual(runJson(['list-pins', AGENT]), {
+    pins: [{ path: '/legacy-pin', addedAt: 1, exists: false, matchKeys: [] }],
+  })
+  assert.deepEqual(runJson(['remove-pin', AGENT, '/legacy-pin']), {
+    results: [{ path: '/legacy-pin', outcome: 'applied' }],
+    changed: true,
+  })
+
+  writeStore([{ path: '/malformed-pin', addedAt: 2, matchKeys: 'not-an-array' }])
+  const listed = runJson(['list-pins', AGENT])
+  assert.deepEqual(listed.pins, [])
+  assert.equal(listed.corrupt, true)
+  const mutation = run(['remove-pin', AGENT, '/malformed-pin'])
+  assert.equal(mutation.status, 1)
+  assert.match(mutation.stderr, /corrupt-pin-list/)
+})
+
 test('reading identical corrupt bytes 50 times creates exactly one sidecar', () => {
   fs.mkdirSync(pinsDir(), { recursive: true })
   fs.writeFileSync(pinFile(), 'same corrupt bytes')
@@ -557,6 +656,40 @@ test('corrupt sidecars are capped at ten distinct oldest-preserving copies', () 
     fs.writeFileSync(pinFile(), `corrupt-${index}`)
     assert.equal(runJson(['list-pins', AGENT]).corrupt, true)
   }
+  assert.equal(sidecarNames().length, 10)
+})
+
+test('sidecar pruning skips an entry removed between readdir and stat', () => {
+  fs.mkdirSync(pinsDir(), { recursive: true })
+  const racedSidecar = path.join(pinsDir(), `${AGENT}.json.corrupt.raced`)
+  for (let index = 0; index < 11; index++) {
+    const sidecar = index === 0
+      ? racedSidecar
+      : path.join(pinsDir(), `${AGENT}.json.corrupt.existing-${index}`)
+    fs.writeFileSync(sidecar, `sidecar-${index}`)
+  }
+  fs.writeFileSync(pinFile(), 'new corrupt bytes for pruning')
+  const preload = writePreload('sidecar-stat-race.cjs', [
+    "const fs = require('node:fs')",
+    'const originalStat = fs.statSync',
+    'let raced = false',
+    'fs.statSync = function(target) {',
+    '  if (!raced && String(target) === process.env.PIN_RACED_SIDECAR) {',
+    '    raced = true',
+    '    try { fs.unlinkSync(target) } catch {}',
+    '    const error = new Error("simulated readdir/stat race")',
+    '    error.code = "ENOENT"',
+    '    throw error',
+    '  }',
+    '  return originalStat.apply(this, arguments)',
+    '}',
+  ].join('\n'))
+  const result = run(['list-pins', AGENT], {
+    NODE_OPTIONS: nodeOptions(preload),
+    PIN_RACED_SIDECAR: racedSidecar,
+  })
+  assert.equal(result.status, 0, result.stderr)
+  assert.equal(JSON.parse(result.stdout).corrupt, true)
   assert.equal(sidecarNames().length, 10)
 })
 
@@ -643,16 +776,10 @@ test('list-pins exposes canonical and symlink-form match keys', () => {
   ]))
 })
 
-test('list-pins degrades missing or malformed stored match keys to empty arrays', () => {
-  writeStore([
-    { path: '/legacy-pin', addedAt: 1 },
-    { path: '/malformed-pin', addedAt: 2, matchKeys: 'not-an-array' },
-  ])
+test('list-pins degrades a missing stored matchKeys field to an empty array', () => {
+  writeStore([{ path: '/legacy-pin', addedAt: 1 }])
 
   assert.deepEqual(runJson(['list-pins', AGENT]), {
-    pins: [
-      { path: '/legacy-pin', addedAt: 1, exists: false, matchKeys: [] },
-      { path: '/malformed-pin', addedAt: 2, exists: false, matchKeys: [] },
-    ],
+    pins: [{ path: '/legacy-pin', addedAt: 1, exists: false, matchKeys: [] }],
   })
 })

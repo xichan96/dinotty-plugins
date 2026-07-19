@@ -1338,6 +1338,12 @@ export function activate(ctx: PluginContext): PluginExports {
     return [...promoted, ...paths.filter(pinPath => !selected.has(pinPath))]
   }
 
+  async function reconcilePinsAfterStaleMutation() {
+    const mount = activeMount
+    if (!isActiveMount(mount)) return
+    await loadPins()
+  }
+
   async function executePinMutation(task: QueuedPinMutation) {
     const { mount, agent, generation, intent } = task
     const isCurrent = () => isActiveMount(mount)
@@ -1354,12 +1360,14 @@ export function activate(ctx: PluginContext): PluginExports {
 
     try {
       const result = await ctx.exec.run(args, { timeout: 10_000 })
-      if (!isCurrent()) return
+      if (!isCurrent()) {
+        await reconcilePinsAfterStaleMutation()
+        return
+      }
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t('pin-mutation-failed')).message)
       const parsed = JSON.parse(result.stdout) as any
       let expected = before
       let expectedAfterReload: string[] | undefined = before
-      let shouldReload = true
       if (intent.type === 'add') {
         if (typeof parsed?.canonicalPath !== 'string' || (parsed.outcome !== 'applied' && parsed.outcome !== 'duplicate')) {
           throw new Error(t('pin-invalid-response'))
@@ -1372,7 +1380,6 @@ export function activate(ctx: PluginContext): PluginExports {
         expected = parsed.outcome === 'applied' ? expectedMove(before, intent.path, intent.direction) : before
       } else {
         if (!Array.isArray(parsed?.results) || typeof parsed.changed !== 'boolean') throw new Error(t('pin-invalid-response'))
-        shouldReload = intent.type === 'reset-corrupt' || parsed.changed
         if (intent.type === 'remove') {
           const removed = new Set(parsed.results
             .filter((item: any) => item?.outcome === 'applied' && typeof item.path === 'string')
@@ -1387,10 +1394,11 @@ export function activate(ctx: PluginContext): PluginExports {
       }
       if (expectedAfterReload !== undefined) expectedAfterReload = expected
       if (!isCurrent()) return
-      if (shouldReload) await loadPins(generation, expectedAfterReload)
+      await loadPins(generation, expectedAfterReload)
     } catch (caught) {
       console.warn('[session-browser]', caught)
-      if (isCurrent()) showError(t('pin-mutation-failed'))
+      if (!isCurrent()) await reconcilePinsAfterStaleMutation()
+      else showError(t('pin-mutation-failed'))
     }
   }
 

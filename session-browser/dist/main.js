@@ -1720,6 +1720,11 @@ function activate(ctx) {
     const promoted = paths.filter((pinPath) => selected.has(pinPath)).sort(comparePinPaths);
     return [...promoted, ...paths.filter((pinPath) => !selected.has(pinPath))];
   }
+  async function reconcilePinsAfterStaleMutation() {
+    const mount = activeMount;
+    if (!isActiveMount(mount)) return;
+    await loadPins();
+  }
   async function executePinMutation(task) {
     const { mount, agent, generation, intent } = task;
     const isCurrent = () => isActiveMount(mount) && generation === mount.pinsGeneration && agent === activeAgent.value;
@@ -1733,12 +1738,14 @@ function activate(ctx) {
     else args = ["remove-pin", agent, "--reset-corrupt"];
     try {
       const result = await ctx.exec.run(args, { timeout: 1e4 });
-      if (!isCurrent()) return;
+      if (!isCurrent()) {
+        await reconcilePinsAfterStaleMutation();
+        return;
+      }
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t("pin-mutation-failed")).message);
       const parsed = JSON.parse(result.stdout);
       let expected = before;
       let expectedAfterReload = before;
-      let shouldReload = true;
       if (intent.type === "add") {
         if (typeof parsed?.canonicalPath !== "string" || parsed.outcome !== "applied" && parsed.outcome !== "duplicate") {
           throw new Error(t("pin-invalid-response"));
@@ -1749,7 +1756,6 @@ function activate(ctx) {
         expected = parsed.outcome === "applied" ? expectedMove(before, intent.path, intent.direction) : before;
       } else {
         if (!Array.isArray(parsed?.results) || typeof parsed.changed !== "boolean") throw new Error(t("pin-invalid-response"));
-        shouldReload = intent.type === "reset-corrupt" || parsed.changed;
         if (intent.type === "remove") {
           const removed = new Set(parsed.results.filter((item) => item?.outcome === "applied" && typeof item.path === "string").map((item) => item.path));
           expected = before.filter((pinPath) => !removed.has(pinPath));
@@ -1762,10 +1768,11 @@ function activate(ctx) {
       }
       if (expectedAfterReload !== void 0) expectedAfterReload = expected;
       if (!isCurrent()) return;
-      if (shouldReload) await loadPins(generation, expectedAfterReload);
+      await loadPins(generation, expectedAfterReload);
     } catch (caught) {
       console.warn("[session-browser]", caught);
-      if (isCurrent()) showError(t("pin-mutation-failed"));
+      if (!isCurrent()) await reconcilePinsAfterStaleMutation();
+      else showError(t("pin-mutation-failed"));
     }
   }
   async function drainPinMutationQueue() {

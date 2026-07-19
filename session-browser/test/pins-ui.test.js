@@ -357,6 +357,46 @@ test('pin mutation queue serializes two rapid up gestures into two ordered moves
   }
 })
 
+test('a successful no-op mutation reloads pins changed concurrently while the command was pending', async () => {
+  const slowRemove = deferred()
+  const harness = await mountPins({
+    pinsByAgent: {
+      'claude-code': [{ path: '/work', addedAt: 1, exists: true }],
+      codex: [],
+    },
+    run: async (args, state) => {
+      if (args[0] !== 'remove-pin' || args[1] !== 'claude-code') return undefined
+      await slowRemove.promise
+      state.pinsByAgent['claude-code'] = [{ path: '/concurrent-pin', addedAt: 2, exists: true }]
+      return {
+        code: 0,
+        stdout: JSON.stringify({ results: [{ path: args[2], outcome: 'absent' }], changed: false }),
+        stderr: '',
+      }
+    },
+  })
+  try {
+    let nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'button' && hasClass(node, 'ccm-browser-pin-row') && node.props.title === '/work').props.onClick()
+    nodes = flatten(harness.render())
+    const callStart = harness.calls.length
+    nodes.find(node => node?.tag === 'button'
+      && node.props?.title === dictionaries.en['pin-current-folder-remove']).props.onClick()
+    await flush(2)
+    assert.ok(harness.calls.slice(callStart).some(args => args[0] === 'remove-pin'))
+
+    slowRemove.resolve()
+    await flush(8)
+    const pinPaths = flatten(harness.render())
+      .filter(node => node?.tag === 'button' && hasClass(node, 'ccm-browser-pin-row'))
+      .map(node => node.props.title)
+    assert.deepEqual(pinPaths, ['/concurrent-pin'])
+    assert.ok(harness.calls.slice(callStart).some(args => args[0] === 'list-pins'))
+  } finally {
+    harness.cleanup()
+  }
+})
+
 test('agent generations discard stale list and add completions, then switch-back reload reconciles the add', async () => {
   const slowList = deferred()
   const slowAdd = deferred()
@@ -409,6 +449,48 @@ test('agent generations discard stale list and add completions, then switch-back
     switchAgent(harness, 'claude-code')
     await flush(8)
     assert.match(textOf(harness.render()), /canonical-added-for-a/)
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('a stale add completion reconciles the agent that is current after switching away and back', async () => {
+  const slowAdd = deferred()
+  const pinsByAgent = {
+    'claude-code': [],
+    codex: [{ path: '/codex-pin', addedAt: 1, exists: true }],
+  }
+  const harness = await mountPins({
+    pinsByAgent,
+    run: async (args, state) => {
+      if (args[0] !== 'add-pin' || args[1] !== 'claude-code') return undefined
+      const response = await slowAdd.promise
+      state.pinsByAgent['claude-code'] = [{ path: response.canonicalPath, addedAt: 2, exists: true }]
+      return { code: 0, stdout: JSON.stringify(response), stderr: '' }
+    },
+  })
+  try {
+    const callStart = harness.calls.length
+    flatten(harness.render()).find(node => node?.tag === 'button'
+      && node.props?.title === dictionaries.en['pin-current-folder-add']).props.onClick()
+    await flush(2)
+    assert.ok(harness.calls.slice(callStart).some(args => args[0] === 'add-pin'))
+
+    switchAgent(harness, 'codex')
+    await flush(8)
+    switchAgent(harness, 'claude-code')
+    await flush(8)
+    assert.doesNotMatch(textOf(harness.render()), /late-agent-a-pin/)
+
+    slowAdd.resolve({ canonicalPath: '/late-agent-a-pin', outcome: 'applied' })
+    await flush(10)
+    const pinPaths = flatten(harness.render())
+      .filter(node => node?.tag === 'button' && hasClass(node, 'ccm-browser-pin-row'))
+      .map(node => node.props.title)
+    assert.deepEqual(pinPaths, ['/late-agent-a-pin'])
+    const aLists = harness.calls.slice(callStart)
+      .filter(args => args[0] === 'list-pins' && args[1] === 'claude-code')
+    assert.ok(aLists.length >= 2, JSON.stringify(harness.calls.slice(callStart)))
   } finally {
     harness.cleanup()
   }
