@@ -295,6 +295,34 @@ test('pin rows use exact match-key metadata and activation sets exact scope with
   }
 })
 
+test('current folder pin prefers an exact case-preserving path before folded match keys', async () => {
+  const harness = await mountPins({
+    sessions: [session('lowercase-folder', '/work/foo')],
+    pinsByAgent: {
+      'claude-code': [
+        { path: '/work/Foo', addedAt: 1, exists: true },
+        { path: '/work/foo', addedAt: 2, exists: true },
+      ],
+      codex: [],
+    },
+  })
+  try {
+    const callStart = harness.calls.length
+    const toggle = flatten(harness.render()).find(node => node?.tag === 'button'
+      && node.props?.title === dictionaries.en['pin-current-folder-remove'])
+    assert.ok(toggle)
+    toggle.props.onClick()
+    await flush(4)
+    assert.deepEqual(harness.calls.slice(callStart).find(args => args[0] === 'remove-pin'), [
+      'remove-pin',
+      'claude-code',
+      '/work/foo',
+    ])
+  } finally {
+    harness.cleanup()
+  }
+})
+
 test('pins edit mode and selection remain isolated from session select mode and members', async () => {
   const harness = await mountPins({
     pinsByAgent: { 'claude-code': [{ path: '/pinned', addedAt: 1, exists: true }], codex: [] },
@@ -352,6 +380,77 @@ test('pin mutation queue serializes two rapid up gestures into two ordered moves
       .filter(node => hasClass(node, 'ccm-browser-pin-row-edit'))
       .map(node => node.props.title)
     assert.deepEqual(order, ['/a', '/d', '/b', '/c'])
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('pin mutation queue does not start a second asynchronous command before the first resolves', async () => {
+  const firstMove = deferred()
+  const secondMove = deferred()
+  let moveCount = 0
+  const harness = await mountPins({
+    pinsByAgent: {
+      'claude-code': ['/a', '/b', '/c', '/d'].map((pinPath, index) => ({
+        path: pinPath,
+        addedAt: index + 1,
+        exists: true,
+      })),
+      codex: [],
+    },
+    run: async args => {
+      if (args[0] !== 'move-pin') return undefined
+      moveCount++
+      await (moveCount === 1 ? firstMove.promise : secondMove.promise)
+      return { code: 0, stdout: JSON.stringify({ outcome: 'applied' }), stderr: '' }
+    },
+  })
+  try {
+    let nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Edit pinned folders').props.onClick()
+    nodes = flatten(harness.render())
+    const callStart = harness.calls.length
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Move d up').props.onClick()
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Move c up').props.onClick()
+    await flush(3)
+    assert.deepEqual(harness.calls.slice(callStart).filter(args => args[0] === 'move-pin'), [
+      ['move-pin', 'claude-code', '/d', 'up'],
+    ])
+
+    firstMove.resolve()
+    await flush(6)
+    assert.deepEqual(harness.calls.slice(callStart).filter(args => args[0] === 'move-pin'), [
+      ['move-pin', 'claude-code', '/d', 'up'],
+      ['move-pin', 'claude-code', '/c', 'up'],
+    ])
+    secondMove.resolve()
+    await flush(6)
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('a failed current-generation pin mutation reloads the committed pin list', async () => {
+  const harness = await mountPins({
+    pinsByAgent: {
+      'claude-code': [
+        { path: '/a', addedAt: 1, exists: true },
+        { path: '/b', addedAt: 2, exists: true },
+      ],
+      codex: [],
+    },
+    run: async args => args[0] === 'move-pin'
+      ? { code: 1, stdout: '', stderr: 'directory fsync failed after rename' }
+      : undefined,
+  })
+  try {
+    let nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Edit pinned folders').props.onClick()
+    nodes = flatten(harness.render())
+    const callStart = harness.calls.length
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Move b up').props.onClick()
+    await flush(8)
+    assert.deepEqual(harness.calls.slice(callStart).map(args => args[0]), ['move-pin', 'list-pins'])
   } finally {
     harness.cleanup()
   }
@@ -491,6 +590,50 @@ test('a stale add completion reconciles the agent that is current after switchin
     const aLists = harness.calls.slice(callStart)
       .filter(args => args[0] === 'list-pins' && args[1] === 'claude-code')
     assert.ok(aLists.length >= 2, JSON.stringify(harness.calls.slice(callStart)))
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('stale mutation reconciliation preserves a newer-generation queued mutation', async () => {
+  const slowFirstAdd = deferred()
+  let addCount = 0
+  const harness = await mountPins({
+    sessionsByAgent: {
+      'claude-code': [session('claude-work', '/work')],
+      codex: [session('codex-work', '/codex', { agent: 'codex' })],
+    },
+    pinsByAgent: { 'claude-code': [], codex: [] },
+    run: async (args, state) => {
+      if (args[0] !== 'add-pin' || args[1] !== 'claude-code') return undefined
+      addCount++
+      if (addCount === 1) await slowFirstAdd.promise
+      const canonicalPath = addCount === 1 ? '/stale-first-add' : '/queued-second-add'
+      state.pinsByAgent['claude-code'] = [{ path: canonicalPath, addedAt: addCount, exists: true }]
+      return { code: 0, stdout: JSON.stringify({ canonicalPath, outcome: 'applied' }), stderr: '' }
+    },
+  })
+  try {
+    const addButton = () => flatten(harness.render()).find(node => node?.tag === 'button'
+      && node.props?.title === dictionaries.en['pin-current-folder-add'])
+    const callStart = harness.calls.length
+    addButton().props.onClick()
+    await flush(2)
+
+    switchAgent(harness, 'codex')
+    await flush(8)
+    switchAgent(harness, 'claude-code')
+    await flush(8)
+    addButton().props.onClick()
+    await flush(2)
+    assert.equal(harness.calls.slice(callStart).filter(args => args[0] === 'add-pin').length, 1)
+
+    slowFirstAdd.resolve()
+    await flush(12)
+    assert.deepEqual(harness.calls.slice(callStart).filter(args => args[0] === 'add-pin'), [
+      ['add-pin', 'claude-code', '/work'],
+      ['add-pin', 'claude-code', '/work'],
+    ])
   } finally {
     harness.cleanup()
   }

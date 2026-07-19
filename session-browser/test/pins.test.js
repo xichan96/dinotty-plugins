@@ -659,6 +659,28 @@ test('corrupt sidecars are capped at ten distinct oldest-preserving copies', () 
   assert.equal(sidecarNames().length, 10)
 })
 
+test('reusing an old corrupt sidecar keeps the returned path past the retention cap', () => {
+  fs.mkdirSync(pinsDir(), { recursive: true })
+  const reusedBytes = Buffer.from('corrupt bytes that will recur')
+  fs.writeFileSync(pinFile(), reusedBytes)
+  const first = runJson(['list-pins', AGENT])
+  assert.equal(first.corrupt, true)
+  const reusedSidecar = first.sidecar
+  fs.utimesSync(reusedSidecar, new Date(0), new Date(0))
+
+  for (let index = 0; index < 9; index++) {
+    fs.writeFileSync(pinFile(), `different-corrupt-bytes-${index}`)
+    assert.equal(runJson(['list-pins', AGENT]).corrupt, true)
+  }
+  fs.writeFileSync(path.join(pinsDir(), `${AGENT}.json.corrupt.extra-newer-sidecar`), 'extra')
+  assert.equal(sidecarNames().length, 11)
+
+  fs.writeFileSync(pinFile(), reusedBytes)
+  const current = runJson(['list-pins', AGENT])
+  assert.equal(current.sidecar, reusedSidecar)
+  assert.equal(fs.existsSync(current.sidecar), true, `returned sidecar was pruned: ${current.sidecar}`)
+})
+
 test('sidecar pruning skips an entry removed between readdir and stat', () => {
   fs.mkdirSync(pinsDir(), { recursive: true })
   const racedSidecar = path.join(pinsDir(), `${AGENT}.json.corrupt.raced`)

@@ -216,7 +216,7 @@ function isPinStore(value: unknown): value is PinStore {
   })
 }
 
-function prunePinSidecars(agent: AgentId) {
+function prunePinSidecars(agent: AgentId, keepPath?: string) {
   const prefix = `${agent}.json.corrupt.`
   const sidecars = fs.readdirSync(PINS_DIR)
     .filter(name => name.startsWith(prefix))
@@ -229,7 +229,9 @@ function prunePinSidecars(agent: AgentId) {
       }
     })
     .sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-  for (const sidecar of sidecars.slice(0, Math.max(0, sidecars.length - 10))) {
+  const retained = new Set(sidecars.slice(-10).map(sidecar => sidecar.path))
+  if (keepPath) retained.add(keepPath)
+  for (const sidecar of sidecars.filter(item => !retained.has(item.path))) {
     try {
       fs.unlinkSync(sidecar.path)
     } catch (error: any) {
@@ -268,7 +270,7 @@ function preserveCorruptPinBytes(agent: AgentId, bytes: Buffer): string {
     }
     throw error
   }
-  prunePinSidecars(agent)
+  prunePinSidecars(agent, sidecar)
   return sidecar
 }
 

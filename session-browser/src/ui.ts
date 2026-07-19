@@ -1233,7 +1233,10 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function currentFolderPin(): FolderPin | undefined {
-    const selectedKey = normalizePinMatchKey(committedSelection.value.path)
+    const selectedPath = normalizePath(committedSelection.value.path)
+    const exact = pinsSelection.value.pins.find(pin => normalizePath(pin.path) === selectedPath)
+    if (exact) return exact
+    const selectedKey = normalizePinMatchKey(selectedPath)
     return pinsSelection.value.pins.find(pin => pinMatchKeys(pin).has(selectedKey))
   }
 
@@ -1341,7 +1344,7 @@ export function activate(ctx: PluginContext): PluginExports {
   async function reconcilePinsAfterStaleMutation() {
     const mount = activeMount
     if (!isActiveMount(mount)) return
-    await loadPins()
+    await loadPins(mount.pinsGeneration)
   }
 
   async function executePinMutation(task: QueuedPinMutation) {
@@ -1398,7 +1401,10 @@ export function activate(ctx: PluginContext): PluginExports {
     } catch (caught) {
       console.warn('[session-browser]', caught)
       if (!isCurrent()) await reconcilePinsAfterStaleMutation()
-      else showError(t('pin-mutation-failed'))
+      else {
+        showError(t('pin-mutation-failed'))
+        await loadPins(generation)
+      }
     }
   }
 

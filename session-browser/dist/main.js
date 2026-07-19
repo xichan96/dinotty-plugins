@@ -1628,7 +1628,10 @@ function activate(ctx) {
     return new Set(pin.matchKeys?.length ? pin.matchKeys : [normalizePinMatchKey(pin.path)]);
   }
   function currentFolderPin() {
-    const selectedKey = normalizePinMatchKey(committedSelection.value.path);
+    const selectedPath = normalizePath(committedSelection.value.path);
+    const exact = pinsSelection.value.pins.find((pin) => normalizePath(pin.path) === selectedPath);
+    if (exact) return exact;
+    const selectedKey = normalizePinMatchKey(selectedPath);
     return pinsSelection.value.pins.find((pin) => pinMatchKeys(pin).has(selectedKey));
   }
   function parsePinsResponse(stdout) {
@@ -1723,7 +1726,7 @@ function activate(ctx) {
   async function reconcilePinsAfterStaleMutation() {
     const mount = activeMount;
     if (!isActiveMount(mount)) return;
-    await loadPins();
+    await loadPins(mount.pinsGeneration);
   }
   async function executePinMutation(task) {
     const { mount, agent, generation, intent } = task;
@@ -1772,7 +1775,10 @@ function activate(ctx) {
     } catch (caught) {
       console.warn("[session-browser]", caught);
       if (!isCurrent()) await reconcilePinsAfterStaleMutation();
-      else showError(t("pin-mutation-failed"));
+      else {
+        showError(t("pin-mutation-failed"));
+        await loadPins(generation);
+      }
     }
   }
   async function drainPinMutationQueue() {
