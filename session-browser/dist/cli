@@ -26,6 +26,7 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 var fs2 = __toESM(require("fs"));
 var path2 = __toESM(require("path"));
 var readline2 = __toESM(require("readline"));
+var crypto = __toESM(require("crypto"));
 
 // src/codex-connector.ts
 var fs = __toESM(require("fs"));
@@ -600,6 +601,7 @@ var PLUGIN_DATA_BASE = path2.join(HOME2, ".dinotty", "plugin-data");
 if (process.env.CC_SB_DATA_DIR === void 0) migratePluginSettings(PLUGIN_DATA_BASE, "cc-session-browser", "session-browser");
 var DATA_DIR = process.env.CC_SB_DATA_DIR || path2.join(HOME2, ".dinotty/plugin-data/session-browser");
 var INDEX_CACHE_PATH = path2.join(DATA_DIR, "index-cache.json");
+var PINS_DIR = path2.join(DATA_DIR, "pins");
 var SESSION_ID_RE2 = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var ENCODED_PATH_RE = /^[A-Za-z0-9_-]+$/;
 var HEAD_SCAN_BYTES = 64 * 1024;
@@ -616,6 +618,7 @@ var EXPORT_FILENAME_ATTEMPTS = 1e3;
 var EXPORT_LINK_FALLBACK_CODES = /* @__PURE__ */ new Set(["EPERM", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"]);
 var TERMINAL_SESSION_STATUSES = /* @__PURE__ */ new Set(["closed", "completed", "dead", "done", "ended", "exited", "failed", "stopped", "terminated"]);
 var exportTempCounter = 0;
+var pinTempCounter = 0;
 function output2(value) {
   console.log(JSON.stringify(value));
 }
@@ -650,6 +653,276 @@ function injectedFault(name, code = "EIO") {
     error.code = code;
     throw error;
   }
+}
+function validatePinAgent(agent) {
+  if (agent !== "claude-code" && agent !== "codex") fail("invalid-arguments", `Unknown agent: ${agent}`);
+}
+function pinStorePath(agent) {
+  return path2.join(PINS_DIR, `${agent}.json`);
+}
+function lexicalNormalizePinPath(value) {
+  const trimmed = value.trim();
+  if (!trimmed) return "/";
+  const absolute = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const parts = [];
+  for (const part of absolute.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return parts.length ? `/${parts.join("/")}` : "/";
+}
+function pinMatchKey(value) {
+  return lexicalNormalizePinPath(value.normalize("NFC").toLowerCase());
+}
+function isPinStore(value) {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value;
+  if (candidate.version !== 1 || !Array.isArray(candidate.pins)) return false;
+  return candidate.pins.every((pin) => {
+    if (!pin || typeof pin !== "object") return false;
+    const item = pin;
+    return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0 && Array.isArray(item.matchKeys) && item.matchKeys.length > 0 && item.matchKeys.every((key) => typeof key === "string" && key.length > 0);
+  });
+}
+function prunePinSidecars(agent) {
+  const prefix = `${agent}.json.corrupt.`;
+  const sidecars = fs2.readdirSync(PINS_DIR).filter((name) => name.startsWith(prefix)).map((name) => {
+    const sidecarPath = path2.join(PINS_DIR, name);
+    return { path: sidecarPath, name, mtimeMs: fs2.statSync(sidecarPath).mtimeMs };
+  }).sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  for (const sidecar of sidecars.slice(0, Math.max(0, sidecars.length - 10))) {
+    try {
+      fs2.unlinkSync(sidecar.path);
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+    }
+  }
+}
+function preserveCorruptPinBytes(agent, bytes) {
+  fs2.mkdirSync(PINS_DIR, { recursive: true });
+  const hash = crypto.createHash("sha256").update(bytes).digest("hex").slice(0, 16);
+  const sidecar = path2.join(PINS_DIR, `${agent}.json.corrupt.${hash}`);
+  let fd;
+  let created = false;
+  try {
+    try {
+      fd = fs2.openSync(sidecar, "wx", 384);
+      created = true;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+    if (fd !== void 0) {
+      fs2.writeFileSync(fd, bytes);
+      fs2.fsyncSync(fd);
+      fs2.closeSync(fd);
+      fd = void 0;
+    }
+  } catch (error) {
+    if (fd !== void 0) {
+      try {
+        fs2.closeSync(fd);
+      } catch {
+      }
+      fd = void 0;
+    }
+    if (created) {
+      try {
+        fs2.unlinkSync(sidecar);
+      } catch {
+      }
+    }
+    throw error;
+  }
+  prunePinSidecars(agent);
+  return sidecar;
+}
+function readPinStore(agent) {
+  let bytes;
+  try {
+    bytes = fs2.readFileSync(pinStorePath(agent));
+  } catch (error) {
+    if (error?.code === "ENOENT") return { kind: "ok", pins: [] };
+    fail("pin-list-read-failed", error?.message || `Could not read pin list for ${agent}`);
+  }
+  try {
+    const parsed = JSON.parse(bytes.toString("utf8"));
+    if (!isPinStore(parsed)) throw new Error("Pin list schema is invalid");
+    return { kind: "ok", pins: parsed.pins };
+  } catch {
+    return { kind: "corrupt", sidecar: preserveCorruptPinBytes(agent, bytes) };
+  }
+}
+function loadPinsForMutation(agent, resetCorrupt) {
+  const loaded = readPinStore(agent);
+  if (loaded.kind === "ok") return { pins: loaded.pins, resetCorrupt: false };
+  if (!resetCorrupt) {
+    fail("corrupt-pin-list", `Pin list is corrupt; preserved bytes at ${loaded.sidecar}`);
+  }
+  return { pins: [], resetCorrupt: true };
+}
+function writePinStore(agent, pins) {
+  fs2.mkdirSync(PINS_DIR, { recursive: true });
+  pinTempCounter = pinTempCounter + 1 >>> 0;
+  const destination = pinStorePath(agent);
+  const tempPath = path2.join(PINS_DIR, `.${agent}.json.tmp.${process.pid}.${pinTempCounter}`);
+  const serialized = JSON.stringify({ version: 1, pins });
+  let fd;
+  let created = false;
+  try {
+    fd = fs2.openSync(tempPath, "wx", 384);
+    created = true;
+    fs2.writeFileSync(fd, serialized, { encoding: "utf8" });
+    fs2.fsyncSync(fd);
+    fs2.closeSync(fd);
+    fd = void 0;
+    fs2.renameSync(tempPath, destination);
+    const directoryFd = fs2.openSync(PINS_DIR, "r");
+    try {
+      fs2.fsyncSync(directoryFd);
+    } finally {
+      fs2.closeSync(directoryFd);
+    }
+  } finally {
+    if (fd !== void 0) {
+      try {
+        fs2.closeSync(fd);
+      } catch {
+      }
+    }
+    if (created) {
+      try {
+        fs2.unlinkSync(tempPath);
+      } catch {
+      }
+    }
+  }
+}
+function parseResetCorrupt(args) {
+  const count = args.filter((arg) => arg === "--reset-corrupt").length;
+  if (count > 1) fail("invalid-arguments", "--reset-corrupt may be specified only once");
+  return { resetCorrupt: count === 1, rest: args.filter((arg) => arg !== "--reset-corrupt") };
+}
+function validateCanonicalPinPath(value) {
+  validateAbsolutePath(value);
+}
+function resolvePinLookupPath(value) {
+  try {
+    return fs2.realpathSync.native(value);
+  } catch {
+    return void 0;
+  }
+}
+function findPinPath(pins, requestedPath) {
+  const resolvedPath = resolvePinLookupPath(requestedPath);
+  return pins.find((pin) => pin.path === resolvedPath || pin.path === requestedPath)?.path;
+}
+function cmdListPins(agentValue) {
+  validatePinAgent(agentValue);
+  const loaded = readPinStore(agentValue);
+  if (loaded.kind === "corrupt") {
+    output2({ pins: [], corrupt: true, sidecar: loaded.sidecar });
+    return;
+  }
+  output2({
+    pins: loaded.pins.map((pin) => {
+      let exists = false;
+      try {
+        exists = fs2.statSync(pin.path).isDirectory();
+      } catch {
+      }
+      return { path: pin.path, addedAt: pin.addedAt, exists };
+    })
+  });
+}
+function cmdAddPin(agentValue, suppliedPath, resetCorrupt) {
+  validatePinAgent(agentValue);
+  let canonicalPath;
+  try {
+    canonicalPath = fs2.realpathSync.native(path2.resolve(suppliedPath));
+    if (!fs2.statSync(canonicalPath).isDirectory()) fail("pin-path-not-directory", `Path is not a directory: ${suppliedPath}`);
+  } catch (error) {
+    if (error?.code === "pin-path-not-directory") throw error;
+    fail("pin-path-unavailable", error?.message || `Could not resolve pin path: ${suppliedPath}`);
+  }
+  const state = loadPinsForMutation(agentValue, resetCorrupt);
+  if (state.pins.some((pin) => pin.path === canonicalPath)) {
+    if (state.resetCorrupt) writePinStore(agentValue, state.pins);
+    output2({ canonicalPath, outcome: "duplicate" });
+    return;
+  }
+  if (state.pins.length >= 500) fail("pin-limit-reached", "Cannot add pin: the 500-pin limit has been reached");
+  const suppliedAbsolutePath = path2.resolve(suppliedPath);
+  const matchKeys = Array.from(/* @__PURE__ */ new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]));
+  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys }, ...state.pins]);
+  output2({ canonicalPath, outcome: "applied" });
+}
+function cmdRemovePins(agentValue, requestedPaths, resetCorrupt) {
+  validatePinAgent(agentValue);
+  requestedPaths.forEach(validateCanonicalPinPath);
+  const state = loadPinsForMutation(agentValue, resetCorrupt);
+  const seen = /* @__PURE__ */ new Set();
+  const remove = /* @__PURE__ */ new Set();
+  const results = requestedPaths.map((requestedPath) => {
+    if (seen.has(requestedPath)) return { path: requestedPath, outcome: "duplicate" };
+    seen.add(requestedPath);
+    const storedPath = findPinPath(state.pins, requestedPath);
+    if (storedPath === void 0) return { path: requestedPath, outcome: "absent" };
+    remove.add(storedPath);
+    return { path: requestedPath, outcome: "applied" };
+  });
+  const changed = state.resetCorrupt || remove.size > 0;
+  if (changed) writePinStore(agentValue, state.pins.filter((pin) => !remove.has(pin.path)));
+  output2({ results, changed });
+}
+function cmdMovePin(agentValue, requestedPath, direction, resetCorrupt) {
+  validatePinAgent(agentValue);
+  validateCanonicalPinPath(requestedPath);
+  if (direction !== "up" && direction !== "down") fail("invalid-arguments", "Direction must be up or down");
+  const state = loadPinsForMutation(agentValue, resetCorrupt);
+  const storedPath = findPinPath(state.pins, requestedPath);
+  const index = storedPath === void 0 ? -1 : state.pins.findIndex((pin) => pin.path === storedPath);
+  if (index < 0) {
+    if (state.resetCorrupt) writePinStore(agentValue, state.pins);
+    output2({ outcome: "absent" });
+    return;
+  }
+  const target = direction === "up" ? Math.max(0, index - 1) : Math.min(state.pins.length - 1, index + 1);
+  if (target !== index) {
+    const [pin] = state.pins.splice(index, 1);
+    state.pins.splice(target, 0, pin);
+  }
+  if (state.resetCorrupt || target !== index) writePinStore(agentValue, state.pins);
+  output2({ outcome: "applied" });
+}
+function comparePinPaths(left, right) {
+  const leftBase = path2.basename(left).toLowerCase();
+  const rightBase = path2.basename(right).toLowerCase();
+  if (leftBase < rightBase) return -1;
+  if (leftBase > rightBase) return 1;
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+function cmdPromotePins(agentValue, requestedPaths, resetCorrupt) {
+  validatePinAgent(agentValue);
+  requestedPaths.forEach(validateCanonicalPinPath);
+  const state = loadPinsForMutation(agentValue, resetCorrupt);
+  const seen = /* @__PURE__ */ new Set();
+  const selected = /* @__PURE__ */ new Set();
+  const results = requestedPaths.map((requestedPath) => {
+    if (seen.has(requestedPath)) return { path: requestedPath, outcome: "duplicate" };
+    seen.add(requestedPath);
+    const storedPath = findPinPath(state.pins, requestedPath);
+    if (storedPath === void 0) return { path: requestedPath, outcome: "absent" };
+    selected.add(storedPath);
+    return { path: requestedPath, outcome: "applied" };
+  });
+  const promoted = state.pins.filter((pin) => selected.has(pin.path)).sort((a, b) => comparePinPaths(a.path, b.path));
+  const remaining = state.pins.filter((pin) => !selected.has(pin.path));
+  const nextPins = [...promoted, ...remaining];
+  const reordered = nextPins.some((pin, index) => pin.path !== state.pins[index]?.path);
+  const changed = state.resetCorrupt || reordered;
+  if (changed) writePinStore(agentValue, nextPins);
+  output2({ results, changed });
 }
 var moveAttempt = 0;
 function readLiveRegistry() {
@@ -2103,6 +2376,34 @@ async function main() {
       if (args.length !== 1) fail("invalid-arguments", "Usage: check-dir <absolutePath>");
       cmdCheckDir(args[0]);
       break;
+    case "list-pins":
+      if (args.length !== 1) fail("invalid-arguments", "Usage: list-pins <agent>");
+      cmdListPins(args[0]);
+      break;
+    case "add-pin": {
+      const parsed = parseResetCorrupt(args);
+      if (parsed.rest.length !== 2) fail("invalid-arguments", "Usage: add-pin <agent> <path> [--reset-corrupt]");
+      cmdAddPin(parsed.rest[0], parsed.rest[1], parsed.resetCorrupt);
+      break;
+    }
+    case "remove-pin": {
+      const parsed = parseResetCorrupt(args);
+      if (parsed.rest.length < 1) fail("invalid-arguments", "Usage: remove-pin <agent> <path>... [--reset-corrupt]");
+      cmdRemovePins(parsed.rest[0], parsed.rest.slice(1), parsed.resetCorrupt);
+      break;
+    }
+    case "move-pin": {
+      const parsed = parseResetCorrupt(args);
+      if (parsed.rest.length !== 3) fail("invalid-arguments", "Usage: move-pin <agent> <path> up|down [--reset-corrupt]");
+      cmdMovePin(parsed.rest[0], parsed.rest[1], parsed.rest[2], parsed.resetCorrupt);
+      break;
+    }
+    case "promote-pins": {
+      const parsed = parseResetCorrupt(args);
+      if (parsed.rest.length < 1) fail("invalid-arguments", "Usage: promote-pins <agent> <path>... [--reset-corrupt]");
+      cmdPromotePins(parsed.rest[0], parsed.rest.slice(1), parsed.resetCorrupt);
+      break;
+    }
     case "classify-export-destination":
       if (args.length !== 1) fail("invalid-arguments", "Usage: classify-export-destination <path>");
       console.log(JSON.stringify({ outsideHome: isExportDestinationOutsideHome(args[0]) }));
