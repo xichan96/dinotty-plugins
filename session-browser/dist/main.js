@@ -56,6 +56,7 @@ var ICON_PATHS = {
     ["path", { d: "M10 12h4" }],
     ["path", { d: "M10 16h4" }]
   ],
+  download: [["path", { d: "M12 15V3" }], ["path", { d: "M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" }], ["path", { d: "m7 10 5 5 5-5" }]],
   archive: [
     ["rect", { width: "20", height: "5", x: "2", y: "3", rx: "1" }],
     ["path", { d: "M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" }],
@@ -177,6 +178,9 @@ function IconTerminal(size) {
 function IconFileText(size) {
   return renderIcon(ICON_PATHS["file-text"], size);
 }
+function IconDownload(size) {
+  return renderIcon(ICON_PATHS.download, size);
+}
 function IconArchive(size) {
   return renderIcon(ICON_PATHS.archive, size);
 }
@@ -215,9 +219,13 @@ var dictionaries = {
     "bulk-archive": "Archive {n}",
     "bulk-confirm": "{n} selected \u2014 {m} currently expected to be skipped (possibly live). Continue?",
     "bulk-delete": "Delete {n}",
+    "bulk-export": "Export {n}",
+    "bulk-export-command-failed": "Export command failed.",
+    "bulk-export-early-abort": "Export stopped after 5 consecutive failures; remaining sessions were skipped.",
     "bulk-progress": "{n}/{total} {title}",
     "bulk-restore": "Restore {n}",
     "bulk-result": "Done {done} \xB7 Failed {failed} \xB7 Skipped {skipped}",
+    "bulk-result-unknown-reason": "Unknown failure reason.",
     "bulk-refresh-stale": "Refresh failed, view may be stale.",
     "cancel": "Cancel",
     "clear-selection": "Clear selection",
@@ -297,6 +305,26 @@ var dictionaries = {
     "dismiss-error": "Dismiss error",
     "dismiss-transcript-error": "Dismiss transcript error",
     "exact-directory": "Exact directory",
+    "export-destination-confirm": "Export this session to {dest}?",
+    "export-error-destination-outside-home": "Export destination is outside your home directory: {path}.",
+    "export-error-destination-not-directory": "Export destination is not a directory: {path}.",
+    "export-error-destination-not-writable": "Export destination is not writable: {path}.",
+    "export-error-destination-create-failed": "Could not create the export destination: {path}.",
+    "export-error-destination-inspection-failed": "Could not inspect the export destination: {path}.",
+    "export-error-destination-resolve-failed": "Could not resolve the export destination: {path}.",
+    "export-error-home-resolve-failed": "Could not verify the export destination against your home directory: {path}.",
+    "export-error-file-open-failed": "Could not open the export file.",
+    "export-error-file-close-failed": "Could not close the export file.",
+    "export-error-file-write-failed": "Could not write the export file.",
+    "export-error-name-exhausted": "Could not choose an unused export filename.",
+    "export-error-session-failed": "The session could not be exported.",
+    "export-error-session-not-indexed": "The session is not available in the export index.",
+    "export-error-index-output-invalid": "The export index returned invalid data.",
+    "export-error-session-output-invalid": "The session returned invalid export data.",
+    "export-error-generic": "The session could not be exported because of an unexpected error.",
+    "export-outside-home-confirm": "The export destination is outside your home directory: {dest}\n\nAllow this export?",
+    "export-session": "Export session",
+    "export-unknown-project": "unknown-project",
     "expand-directory": "Expand directory",
     "collapse-directory": "Collapse directory",
     "file": "File",
@@ -352,6 +380,10 @@ var dictionaries = {
     "picker-select-current": 'Use "{name}" as the tree root',
     "picker-title": "Select tree root directory",
     "picker-use-manual-path": "Use the entered path as the tree root",
+    "picker-export-manual-path": "Manual absolute export destination path",
+    "picker-export-select-current": 'Use "{name}" as the export destination',
+    "picker-export-title": "Select export destination",
+    "picker-export-use-manual-path": "Use the entered path as the export destination",
     "empty": "(empty)",
     "relative-days": "{n}d",
     "relative-hours": "{n}h",
@@ -386,6 +418,8 @@ var dictionaries = {
     "settings-font-scale": "Font size",
     "settings-font-scale-value": "Level {n}",
     "settings-increase-font": "Increase font size",
+    "settings-export-destination": "Export destination",
+    "settings-export-destination-browse": "Browse for export destination",
     "settings-theme-follow": "Follow host theme",
     "sort-ascending": "Sort ascending",
     "sort-descending": "Sort descending",
@@ -420,6 +454,9 @@ var dictionaries = {
     "error-restore": "Could not restore the archived session.",
     "error-archive": "Could not archive the session.",
     "error-delete": "Could not permanently delete the archived session.",
+    "error-export": "Could not export the session.",
+    "error-export-destination-classification": "Could not verify whether the export destination is inside your home directory. The export was not started.",
+    "error-export-invalid-response": "Export command returned an invalid response.",
     "error-check-workspace": "Could not check the session workspace.",
     "error-open-terminal": "Could not open a terminal for this session."
   },
@@ -431,9 +468,13 @@ var dictionaries = {
     "bulk-archive": "\u5F52\u6863 {n}",
     "bulk-confirm": "\u5DF2\u9009\u62E9 {n} \u4E2A \u2014 \u5F53\u524D\u9884\u8BA1\u8DF3\u8FC7 {m} \u4E2A\uFF08\u53EF\u80FD\u4ECD\u5728\u8FD0\u884C\uFF09\u3002\u7EE7\u7EED\u5417\uFF1F",
     "bulk-delete": "\u5220\u9664 {n}",
+    "bulk-export": "\u5BFC\u51FA {n}",
+    "bulk-export-command-failed": "\u5BFC\u51FA\u547D\u4EE4\u5931\u8D25\u3002",
+    "bulk-export-early-abort": "\u8FDE\u7EED 5 \u4E2A\u4F1A\u8BDD\u5BFC\u51FA\u5931\u8D25\uFF0C\u5DF2\u505C\u6B62\u5BFC\u51FA\uFF1B\u5176\u4F59\u4F1A\u8BDD\u5DF2\u8DF3\u8FC7\u3002",
     "bulk-progress": "{n}/{total} {title}",
     "bulk-restore": "\u6062\u590D {n}",
     "bulk-result": "\u5B8C\u6210 {done} \xB7 \u5931\u8D25 {failed} \xB7 \u8DF3\u8FC7 {skipped}",
+    "bulk-result-unknown-reason": "\u672A\u77E5\u5931\u8D25\u539F\u56E0\u3002",
     "bulk-refresh-stale": "\u5237\u65B0\u5931\u8D25\uFF0C\u5F53\u524D\u89C6\u56FE\u53EF\u80FD\u5DF2\u8FC7\u671F\u3002",
     "cancel": "\u53D6\u6D88",
     "clear-selection": "\u6E05\u9664\u9009\u62E9",
@@ -513,6 +554,26 @@ var dictionaries = {
     "dismiss-error": "\u5173\u95ED\u9519\u8BEF",
     "dismiss-transcript-error": "\u5173\u95ED\u5BF9\u8BDD\u9519\u8BEF",
     "exact-directory": "\u7CBE\u786E\u76EE\u5F55",
+    "export-destination-confirm": "\u8981\u5C06\u6B64\u4F1A\u8BDD\u5BFC\u51FA\u81F3 {dest} \u5417\uFF1F",
+    "export-error-destination-outside-home": "\u5BFC\u51FA\u4F4D\u7F6E\u4E0D\u5728\u4E2A\u4EBA\u76EE\u5F55\u5185\uFF1A{path}\u3002",
+    "export-error-destination-not-directory": "\u5BFC\u51FA\u4F4D\u7F6E\u4E0D\u662F\u76EE\u5F55\uFF1A{path}\u3002",
+    "export-error-destination-not-writable": "\u5BFC\u51FA\u4F4D\u7F6E\u4E0D\u53EF\u5199\u5165\uFF1A{path}\u3002",
+    "export-error-destination-create-failed": "\u65E0\u6CD5\u521B\u5EFA\u5BFC\u51FA\u4F4D\u7F6E\uFF1A{path}\u3002",
+    "export-error-destination-inspection-failed": "\u65E0\u6CD5\u68C0\u67E5\u5BFC\u51FA\u4F4D\u7F6E\uFF1A{path}\u3002",
+    "export-error-destination-resolve-failed": "\u65E0\u6CD5\u89E3\u6790\u5BFC\u51FA\u4F4D\u7F6E\uFF1A{path}\u3002",
+    "export-error-home-resolve-failed": "\u65E0\u6CD5\u6839\u636E\u4E2A\u4EBA\u76EE\u5F55\u9A8C\u8BC1\u5BFC\u51FA\u4F4D\u7F6E\uFF1A{path}\u3002",
+    "export-error-file-open-failed": "\u65E0\u6CD5\u6253\u5F00\u5BFC\u51FA\u6587\u4EF6\u3002",
+    "export-error-file-close-failed": "\u65E0\u6CD5\u5173\u95ED\u5BFC\u51FA\u6587\u4EF6\u3002",
+    "export-error-file-write-failed": "\u65E0\u6CD5\u5199\u5165\u5BFC\u51FA\u6587\u4EF6\u3002",
+    "export-error-name-exhausted": "\u65E0\u6CD5\u9009\u62E9\u672A\u88AB\u5360\u7528\u7684\u5BFC\u51FA\u6587\u4EF6\u540D\u3002",
+    "export-error-session-failed": "\u65E0\u6CD5\u5BFC\u51FA\u8BE5\u4F1A\u8BDD\u3002",
+    "export-error-session-not-indexed": "\u5BFC\u51FA\u7D22\u5F15\u4E2D\u6CA1\u6709\u6B64\u4F1A\u8BDD\u3002",
+    "export-error-index-output-invalid": "\u5BFC\u51FA\u7D22\u5F15\u8FD4\u56DE\u4E86\u65E0\u6548\u6570\u636E\u3002",
+    "export-error-session-output-invalid": "\u4F1A\u8BDD\u8FD4\u56DE\u4E86\u65E0\u6548\u7684\u5BFC\u51FA\u6570\u636E\u3002",
+    "export-error-generic": "\u53D1\u751F\u610F\u5916\u9519\u8BEF\uFF0C\u65E0\u6CD5\u5BFC\u51FA\u4F1A\u8BDD\u3002",
+    "export-outside-home-confirm": "\u5BFC\u51FA\u4F4D\u7F6E\u4E0D\u5728\u4E2A\u4EBA\u76EE\u5F55\u5185\uFF1A{dest}\n\n\u4ECD\u8981\u5141\u8BB8\u8FD9\u6B21\u5BFC\u51FA\u5417\uFF1F",
+    "export-session": "\u5BFC\u51FA\u4F1A\u8BDD",
+    "export-unknown-project": "\u672A\u77E5\u9879\u76EE",
     "expand-directory": "\u5C55\u5F00\u76EE\u5F55",
     "collapse-directory": "\u6298\u53E0\u76EE\u5F55",
     "file": "\u6587\u4EF6",
@@ -568,6 +629,10 @@ var dictionaries = {
     "picker-select-current": '\u9009\u62E9"{name}"\u4F5C\u4E3A\u5DE5\u4F5C\u533A\u6811\u8D77\u59CB\u76EE\u5F55',
     "picker-title": "\u9009\u62E9\u76EE\u5F55\u6811\u6839\u76EE\u5F55",
     "picker-use-manual-path": "\u9009\u62E9\u8F93\u5165\u7684\u8DEF\u5F84\u4F5C\u4E3A\u5DE5\u4F5C\u533A\u6811\u8D77\u59CB\u76EE\u5F55",
+    "picker-export-manual-path": "\u624B\u52A8\u8F93\u5165\u7EDD\u5BF9\u5BFC\u51FA\u4F4D\u7F6E\u8DEF\u5F84",
+    "picker-export-select-current": "\u9009\u62E9\u201C{name}\u201D\u4F5C\u4E3A\u5BFC\u51FA\u4F4D\u7F6E",
+    "picker-export-title": "\u9009\u62E9\u5BFC\u51FA\u4F4D\u7F6E",
+    "picker-export-use-manual-path": "\u9009\u62E9\u8F93\u5165\u7684\u8DEF\u5F84\u4F5C\u4E3A\u5BFC\u51FA\u4F4D\u7F6E",
     "empty": "\uFF08\u7A7A\uFF09",
     "relative-days": "{n}\u5929",
     "relative-hours": "{n}\u5C0F\u65F6",
@@ -602,6 +667,8 @@ var dictionaries = {
     "settings-font-scale": "\u5B57\u4F53\u5927\u5C0F",
     "settings-font-scale-value": "{n} \u6863",
     "settings-increase-font": "\u589E\u5927\u5B57\u4F53",
+    "settings-export-destination": "\u5BFC\u51FA\u4F4D\u7F6E",
+    "settings-export-destination-browse": "\u6D4F\u89C8\u5BFC\u51FA\u4F4D\u7F6E",
     "settings-theme-follow": "\u8DDF\u968F\u5BBF\u4E3B\u4E3B\u9898",
     "sort-ascending": "\u5347\u5E8F\u6392\u5217",
     "sort-descending": "\u964D\u5E8F\u6392\u5217",
@@ -636,6 +703,9 @@ var dictionaries = {
     "error-restore": "\u65E0\u6CD5\u6062\u590D\u5DF2\u5F52\u6863\u4F1A\u8BDD\u3002",
     "error-archive": "\u65E0\u6CD5\u5F52\u6863\u4F1A\u8BDD\u3002",
     "error-delete": "\u65E0\u6CD5\u6C38\u4E45\u5220\u9664\u5DF2\u5F52\u6863\u4F1A\u8BDD\u3002",
+    "error-export": "\u65E0\u6CD5\u5BFC\u51FA\u4F1A\u8BDD\u3002",
+    "error-export-destination-classification": "\u65E0\u6CD5\u786E\u8BA4\u5BFC\u51FA\u4F4D\u7F6E\u662F\u5426\u5728\u4E2A\u4EBA\u76EE\u5F55\u5185\u3002\u5BFC\u51FA\u5C1A\u672A\u5F00\u59CB\u3002",
+    "error-export-invalid-response": "\u5BFC\u51FA\u547D\u4EE4\u8FD4\u56DE\u4E86\u65E0\u6548\u54CD\u5E94\u3002",
     "error-check-workspace": "\u65E0\u6CD5\u68C0\u67E5\u4F1A\u8BDD\u5DE5\u4F5C\u533A\u3002",
     "error-open-terminal": "\u65E0\u6CD5\u4E3A\u6B64\u4F1A\u8BDD\u6253\u5F00\u7EC8\u7AEF\u3002"
   }
@@ -677,10 +747,12 @@ var STORAGE_KEYS = {
   treeRoot: "treeRoot",
   treeExpandedPaths: "treeExpandedPaths",
   hideScriptedSessions: "hideScriptedSessions",
+  exportDestination: "exportDestination",
   sessionListSort: "sessionListSort",
   pageSize: "pageSize"
 };
 var DEFAULT_PANE_WIDTHS = { left: 280, middle: 360 };
+var DEFAULT_EXPORT_DESTINATION = "~/Downloads";
 var DEFAULT_PARTITION_SORT = {
   active: { field: "idle", direction: "asc" },
   archive: { field: "idle", direction: "asc" }
@@ -691,7 +763,7 @@ var TRANSCRIPT_BATCH_SIZE = 50;
 var SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var FONT_SCALE_MULTIPLIERS = { 1: 0.85, 2: 0.93, 3: 1, 4: 1.1, 5: 1.25 };
 var PAGE_SIZES = [20, 50, 100];
-var AGENT_AGNOSTIC = /* @__PURE__ */ new Set(["list-dirs", "check-dir", "agents"]);
+var AGENT_AGNOSTIC = /* @__PURE__ */ new Set(["list-dirs", "check-dir", "classify-export-destination", "agents"]);
 var DEFAULT_AGENT = "claude-code";
 var UNAVAILABLE_CAPABILITIES = {
   archive: false,
@@ -718,6 +790,42 @@ var DEFAULT_RESUME_ARGV_BY_AGENT = /* @__PURE__ */ new Map([
 ]);
 var LEGACY_RESUME = { argv: ["claude", "--resume"] };
 var RESUME_ARG_TOKEN_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+function localizedExportError(failure, destination, t) {
+  switch (failure.error) {
+    case "export-destination-outside-home":
+      return t("export-error-destination-outside-home", { path: destination });
+    case "export-destination-not-directory":
+      return t("export-error-destination-not-directory", { path: destination });
+    case "export-destination-not-writable":
+      return t("export-error-destination-not-writable", { path: destination });
+    case "export-destination-create-failed":
+      return t("export-error-destination-create-failed", { path: destination });
+    case "export-destination-inspection-failed":
+      return t("export-error-destination-inspection-failed", { path: destination });
+    case "export-destination-resolve-failed":
+      return t("export-error-destination-resolve-failed", { path: destination });
+    case "export-home-resolve-failed":
+      return t("export-error-home-resolve-failed", { path: destination });
+    case "export-file-open-failed":
+      return t("export-error-file-open-failed");
+    case "export-file-close-failed":
+      return t("export-error-file-close-failed");
+    case "export-file-write-failed":
+      return t("export-error-file-write-failed");
+    case "export-name-exhausted":
+      return t("export-error-name-exhausted");
+    case "export-session-not-indexed":
+      return t("export-error-session-not-indexed");
+    case "export-index-output-invalid":
+      return t("export-error-index-output-invalid");
+    case "export-session-output-invalid":
+      return t("export-error-session-output-invalid");
+    case "export-session-failed":
+      return t("export-error-session-failed");
+    default:
+      return t("export-error-generic");
+  }
+}
 function shQuote(value) {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
@@ -827,6 +935,22 @@ function clampPage(page, total, pageSize) {
   const maxPage = Math.max(1, Math.ceil(Math.max(0, total) / pageSize));
   return Math.min(maxPage, Math.max(1, Math.floor(page) || 1));
 }
+function parseCliFailure(stderr, fallback) {
+  const trimmed = stderr.trim();
+  const lines = trimmed.split(/\r?\n/).filter((line) => line.trim());
+  const candidates = [lines.at(-1)?.trim(), trimmed].filter((value, index, values) => Boolean(value) && values.indexOf(value) === index);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      return {
+        error: typeof parsed.error === "string" ? parsed.error : "",
+        message: typeof parsed.message === "string" ? parsed.message : fallback
+      };
+    } catch {
+    }
+  }
+  return { error: "", message: trimmed || fallback };
+}
 function selectionReducer(state, action) {
   if (action.type === "clear-partition") return { selected: /* @__PURE__ */ new Set(), anchor: null };
   if (action.type === "clear-anchor") return { selected: new Set(state.selected), anchor: null };
@@ -863,7 +987,203 @@ function selectionReducer(state, action) {
   }
   return { selected, anchor: state.anchor };
 }
+var MAX_EXPORT_SEGMENT_BYTES = 255;
+var EXPORT_COLLISION_SUFFIX_BYTES = 9;
+function truncateUtf8(value, maxBytes) {
+  const encoder = new TextEncoder();
+  if (encoder.encode(value).length <= maxBytes) return value;
+  let truncated = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = encoder.encode(character).length;
+    if (bytes + characterBytes > maxBytes) break;
+    truncated += character;
+    bytes += characterBytes;
+  }
+  return truncated;
+}
+function legalizeExportProjectName(value) {
+  let legalized = value.replace(/^\.+/, "").replace(/[. ]+$/g, "").trim();
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(legalized)) legalized = `_${legalized}`;
+  return legalized;
+}
+function sanitizeExportProjectName(value, fallback) {
+  const sanitized = legalizeExportProjectName(value.replace(/[<>:"|?*\\/]/g, "").replace(/\.\./g, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/\s+/g, " ").trim());
+  const legalizedFallback = legalizeExportProjectName(fallback);
+  return legalizeExportProjectName(truncateUtf8(
+    sanitized || legalizedFallback,
+    MAX_EXPORT_SEGMENT_BYTES - EXPORT_COLLISION_SUFFIX_BYTES
+  )) || legalizedFallback;
+}
+function exportProjectName(rootPath, fallback) {
+  const lastSegment = rootPath.split(/[\\/]/).filter(Boolean).at(-1) || "";
+  return sanitizeExportProjectName(lastSegment, fallback);
+}
+function stablePathSuffix(rootPath) {
+  let hash = 2166136261;
+  for (let index = 0; index < rootPath.length; index += 1) {
+    hash ^= rootPath.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+function exportProjectNameKey(name) {
+  return name.normalize("NFC").toLowerCase().normalize("NFC");
+}
+function exportProjectNameWithSuffix(name, suffix) {
+  const suffixWithSeparator = `-${suffix}`;
+  const suffixBytes = new TextEncoder().encode(suffixWithSeparator).length;
+  return `${truncateUtf8(name, MAX_EXPORT_SEGMENT_BYTES - suffixBytes)}${suffixWithSeparator}`;
+}
+function bulkExportProjectNames(items, fallback) {
+  const rootsByName = /* @__PURE__ */ new Map();
+  for (const rootPath of new Set(items.map((item) => item.rootPath))) {
+    const name = exportProjectName(rootPath, fallback);
+    const nameKey = exportProjectNameKey(name);
+    rootsByName.set(nameKey, [...rootsByName.get(nameKey) || [], { name, rootPath }]);
+  }
+  const names = /* @__PURE__ */ new Map();
+  const reservedNames = new Set([...rootsByName].flatMap(([nameKey, roots]) => roots.length === 1 ? [nameKey] : []));
+  const usedNames = new Set(reservedNames);
+  const sortedGroups = [...rootsByName].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0);
+  for (const [, roots] of sortedGroups) {
+    if (roots.length === 1) {
+      names.set(roots[0].rootPath, roots[0].name);
+      continue;
+    }
+    for (const { name, rootPath } of [...roots].sort((left, right) => left.rootPath < right.rootPath ? -1 : left.rootPath > right.rootPath ? 1 : 0)) {
+      const hash = stablePathSuffix(rootPath);
+      const hashedName = exportProjectNameWithSuffix(name, hash);
+      let uniqueName = hashedName;
+      let attempt = 2;
+      while (usedNames.has(exportProjectNameKey(uniqueName))) uniqueName = exportProjectNameWithSuffix(name, `${hash}-${attempt++}`);
+      usedNames.add(exportProjectNameKey(uniqueName));
+      names.set(rootPath, uniqueName);
+    }
+  }
+  return names;
+}
+function bulkExportTimestamp(now) {
+  const pad = (value) => String(value).padStart(2, "0");
+  return `${pad(now.getFullYear() % 100)}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+}
+function joinExportDestination(destination, ...segments) {
+  const separator = destination.includes("\\") && !destination.includes("/") ? "\\" : "/";
+  const base = destination.replace(/[\\/]+$/, "");
+  return `${base || separator}${base ? separator : ""}${segments.join(separator)}`;
+}
+function exportAgentFolderName(agent) {
+  const agentName = agent === "claude-code" ? "claude" : agent;
+  return sanitizeExportProjectName(`${agentName}_exp`, "agent_exp");
+}
+function singleExportFolderName() {
+  return sanitizeExportProjectName("single files", "single files");
+}
+async function isExportDestinationOutsideHome(destination, run) {
+  const result = await run(["classify-export-destination", destination.trim()], 1e4);
+  if (result.code !== 0) throw new Error(result.stderr || "export destination classification failed");
+  const classified = JSON.parse(result.stdout);
+  if (typeof classified?.outsideHome !== "boolean") throw new Error("export destination classification returned an invalid response");
+  return classified.outsideHome;
+}
+async function runBulkExport(options) {
+  const destination = options.exportDestination || DEFAULT_EXPORT_DESTINATION;
+  const invalidResponse = options.invalidExportMessage || translate("en", "bulk-export-command-failed");
+  const earlyAbortReason = options.earlyAbortMessage || translate("en", "bulk-export-early-abort");
+  const unknownProjectName = options.unknownProjectName || translate("en", "export-unknown-project");
+  const projectNames = bulkExportProjectNames(options.items, unknownProjectName);
+  const agentFolder = exportAgentFolderName(options.exportAgent || DEFAULT_AGENT);
+  const timestamp = bulkExportTimestamp(/* @__PURE__ */ new Date());
+  const destinationsByGroup = /* @__PURE__ */ new Map();
+  const results = [];
+  let completed = 0;
+  let consecutiveFailures = 0;
+  let earlyAborted = false;
+  for (const session of options.items) {
+    const groupKey = JSON.stringify([session.attributionKey, session.rootPath]);
+    if (!destinationsByGroup.has(groupKey)) {
+      const projectName = projectNames.get(session.rootPath) || unknownProjectName;
+      destinationsByGroup.set(groupKey, joinExportDestination(destination, agentFolder, timestamp, projectName));
+    }
+  }
+  const record = (session, status, reason) => {
+    results.push({ key: sessionKey(session), session, status, reason });
+    completed += 1;
+    options.onProgress?.(completed, options.items.length, session);
+  };
+  for (let index = 0; index < options.items.length; index += 1) {
+    if (options.isCancelled?.()) break;
+    const session = options.items[index];
+    const groupKey = JSON.stringify([session.attributionKey, session.rootPath]);
+    const groupDestination = destinationsByGroup.get(groupKey);
+    let succeeded = false;
+    let rawOutput;
+    try {
+      const executed = await options.run([
+        "export-session",
+        session.attributionKey,
+        session.id,
+        "--dest",
+        groupDestination,
+        ...options.allowOutsideHome ? ["--allow-outside-home"] : []
+      ], 3e4);
+      rawOutput = executed.stdout;
+      if (executed.code !== 0) {
+        const failure = parseCliFailure(executed.stderr, options.exportFailureMessage || translate("en", "bulk-export-command-failed"));
+        console.warn(failure);
+        record(session, "failed", options.localizeExportError?.(failure, groupDestination) || failure.message);
+      } else {
+        let exported;
+        let malformed = false;
+        try {
+          exported = JSON.parse(executed.stdout);
+        } catch (caught) {
+          console.warn(caught, executed.stdout);
+          record(session, "failed", invalidResponse);
+          malformed = true;
+        }
+        if (!malformed) {
+          if (exported?.ok === true && typeof exported.path === "string" && exported.path) {
+            record(session, "done");
+            succeeded = true;
+          } else if (exported?.ok === false && typeof exported.error === "string") {
+            const failure = {
+              error: exported.error,
+              message: typeof exported.message === "string" ? exported.message : options.exportFailureMessage || invalidResponse
+            };
+            console.warn(exported);
+            record(session, "failed", options.localizeExportError?.(failure, groupDestination) || failure.message);
+          } else {
+            console.warn(exported);
+            record(session, "failed", invalidResponse);
+          }
+        }
+      }
+    } catch (caught) {
+      console.warn(caught, rawOutput);
+      const failure = { error: "", message: invalidResponse };
+      record(session, "failed", options.localizeExportError?.(failure, groupDestination) || invalidResponse);
+    }
+    consecutiveFailures = succeeded ? 0 : consecutiveFailures + 1;
+    if (options.isCancelled?.()) break;
+    if (consecutiveFailures === 5 && index + 1 < options.items.length) {
+      earlyAborted = true;
+      for (const untried of options.items.slice(index + 1)) record(untried, "skipped", earlyAbortReason);
+      break;
+    }
+  }
+  return {
+    results,
+    done: results.filter((result) => result.status === "done").length,
+    failed: results.filter((result) => result.status === "failed").length,
+    skipped: results.filter((result) => result.status === "skipped").length,
+    rebuildRequired: false,
+    cancelled: results.length < options.items.length,
+    earlyAborted
+  };
+}
 async function runBulkSerial(options) {
+  if (options.action === "export") return runBulkExport(options);
   const results = [];
   let rebuildRequired = false;
   for (let index = 0; index < options.items.length; index += 1) {
@@ -895,7 +1215,7 @@ async function runBulkSerial(options) {
     } catch (caught) {
       results.push({ key: sessionKey(session), session, status: "failed", reason: caught?.message || String(caught) });
     } finally {
-      options.onProgress?.(index + 1, options.items.length, session);
+      if (results.length > index) options.onProgress?.(index + 1, options.items.length, session);
     }
   }
   return {
@@ -1114,12 +1434,14 @@ function activate(ctx) {
   const transientHighlightPath = ctx.ref(null);
   const expandedPaths = ctx.ref(/* @__PURE__ */ new Set());
   const hideScriptedSessions = ctx.ref(false);
+  const exportDestination = ctx.ref(DEFAULT_EXPORT_DESTINATION);
   const showRootPicker = ctx.ref(false);
   const pickerCurrentDir = ctx.ref("/");
   const pickerEntries = ctx.ref([]);
   const pickerLoading = ctx.ref(false);
   const pickerError = ctx.ref(null);
   const pickerManualPath = ctx.ref("");
+  const pickerTarget = ctx.ref("tree-root");
   const pickerTriggerRef = ctx.ref(null);
   const pickerInputRef = ctx.ref(null);
   const paneWidths = ctx.ref({ ...DEFAULT_PANE_WIDTHS });
@@ -1270,6 +1592,11 @@ function activate(ctx) {
       resetTranscript();
     }
     applyFilterChange();
+  }
+  function setExportDestination(value) {
+    if (activeMount) activeMount.displayGeneration++;
+    exportDestination.value = value.trim() || DEFAULT_EXPORT_DESTINATION;
+    persist(STORAGE_KEYS.exportDestination, exportDestination.value);
   }
   function setLocaleSetting(value) {
     if (activeMount) activeMount.displayGeneration++;
@@ -1558,17 +1885,6 @@ function activate(ctx) {
       }
     }
   }
-  function parseCliFailure(stderr, fallback) {
-    try {
-      const parsed = JSON.parse(stderr.trim());
-      return {
-        error: typeof parsed.error === "string" ? parsed.error : "",
-        message: typeof parsed.message === "string" ? parsed.message : fallback
-      };
-    } catch {
-      return { error: "", message: stderr.trim() || fallback };
-    }
-  }
   function parseMutationResult(stdout) {
     const parsed = JSON.parse(stdout);
     if (parsed.outcome === "success" && typeof parsed.cacheRefreshed === "boolean") return parsed;
@@ -1827,6 +2143,71 @@ function activate(ctx) {
       }
     });
   }
+  async function exportSession(session) {
+    await coordinateMutation(void 0, async (isCurrent) => {
+      const destinationRoot = exportDestination.value.trim() || DEFAULT_EXPORT_DESTINATION;
+      const destination = joinExportDestination(
+        destinationRoot,
+        exportAgentFolderName(activeAgent.value),
+        singleExportFolderName()
+      );
+      const accepted = await ctx.ui.confirm(t("export-destination-confirm", { dest: destination }));
+      if (!isCurrent()) return;
+      if (!accepted) {
+        return;
+      }
+      clearError();
+      try {
+        const args = ["export-session", session.attributionKey, session.id, "--dest", destination];
+        let result = await runAgent(args, { timeout: 3e4 });
+        if (!isCurrent()) return;
+        if (result.code !== 0) {
+          const failure = parseCliFailure(result.stderr, t("error-export"));
+          console.warn(failure);
+          if (failure.error !== "export-destination-outside-home") {
+            showError(cliError(localizedExportError(failure, destination, t)));
+            return;
+          }
+          const outsideHomeAccepted = await ctx.ui.confirm(t("export-outside-home-confirm", { dest: destinationRoot }));
+          if (!isCurrent()) return;
+          if (!outsideHomeAccepted) {
+            return;
+          }
+          result = await runAgent([...args, "--allow-outside-home"], { timeout: 3e4 });
+          if (!isCurrent()) return;
+          if (result.code !== 0) {
+            const failure2 = parseCliFailure(result.stderr, t("error-export"));
+            console.warn(failure2);
+            showError(cliError(localizedExportError(failure2, destination, t)));
+            return;
+          }
+        }
+        let exported;
+        try {
+          exported = JSON.parse(result.stdout);
+        } catch (caught) {
+          console.warn(caught, result.stdout);
+          if (isCurrent()) showError(cliError(t("error-export-invalid-response")));
+          return;
+        }
+        if (exported && typeof exported === "object" && exported.ok === false && typeof exported.error === "string") {
+          const failure = exported;
+          console.warn(failure);
+          if (isCurrent()) showError(cliError(localizedExportError(failure, destination, t)));
+          return;
+        }
+        if (!exported || typeof exported !== "object" || exported.ok !== true || typeof exported.path !== "string" || !exported.path) {
+          console.warn(exported);
+          if (isCurrent()) showError(cliError(t("error-export-invalid-response")));
+          return;
+        }
+        if (!isCurrent()) return;
+      } catch (caught) {
+        console.warn(caught);
+        if (isCurrent()) showError(cliError(t("export-error-generic")));
+      }
+    });
+  }
   async function deleteSession(session) {
     await coordinateMutation(void 0, async (isCurrent) => {
       const caps = activeCapabilities.value;
@@ -2030,11 +2411,12 @@ function activate(ctx) {
     if (!isActiveMount(mount)) return;
     const generation = ++mount.displayGeneration;
     try {
-      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize] = await Promise.all([
+      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize, savedExportDestination] = await Promise.all([
         ctx.storage.get(STORAGE_KEYS.locale),
         ctx.storage.get(STORAGE_KEYS.fontScale),
         ctx.storage.get(STORAGE_KEYS.themeFollowHost),
-        ctx.storage.get(STORAGE_KEYS.pageSize)
+        ctx.storage.get(STORAGE_KEYS.pageSize),
+        ctx.storage.get(STORAGE_KEYS.exportDestination)
       ]);
       if (!isActiveMount(mount) || generation !== mount.displayGeneration) return;
       localeSetting.value = normalizeLocaleSetting(savedLocale);
@@ -2043,6 +2425,7 @@ function activate(ctx) {
       updateCompactMode(rootWidth);
       themeFollowHost.value = typeof savedThemeFollowHost === "boolean" ? savedThemeFollowHost : true;
       pageSize.value = PAGE_SIZES.includes(savedPageSize) ? savedPageSize : 50;
+      exportDestination.value = typeof savedExportDestination === "string" && savedExportDestination.trim() ? savedExportDestination.trim() : DEFAULT_EXPORT_DESTINATION;
     } catch {
     }
   }
@@ -2064,23 +2447,34 @@ function activate(ctx) {
     const requestSeq = ++mount.pickerRequestSeq;
     pickerLoading.value = true;
     pickerError.value = null;
+    let rawOutput;
     try {
       const result = await runAgent(["list-dirs", dir], { timeout: 1e4 });
       if (!isActiveMount(mount) || requestSeq !== mount.pickerRequestSeq) return;
-      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, "list-dirs failed").message);
+      rawOutput = result.stdout;
+      if (result.code !== 0) {
+        console.warn(parseCliFailure(result.stderr, t("picker-list-error")));
+        pickerEntries.value = [];
+        pickerError.value = t("picker-list-error");
+        return;
+      }
       const parsed = JSON.parse(result.stdout);
       if ("error" in parsed) {
+        console.warn(parsed);
         pickerEntries.value = [];
-        pickerError.value = parsed.message;
+        pickerError.value = t("picker-list-error");
       } else if (Array.isArray(parsed.dirs)) {
         pickerEntries.value = parsed.dirs;
       } else {
-        throw new Error("list-dirs returned invalid JSON");
+        console.warn(parsed);
+        pickerEntries.value = [];
+        pickerError.value = t("picker-list-error");
       }
     } catch (caught) {
       if (!isActiveMount(mount) || requestSeq !== mount.pickerRequestSeq) return;
+      console.warn(caught, rawOutput);
       pickerEntries.value = [];
-      pickerError.value = caught?.message || t("picker-list-error");
+      pickerError.value = t("picker-list-error");
     } finally {
       if (isActiveMount(mount) && requestSeq === mount.pickerRequestSeq) pickerLoading.value = false;
     }
@@ -2097,11 +2491,16 @@ function activate(ctx) {
     }
     showRootPicker.value = false;
     pickerLoading.value = false;
+    pickerTarget.value = "tree-root";
     scheduleMountTimeout(() => pickerTriggerRef.value?.focus(), 0);
   }
-  function openRootPicker() {
-    pickerCurrentDir.value = visibleRoot.value;
-    pickerManualPath.value = visibleRoot.value;
+  function openRootPicker(target) {
+    if (activeMount) activeMount.pickerValidationSeq++;
+    pickerTarget.value = target;
+    const targetPath = target === "export-destination" ? exportDestination.value : visibleRoot.value;
+    const startDir = targetPath.startsWith("/") ? normalizePath(targetPath) : visibleRoot.value;
+    pickerCurrentDir.value = startDir;
+    pickerManualPath.value = startDir;
     pickerEntries.value = [];
     pickerError.value = null;
     showRootPicker.value = true;
@@ -2111,8 +2510,9 @@ function activate(ctx) {
   async function validateAndCommitRoot(candidate) {
     const mount = activeMount;
     if (!isActiveMount(mount)) return;
+    const target = pickerTarget.value;
     const requestSeq = ++mount.pickerValidationSeq;
-    const isCurrent = () => isActiveMount(mount) && showRootPicker.value && requestSeq === mount.pickerValidationSeq;
+    const isCurrent = () => isActiveMount(mount) && showRootPicker.value && target === pickerTarget.value && requestSeq === mount.pickerValidationSeq;
     const nextRoot = candidate.trim();
     if (!nextRoot.startsWith("/")) {
       if (isCurrent()) pickerError.value = t("tree-root-absolute-error");
@@ -2121,8 +2521,18 @@ function activate(ctx) {
     try {
       const result = await runAgent(["check-dir", nextRoot], { timeout: 1e4 });
       if (!isCurrent()) return;
-      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, "check-dir failed").message);
+      if (result.code !== 0) {
+        const failure = parseCliFailure(result.stderr, t("picker-check-error"));
+        console.warn(failure);
+        pickerError.value = localizedExportError(failure, nextRoot, t);
+        return;
+      }
       const checked = JSON.parse(result.stdout);
+      if (typeof checked?.exists !== "boolean" || typeof checked?.dir !== "boolean") {
+        console.warn(checked);
+        pickerError.value = t("picker-check-error");
+        return;
+      }
       if (!checked.exists) {
         pickerError.value = t("picker-path-missing", { path: nextRoot });
         return;
@@ -2132,12 +2542,14 @@ function activate(ctx) {
         return;
       }
     } catch (caught) {
-      if (isCurrent()) pickerError.value = caught?.message || t("picker-check-error");
+      console.warn(caught);
+      if (isCurrent()) pickerError.value = t("picker-check-error");
       return;
     }
     if (!isCurrent()) return;
     clearError();
-    setVisibleRoot(nextRoot);
+    if (target === "export-destination") setExportDestination(nextRoot);
+    else setVisibleRoot(nextRoot);
     closeRootPicker();
   }
   function toggleExpanded(nodePath) {
@@ -2350,6 +2762,7 @@ function activate(ctx) {
     return sessionsForList(activePartition.value).filter((session) => selected.has(sessionKey(session)));
   }
   function expectedBulkSkips(action, items, now = Date.now()) {
+    if (action === "export") return 0;
     return items.filter((session) => session.live || action === "archive" && now - timestampValue(session.lastActiveAt) < 6e4).length;
   }
   async function executeBulk(action) {
@@ -2364,6 +2777,25 @@ function activate(ctx) {
       if (!isCurrent() || !accepted) return;
       const items = selectedItems();
       if (!items.length) return;
+      const bulkExportDestination = exportDestination.value.trim() || DEFAULT_EXPORT_DESTINATION;
+      let allowOutsideHome = false;
+      let outsideHome = false;
+      if (action === "export") {
+        try {
+          outsideHome = await isExportDestinationOutsideHome(
+            bulkExportDestination,
+            (args, timeout = 1e4) => runAgent(args, { timeout })
+          );
+        } catch (caught) {
+          console.warn(caught);
+          if (isCurrent()) showError(cliError(t("error-export-destination-classification")));
+          return;
+        }
+      }
+      if (outsideHome) {
+        allowOutsideHome = await ctx.ui.confirm(t("export-outside-home-confirm", { dest: bulkExportDestination }));
+        if (!isCurrent() || !allowOutsideHome) return;
+      }
       bulkRunning.value = true;
       bulkCancelRequested.value = false;
       bulkResult.value = null;
@@ -2373,7 +2805,15 @@ function activate(ctx) {
         const outcome = await runBulkSerial({
           action,
           items,
-          run: (args) => runAgent(args, { timeout: 3e4 }),
+          exportDestination: bulkExportDestination,
+          allowOutsideHome,
+          exportFailureMessage: t("error-export"),
+          invalidExportMessage: t("error-export-invalid-response"),
+          earlyAbortMessage: t("bulk-export-early-abort"),
+          unknownProjectName: t("export-unknown-project"),
+          exportAgent: activeAgent.value,
+          localizeExportError: (failure, destination) => localizedExportError(failure, destination, t),
+          run: (args, timeout = 3e4) => runAgent(args, { timeout }),
           isCancelled: () => !isCurrent() || bulkCancelRequested.value,
           onProgress: (completed2, total, session) => {
             if (isCurrent()) bulkProgress.value = { completed: completed2, total, title: resolveSessionTitle(session) || t("untitled-session") };
@@ -2381,6 +2821,10 @@ function activate(ctx) {
         });
         if (!isCurrent()) return;
         bulkResult.value = outcome;
+        if (action === "export") {
+          bulkProgress.value = { completed: outcome.results.length, total: items.length, title: "" };
+          return;
+        }
         const completed = outcome.results.filter((result) => result.status === "done");
         for (const result of completed) {
           if (result.retaggedKey) retagSession(result.session, action === "archive" ? "archive" : "active");
@@ -2510,7 +2954,7 @@ function activate(ctx) {
             ref: (element) => {
               pickerTriggerRef.value = element;
             },
-            onClick: openRootPicker
+            onClick: () => openRootPicker("tree-root")
           }, [IconPencil(15)])
         ])
       ]),
@@ -2523,6 +2967,7 @@ function activate(ctx) {
   function renderCardActions(session) {
     const caps = activeCapabilities.value;
     const actions = [];
+    actions.push({ label: t("export-session"), icon: IconDownload, action: "export" });
     if (session.partition === "active") {
       actions.push({ label: t("resume-session"), icon: IconTerminal, action: "resume" });
       if (caps.archive) actions.push({ label: t("archive-session"), icon: IconArchive, action: "archive" });
@@ -2542,6 +2987,7 @@ function activate(ctx) {
         event.stopPropagation();
         if (bulkRunning.value) return;
         if (action === "resume") void resumeSession(session);
+        else if (action === "export") void exportSession(session);
         else if (action === "archive") void archiveSession(session);
         else if (action === "restore") void restoreSession(session);
         else void deleteSession(session);
@@ -2556,19 +3002,21 @@ function activate(ctx) {
     const titles = resolveSessionTitles(session);
     const title = titles.primary || untitled;
     const health = session.health === "ok" ? "" : t(`health-${session.health}`);
+    const activateCard = () => {
+      if (bulkRunning.value) return;
+      if (selectMode.value) toggleSelected(session, false, pageKeys);
+      else selectSession(session);
+    };
     return h("article", {
       class: ["ccm-browser-session-card", selected ? "ccm-browser-session-card-selected" : ""],
       key: sessionKey(session),
       role: "button",
       tabindex: 0,
-      onClick: () => {
-        if (!bulkRunning.value) selectSession(session);
-      },
+      onClick: activateCard,
       onKeydown: (event) => {
-        if (bulkRunning.value) return;
         if (event.key !== "Enter" && event.key !== " ") return;
         event.preventDefault();
-        selectSession(session);
+        activateCard();
       }
     }, [
       selectMode.value ? h("input", {
@@ -2658,6 +3106,8 @@ function activate(ctx) {
   }
   function renderRootPicker() {
     if (!showRootPicker.value) return null;
+    const selectingExportDestination = pickerTarget.value === "export-destination";
+    const pickerTitle = t(selectingExportDestination ? "picker-export-title" : "picker-title");
     const dir = pickerCurrentDir.value;
     const segments = dir.split("/").filter(Boolean);
     const breadcrumbs = [
@@ -2704,9 +3154,9 @@ function activate(ctx) {
       }
     }, [
       h("div", { class: "ccm-picker-backdrop", onClick: closeRootPicker }),
-      h("section", { class: "ccm-picker-panel", role: "dialog", "aria-modal": "true", "aria-label": t("picker-title") }, [
+      h("section", { class: "ccm-picker-panel", role: "dialog", "aria-modal": "true", "aria-label": pickerTitle }, [
         h("div", { class: "ccm-picker-header" }, [
-          h("span", { class: "ccm-picker-title" }, t("picker-title")),
+          h("span", { class: "ccm-picker-title" }, pickerTitle),
           h("button", {
             class: "ccm-icon-btn ccm-icon-btn-sm",
             title: t("picker-close"),
@@ -2722,7 +3172,7 @@ function activate(ctx) {
             },
             value: pickerManualPath.value,
             placeholder: t("absolute-path-placeholder"),
-            "aria-label": t("picker-manual-path"),
+            "aria-label": t(selectingExportDestination ? "picker-export-manual-path" : "picker-manual-path"),
             onInput: (event) => {
               pickerManualPath.value = event.target.value;
             },
@@ -2739,7 +3189,7 @@ function activate(ctx) {
             onClick: () => {
               void validateAndCommitRoot(pickerManualPath.value);
             }
-          }, [IconCheck(14), h("span", {}, t("picker-use-manual-path"))])
+          }, [IconCheck(14), h("span", {}, t(selectingExportDestination ? "picker-export-use-manual-path" : "picker-use-manual-path"))])
         ]),
         h("div", { class: "ccm-picker-current" }, [IconFolder(14), h("span", {}, t("picker-current", { path: dir }))]),
         h("div", { class: "ccm-picker-actions" }, [
@@ -2749,10 +3199,10 @@ function activate(ctx) {
             onClick: () => {
               void validateAndCommitRoot(dir);
             }
-          }, [IconCheck(14), h("span", {}, t("picker-select-current", { name: dir.split("/").pop() || "/" }))])
+          }, [IconCheck(14), h("span", {}, t(selectingExportDestination ? "picker-export-select-current" : "picker-select-current", { name: dir.split("/").pop() || "/" }))])
         ]),
         h("div", { class: "ccm-picker-breadcrumb" }, breadcrumbs),
-        h("div", { class: "ccm-picker-list" }, pickerLoading.value ? h("div", { class: "ccm-picker-empty" }, [h("span", { class: "ccm-browser-spinner" }), h("span", {}, t("picker-loading"))]) : pickerError.value ? h("div", { class: "ccm-picker-empty", role: "alert" }, t("picker-error", { msg: pickerError.value })) : pickerEntries.value.length ? pickerEntries.value.map((entry) => h("div", {
+        h("div", { class: "ccm-picker-list" }, pickerLoading.value ? h("div", { class: "ccm-picker-empty" }, [h("span", { class: "ccm-browser-spinner" }), h("span", {}, t("picker-loading"))]) : pickerError.value ? h("div", { class: "ccm-picker-empty", role: "alert" }, pickerError.value) : pickerEntries.value.length ? pickerEntries.value.map((entry) => h("div", {
           class: "ccm-picker-item",
           key: entry.path,
           role: "button",
@@ -2826,6 +3276,24 @@ function activate(ctx) {
           checked: themeFollowHost.value,
           onChange: (event) => setThemeFollowHost(event.target.checked)
         })
+      ]),
+      h("div", { class: "ccm-browser-settings-row" }, [
+        h("span", { class: "ccm-browser-settings-label" }, t("settings-export-destination")),
+        h("div", { class: "ccm-browser-settings-path-control" }, [
+          h("input", {
+            type: "text",
+            value: exportDestination.value,
+            "aria-label": t("settings-export-destination"),
+            onInput: (event) => setExportDestination(event.target.value)
+          }),
+          h("button", {
+            class: "ccm-icon-btn",
+            type: "button",
+            title: t("settings-export-destination-browse"),
+            "aria-label": t("settings-export-destination-browse"),
+            onClick: () => openRootPicker("export-destination")
+          }, [IconFolder(14)])
+        ])
       ]),
       activeCapabilities.value.originFilter ? h("label", {
         class: "ccm-browser-settings-row ccm-browser-settings-toggle",
@@ -3201,6 +3669,9 @@ function activate(ctx) {
         }, [IconX(13)]) : null
       ]) : null,
       !overlay && selection.value.selected.size ? h("div", { class: "ccm-browser-filter-row ccm-browser-bulk-toolbar", role: "toolbar", "aria-label": t("bulk-actions") }, [
+        h("button", { class: "ccm-icon-btn ccm-browser-action-control", disabled: bulkRunning.value, onClick: () => {
+          void executeBulk("export");
+        } }, [IconDownload(13), t("bulk-export", { n: selectedItems().length })]),
         caps.archive && partition === "active" ? h("button", { class: "ccm-icon-btn ccm-browser-action-control", disabled: bulkRunning.value, onClick: () => {
           void executeBulk("archive");
         } }, [IconArchive(13), t("bulk-archive", { n: selectedItems().length })]) : null,
@@ -3232,10 +3703,11 @@ function activate(ctx) {
           }, [IconX(13)])
         ]),
         bulkRefreshFailed.value ? h("div", {}, t("bulk-refresh-stale")) : null,
-        ...bulkResult.value.results.filter((result) => result.status !== "done").map((result) => h("div", { key: result.key }, [
-          h("strong", {}, resolveSessionTitle(result.session) || t("untitled-session")),
-          h("code", {}, result.session.id),
-          h("span", {}, result.reason || "")
+        bulkResult.value.earlyAborted ? h("div", {}, t("bulk-export-early-abort")) : null,
+        ...bulkResult.value.results.filter((result) => result.status !== "done").map((result) => h("div", { class: "ccm-browser-bulk-result-item", key: result.key }, [
+          h("strong", { class: "ccm-browser-bulk-result-title" }, resolveSessionTitle(result.session) || t("untitled-session")),
+          h("code", { class: "ccm-browser-bulk-result-id" }, result.session.id),
+          h("span", { class: "ccm-browser-bulk-result-reason" }, result.reason || t("bulk-result-unknown-reason"))
         ]))
       ]) : null,
       !overlay ? h("footer", { class: "ccm-browser-filter-row ccm-browser-pager" }, [
@@ -3662,6 +4134,7 @@ export {
   normalizePartitionSortSettings,
   normalizeStoredExpandedPaths,
   normalizeStoredTreeRoot,
+  parseCliFailure,
   resolveSessionTitle,
   resolveSessionTitles,
   runBulkSerial,

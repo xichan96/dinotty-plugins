@@ -538,6 +538,7 @@ var codexConnector = {
     }
   },
   buildIndex: () => output(listThreads()),
+  indexSessions: () => listThreads(),
   listUnder: (rootPath, partition) => {
     if (partition && partition !== "active" && partition !== "archive") {
       fatal("invalid-partition", "Partition must be active or archive");
@@ -558,7 +559,7 @@ var codexConnector = {
     validateSessionId(sessionId);
     const thread = findThread(sessionId);
     if (!thread) fatal("not-found", `Codex session does not exist: ${sessionId}`);
-    output(await readMessages(thread.rollout_path));
+    return readMessages(thread.rollout_path);
   },
   moveSession: (_scopeKey, sessionId, direction, force) => runMutation(direction === "archive" ? "archive" : "unarchive", sessionId, force),
   deleteArchived: (_scopeKey, sessionId, force) => runMutation("delete", sessionId, force),
@@ -607,13 +608,25 @@ var TAIL_SCAN_BYTES = 1024 * 1024;
 var READ_SESSION_MAX_OUTPUT_BYTES2 = 16 * 1024 * 1024;
 var LIVE_WINDOW_MS = 60 * 1e3;
 var INDEX_CACHE_VERSION = 3;
+var EXPORT_TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
+var EXPORT_TEMP_RE = /^\.export-tmp-\d+-\d+-\d+$/;
+var EXPORT_TEMP_SWEEP_MAX_DEPTH = 2;
+var EXPORT_FILENAME_MAX_BYTES = 255;
+var EXPORT_FILENAME_ATTEMPTS = 1e3;
+var EXPORT_LINK_FALLBACK_CODES = /* @__PURE__ */ new Set(["EPERM", "ENOSYS", "ENOTSUP", "EOPNOTSUPP", "EXDEV", "EMLINK"]);
 var TERMINAL_SESSION_STATUSES = /* @__PURE__ */ new Set(["closed", "completed", "dead", "done", "ended", "exited", "failed", "stopped", "terminated"]);
+var exportTempCounter = 0;
 function output2(value) {
   console.log(JSON.stringify(value));
 }
 function fail(error, message) {
   console.error(JSON.stringify({ error, message }));
   process.exit(1);
+}
+function structuredError(error, message) {
+  const result = new Error(message);
+  result.code = error;
+  return result;
 }
 function mutationFailure2(error, message) {
   return { outcome: "failure", reason: { error, message } };
@@ -1030,6 +1043,56 @@ function preserveCachedEntriesUnder(dirPath, cache, nextEntries, sessions) {
     if (isUnder2(dirPath, filePath)) preserveCachedEntry(filePath, cache, nextEntries, sessions);
   }
 }
+function sweepOrphanedTemps(dirPath, names, pattern, canUnlink) {
+  const cutoff = Date.now() - EXPORT_TEMP_MAX_AGE_MS;
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    const filePath = path2.join(dirPath, name);
+    try {
+      const stat = fs2.lstatSync(filePath);
+      if (stat.isFile() && stat.mtimeMs < cutoff && canUnlink(name)) fs2.unlinkSync(filePath);
+    } catch {
+    }
+  }
+}
+function canUnlinkExportTemp(name) {
+  const match = /^\.export-tmp-(\d+)-/.exec(name);
+  const pid = match ? Number(match[1]) : NaN;
+  if (!Number.isSafeInteger(pid) || pid < 1) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    if (error?.code === "ESRCH") return true;
+    if (error?.code === "EPERM") return false;
+    return false;
+  }
+}
+function sweepOrphanedExportTemps(destination) {
+  let exportRoot = destination;
+  for (let candidate = destination; candidate !== path2.dirname(candidate); candidate = path2.dirname(candidate)) {
+    if (path2.basename(candidate).endsWith("_exp")) {
+      exportRoot = candidate;
+      break;
+    }
+  }
+  const walk = (dirPath, depth) => {
+    let entries;
+    try {
+      entries = fs2.readdirSync(dirPath, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    sweepOrphanedTemps(dirPath, entries.map((entry) => entry.name), EXPORT_TEMP_RE, canUnlinkExportTemp);
+    if (depth >= EXPORT_TEMP_SWEEP_MAX_DEPTH) return;
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const childPath = path2.join(dirPath, entry.name);
+      walk(childPath, depth + 1);
+    }
+  };
+  walk(exportRoot, 0);
+}
 function walkPartition(baseDir, partition, cache, refresh, nextEntries, sessions) {
   let dirs;
   try {
@@ -1045,7 +1108,8 @@ function walkPartition(baseDir, partition, cache, refresh, nextEntries, sessions
     let files;
     try {
       assertSafePartitionPath(baseDir, dirPath);
-      files = fs2.readdirSync(dirPath).filter((name) => name.endsWith(".jsonl")).sort();
+      const names = fs2.readdirSync(dirPath);
+      files = names.filter((name) => name.endsWith(".jsonl")).sort();
     } catch (error) {
       indexDiagnostic(dirPath, error);
       if (error?.code !== "unsafe-path") preserveCachedEntriesUnder(dirPath, cache, nextEntries, sessions);
@@ -1103,6 +1167,346 @@ function findOption(args, option) {
   if (index < 0) return { rest: args };
   if (!args[index + 1]) fail("missing-option-value", `${option} requires a value`);
   return { value: args[index + 1], rest: [...args.slice(0, index), ...args.slice(index + 2)] };
+}
+function resolveAllowMissing(filePath) {
+  let existing = path2.resolve(filePath);
+  const missing = [];
+  while (true) {
+    try {
+      return path2.join(fs2.realpathSync(existing), ...missing.reverse());
+    } catch (error) {
+      if (error?.code !== "ENOENT") throw error;
+      const parent = path2.dirname(existing);
+      if (parent === existing) throw error;
+      missing.push(path2.basename(existing));
+      existing = parent;
+    }
+  }
+}
+function cleanupCreatedExportDirectories(firstCreated, requested) {
+  if (!firstCreated) return;
+  const first = path2.resolve(firstCreated);
+  let current = path2.resolve(requested);
+  while (isUnder2(first, current)) {
+    try {
+      fs2.rmdirSync(current);
+    } catch {
+    }
+    if (current === first) break;
+    const parent = path2.dirname(current);
+    if (parent === current) break;
+    current = parent;
+  }
+}
+function isExportDestinationOutsideHome(dest) {
+  const expanded = dest.replace(/^~(?=$|[\\/])/, HOME2);
+  let resolvedHome;
+  try {
+    resolvedHome = resolveAllowMissing(HOME2);
+  } catch (error) {
+    fail("export-home-resolve-failed", error?.message || `Could not resolve home directory: ${HOME2}`);
+  }
+  let resolvedRequested;
+  try {
+    resolvedRequested = resolveAllowMissing(path2.resolve(expanded));
+  } catch (error) {
+    fail("export-destination-resolve-failed", error?.message || `Could not resolve export destination: ${dest}`);
+  }
+  return !isUnder2(resolvedHome, resolvedRequested);
+}
+function prepareExportDestination(dest, allowOutsideHome) {
+  const expanded = dest.replace(/^~(?=$|[\\/])/, HOME2);
+  const requested = path2.resolve(expanded);
+  let firstCreated;
+  if (!allowOutsideHome && isExportDestinationOutsideHome(dest)) {
+    fail("export-destination-outside-home", `Export destination is outside the user's home directory: ${requested}`);
+  }
+  try {
+    const stat = fs2.statSync(requested);
+    if (!stat.isDirectory()) fail("export-destination-not-directory", `Export destination is not a directory: ${requested}`);
+  } catch (error) {
+    if (error?.code !== "ENOENT") {
+      if (error?.code === "ENOTDIR") fail("export-destination-not-directory", `Export destination is not a directory: ${requested}`);
+      fail("export-destination-inspection-failed", error?.message || `Could not inspect export destination: ${requested}`);
+    }
+    try {
+      firstCreated = fs2.mkdirSync(requested, { recursive: true });
+    } catch (mkdirError) {
+      if (mkdirError?.code === "EEXIST" || mkdirError?.code === "ENOTDIR") {
+        fail("export-destination-not-directory", `Export destination is not a directory: ${requested}`);
+      }
+      fail("export-destination-create-failed", mkdirError?.message || `Could not create export destination: ${requested}`);
+    }
+  }
+  let resolved;
+  try {
+    resolved = fs2.realpathSync(requested);
+  } catch (error) {
+    fail("export-destination-resolve-failed", error?.message || `Could not resolve export destination: ${requested}`);
+  }
+  try {
+    if (!fs2.statSync(resolved).isDirectory()) {
+      fail("export-destination-not-directory", `Export destination is not a directory: ${resolved}`);
+    }
+  } catch (error) {
+    if (error?.code === "export-destination-not-directory") throw error;
+    fail("export-destination-resolve-failed", error?.message || `Could not inspect resolved export destination: ${resolved}`);
+  }
+  try {
+    fs2.accessSync(resolved, fs2.constants.W_OK);
+  } catch (error) {
+    fail("export-destination-not-writable", error?.message || `Export destination is not writable: ${resolved}`);
+  }
+  if (!allowOutsideHome) {
+    let resolvedHome;
+    try {
+      resolvedHome = resolveAllowMissing(HOME2);
+    } catch (error) {
+      fail("export-home-resolve-failed", error?.message || `Could not resolve home directory: ${HOME2}`);
+    }
+    if (!isUnder2(resolvedHome, resolved)) {
+      cleanupCreatedExportDirectories(firstCreated, requested);
+      fail("export-destination-outside-home", `Export destination is outside the user's home directory: ${resolved}`);
+    }
+  }
+  sweepOrphanedExportTemps(resolved);
+  return resolved;
+}
+function stripExportTitleMarkup(text) {
+  for (let iteration = 0; iteration < 5; iteration++) {
+    const stripped = text.replace(/<system-reminder>[\s\S]*?(?:<\/system-reminder>|$)/g, "").replace(/<local-command-stdout>[\s\S]*?(?:<\/local-command-stdout>|$)/g, "");
+    if (stripped === text) break;
+    text = stripped;
+  }
+  return text.replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
+}
+function cleanExportTitle(text) {
+  const commandName = text.match(/<command-name>([\s\S]*?)<\/command-name>/);
+  if (commandName) {
+    const name = stripExportTitleMarkup(commandName[1]).replace(/^\//, "");
+    const args = stripExportTitleMarkup(text.match(/<command-args>([\s\S]*?)<\/command-args>/)?.[1] || "");
+    return cleanExportFilenameText(`${name} ${args}`);
+  }
+  return cleanExportFilenameText(stripExportTitleMarkup(text));
+}
+function resolvedExportTitle(session) {
+  return session.aiTitle?.trim() || session.customTitle?.trim() || cleanExportTitle(session.title) || "session";
+}
+function cleanExportFilenameText(text) {
+  return text.replace(/\[[A-Z][A-Z0-9-]{4,}(?:\s+[^\]\r\n]*)?\]/g, "").replace(/[\p{S}\p{Extended_Pictographic}\u200d\u20e3\ufe0e\ufe0f]/gu, "").replace(/\s+/g, " ").trim();
+}
+function truncateExportTitle(title, maxCharacters) {
+  const characters = Array.from(title);
+  if (characters.length <= maxCharacters) return title;
+  const minimumBoundary = Math.max(0, maxCharacters - 15);
+  for (let index = maxCharacters - 1; index >= minimumBoundary; index--) {
+    if (/\s/u.test(characters[index])) return characters.slice(0, index).join("").trimEnd();
+    if (/[.!?,;:。！？，；：、]/u.test(characters[index])) return characters.slice(0, index + 1).join("").trimEnd();
+  }
+  return characters.slice(0, maxCharacters).join("");
+}
+function legalizeFilenameTitle(title) {
+  let legalized = title.replace(/^\.+/, "").replace(/[. ]+$/g, "").trim();
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(legalized)) legalized = `_${legalized}`;
+  return legalized;
+}
+function sanitizeFilenameTitle(title) {
+  const sanitized = legalizeFilenameTitle(cleanExportFilenameText(title).replace(/[<>:"|?*\\/]/g, "").replace(/\.\./g, "").replace(/[\u0000-\u001f\u007f-\u009f]/g, "").replace(/\s+/g, " ").trim());
+  return legalizeFilenameTitle(truncateExportTitle(sanitized, 60)) || "session";
+}
+function truncateUtf8(value, maxBytes) {
+  let result = "";
+  let bytes = 0;
+  for (const character of value) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > maxBytes) break;
+    result += character;
+    bytes += characterBytes;
+  }
+  return result;
+}
+function exportDateSegment(createdAt) {
+  const parsed = new Date(createdAt);
+  const date = Number.isFinite(parsed.getTime()) ? parsed : /* @__PURE__ */ new Date();
+  const year = (date.getFullYear() % 100 + 100) % 100;
+  return `${String(year).padStart(2, "0")}${String(date.getMonth() + 1).padStart(2, "0")}${String(date.getDate()).padStart(2, "0")}`;
+}
+function exportFilenameBase(title, createdAt) {
+  const dateSegment = exportDateSegment(createdAt);
+  const largestFixed = `${dateSegment}_ (${EXPORT_FILENAME_ATTEMPTS}).md`;
+  const titleBytes = EXPORT_FILENAME_MAX_BYTES - Buffer.byteLength(largestFixed, "utf8");
+  let truncatedTitle = legalizeFilenameTitle(truncateUtf8(title, Math.max(0, titleBytes)));
+  if (Buffer.byteLength(truncatedTitle, "utf8") > titleBytes) {
+    truncatedTitle = legalizeFilenameTitle(truncateUtf8(truncatedTitle, Math.max(0, titleBytes)));
+  }
+  truncatedTitle ||= "session";
+  return `${dateSegment}_${truncatedTitle}`;
+}
+function exportFilename(base, attempt) {
+  const numericSuffix = attempt === 1 ? "" : ` (${attempt})`;
+  return `${base}${numericSuffix}.md`;
+}
+function renderSessionMarkdown(title, agent, sessionId, createdAt, messages) {
+  const lines = [
+    `# ${title.replace(/\s+/g, " ").trim() || "session"}`,
+    "",
+    `- Agent: ${agent}`,
+    `- Session ID: ${sessionId}`
+  ];
+  if (createdAt) lines.push(`- Created: ${createdAt}`);
+  for (const message of messages) {
+    if (message.role !== "user" && message.role !== "assistant") continue;
+    lines.push("", `## ${message.role === "user" ? "User" : "Assistant"}`, "");
+    if (message.content) lines.push(message.content);
+    for (const tool of message.toolUses || []) {
+      lines.push(`- Tool: ${tool.summary.replace(/[\r\n]+/g, " ")}`);
+    }
+  }
+  return `${lines.join("\n")}
+`;
+}
+function exportError(error, message) {
+  return structuredError(error, message);
+}
+function exportTempName() {
+  exportTempCounter = exportTempCounter + 1 >>> 0;
+  return `.export-tmp-${process.pid}-${Date.now()}-${exportTempCounter}`;
+}
+function exportFailure(error) {
+  const candidate = error;
+  return {
+    ok: false,
+    error: candidate?.code || "export-session-failed",
+    message: candidate?.message || String(error)
+  };
+}
+function writeExportSessionWithRenameFallback(markdown, filenameBase, destination) {
+  let candidatePath = "";
+  let tempPath = "";
+  let reserved = false;
+  for (let attempt = 1; attempt <= EXPORT_FILENAME_ATTEMPTS; attempt++) {
+    candidatePath = path2.join(destination, exportFilename(filenameBase, attempt));
+    let fd;
+    try {
+      fd = fs2.openSync(candidatePath, "wx");
+    } catch (error) {
+      if (error?.code === "EEXIST") continue;
+      throw exportError("export-file-open-failed", error?.message || `Could not reserve export file: ${candidatePath}`);
+    }
+    reserved = true;
+    try {
+      fs2.closeSync(fd);
+      break;
+    } catch (error) {
+      try {
+        fs2.closeSync(fd);
+      } catch {
+      }
+      try {
+        fs2.unlinkSync(candidatePath);
+      } catch {
+      }
+      reserved = false;
+      throw exportError("export-file-close-failed", error?.message || `Could not close reserved export file: ${candidatePath}`);
+    }
+  }
+  if (!reserved) throw exportError("export-name-exhausted", `Could not allocate an unused export filename after ${EXPORT_FILENAME_ATTEMPTS} attempts`);
+  tempPath = path2.join(destination, exportTempName());
+  try {
+    fs2.writeFileSync(tempPath, markdown, { encoding: "utf8", flag: "wx" });
+    fs2.renameSync(tempPath, candidatePath);
+    tempPath = "";
+    reserved = false;
+  } catch (error) {
+    throw exportError("export-file-write-failed", error?.message || `Could not write export file: ${candidatePath}`);
+  } finally {
+    if (tempPath) {
+      try {
+        fs2.unlinkSync(tempPath);
+      } catch {
+      }
+    }
+    if (reserved) {
+      try {
+        fs2.unlinkSync(candidatePath);
+      } catch {
+      }
+    }
+  }
+  return { ok: true, path: path2.resolve(candidatePath) };
+}
+function writeExportSession(connector, session, sessionId, destination, messages) {
+  const title = resolvedExportTitle(session);
+  const filenameTitle = sanitizeFilenameTitle(title);
+  const filenameBase = exportFilenameBase(filenameTitle, session.createdAt);
+  const markdown = renderSessionMarkdown(title, connector.id, sessionId, session.createdAt, messages);
+  let candidatePath = "";
+  let tempPath = path2.join(destination, exportTempName());
+  try {
+    fs2.writeFileSync(tempPath, markdown, { encoding: "utf8", flag: "wx" });
+  } catch (error) {
+    try {
+      fs2.unlinkSync(tempPath);
+    } catch {
+    }
+    throw exportError("export-file-write-failed", error?.message || `Could not write export temp file: ${tempPath}`);
+  }
+  try {
+    for (let attempt = 1; attempt <= EXPORT_FILENAME_ATTEMPTS; attempt++) {
+      candidatePath = path2.join(destination, exportFilename(filenameBase, attempt));
+      try {
+        fs2.linkSync(tempPath, candidatePath);
+      } catch (error) {
+        if (error?.code === "EEXIST") continue;
+        if (EXPORT_LINK_FALLBACK_CODES.has(error?.code)) {
+          try {
+            fs2.unlinkSync(tempPath);
+            tempPath = "";
+          } catch (unlinkError) {
+            throw exportError("export-file-write-failed", unlinkError?.message || `Could not remove export temp file: ${tempPath}`);
+          }
+          return writeExportSessionWithRenameFallback(markdown, filenameBase, destination);
+        }
+        throw exportError("export-file-open-failed", error?.message || `Could not allocate export file: ${candidatePath}`);
+      }
+      try {
+        fs2.unlinkSync(tempPath);
+        tempPath = "";
+      } catch {
+      }
+      return { ok: true, path: path2.resolve(candidatePath) };
+    }
+    throw exportError("export-name-exhausted", `Could not allocate an unused export filename after ${EXPORT_FILENAME_ATTEMPTS} attempts`);
+  } finally {
+    if (tempPath) try {
+      fs2.unlinkSync(tempPath);
+    } catch {
+    }
+  }
+}
+function findExportSession(connector, sessions, scopeKey, sessionId) {
+  const candidates = sessions.filter((session2) => session2.id === sessionId && (connector.id === "codex" || session2.attributionKey === scopeKey));
+  const session = candidates.find((candidate) => candidate.partition === "active") || candidates[0];
+  if (!session) throw exportError("export-session-not-indexed", `Session does not exist in the connector index: ${sessionId}`);
+  return session;
+}
+function exportIndex(connector) {
+  const sessions = connector.indexSessions(false);
+  if (!Array.isArray(sessions)) fail("export-index-output-invalid", "Connector index output is not an array");
+  return sessions;
+}
+async function cmdExportSession(connector, scopeKey, sessionId, dest, allowOutsideHome) {
+  const destination = prepareExportDestination(dest, allowOutsideHome);
+  const messages = await connector.readSession(scopeKey, sessionId);
+  if (!Array.isArray(messages)) fail("export-session-output-invalid", "Connector session output is not an array");
+  const sessions = exportIndex(connector);
+  try {
+    const session = findExportSession(connector, sessions, scopeKey, sessionId);
+    output2(writeExportSession(connector, session, sessionId, destination, messages));
+  } catch (error) {
+    const failure = exportFailure(error);
+    fail(failure.error, failure.message);
+  }
 }
 function cmdBuildIndex(refresh) {
   output2(buildIndex(refresh));
@@ -1180,7 +1584,7 @@ async function cmdReadSession(encodedPath, sessionId) {
   } catch (error) {
     fail("read-failed", error?.message || `Could not read session file: ${filePath}`);
   }
-  output2(messages);
+  return messages;
 }
 function cmdMoveSession(encodedPath, sessionId, direction, force = false) {
   validateEncodedPath(encodedPath);
@@ -1531,6 +1935,7 @@ var claudeCodeConnector = {
     }
   },
   buildIndex: (refresh) => cmdBuildIndex(refresh),
+  indexSessions: (refresh) => buildIndex(refresh),
   listUnder: (rootPath, partition) => cmdListUnder(rootPath, partition),
   listProjects: () => cmdListProjects(),
   listSessions: (scopeKey) => cmdListSessions(scopeKey),
@@ -1641,7 +2046,18 @@ async function main() {
     case "read-session": {
       const { connector, rest } = findConnector(args);
       if (rest.length !== 2) fail("invalid-arguments", "Usage: read-session <encodedPath> <sessionId>");
-      await connector.readSession(rest[0], rest[1]);
+      output2(await connector.readSession(rest[0], rest[1]));
+      break;
+    }
+    case "export-session": {
+      const { connector, rest } = findConnector(args);
+      const parsed = findOption(rest, "--dest");
+      const allowOutsideHome = parsed.rest.includes("--allow-outside-home");
+      const positionals = parsed.rest.filter((arg) => arg !== "--allow-outside-home");
+      if (!parsed.value || parsed.value.startsWith("--") || positionals.length !== 2 || parsed.rest.filter((arg) => arg === "--allow-outside-home").length > 1) {
+        fail("invalid-arguments", "Usage: export-session <scopeKey> <sessionId> --dest <dir> [--agent codex] [--allow-outside-home]");
+      }
+      await cmdExportSession(connector, positionals[0], positionals[1], parsed.value, allowOutsideHome);
       break;
     }
     case "archive": {
@@ -1686,6 +2102,10 @@ async function main() {
     case "check-dir":
       if (args.length !== 1) fail("invalid-arguments", "Usage: check-dir <absolutePath>");
       cmdCheckDir(args[0]);
+      break;
+    case "classify-export-destination":
+      if (args.length !== 1) fail("invalid-arguments", "Usage: classify-export-destination <path>");
+      console.log(JSON.stringify({ outsideHome: isExportDestinationOutsideHome(args[0]) }));
       break;
     default:
       fail("unknown-subcommand", `Unknown subcommand: ${subcommand || ""}`);

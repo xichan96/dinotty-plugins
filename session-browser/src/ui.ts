@@ -10,6 +10,7 @@ import {
   IconChevronRight,
   IconClaude,
   IconCopy,
+  IconDownload,
   IconEye,
   IconFileText,
   IconFolder,
@@ -26,7 +27,7 @@ import {
   IconX,
   IconZap,
 } from './icons'
-import { initI18n, normalizeLocaleSetting, resolveLocale, type LocaleSetting, type PluginLocale } from './i18n'
+import { initI18n, normalizeLocaleSetting, resolveLocale, translate, type LocaleSetting, type PluginLocale } from './i18n'
 
 export type SessionPartition = 'active' | 'archive'
 export type AgentId = 'claude-code' | 'codex'
@@ -117,7 +118,7 @@ export interface SessionListFilters {
 }
 
 export interface DateRange { from: string; to: string }
-export type BulkAction = 'archive' | 'restore' | 'delete'
+export type BulkAction = 'archive' | 'restore' | 'delete' | 'export'
 export type BulkItemStatus = 'done' | 'failed' | 'skipped'
 export interface BulkItemResult {
   key: string
@@ -133,6 +134,7 @@ export interface BulkRunResult {
   skipped: number
   rebuildRequired: boolean
   cancelled: boolean
+  earlyAborted?: boolean
 }
 
 interface SearchResult {
@@ -157,6 +159,8 @@ interface CliFailure {
   error: string
   message: string
 }
+
+type PickerTarget = 'tree-root' | 'export-destination'
 
 interface ConnectorCapabilities {
   archive: boolean
@@ -231,11 +235,13 @@ const STORAGE_KEYS = {
   treeRoot: 'treeRoot',
   treeExpandedPaths: 'treeExpandedPaths',
   hideScriptedSessions: 'hideScriptedSessions',
+  exportDestination: 'exportDestination',
   sessionListSort: 'sessionListSort',
   pageSize: 'pageSize',
 } as const
 
 const DEFAULT_PANE_WIDTHS: PaneWidths = { left: 280, middle: 360 }
+const DEFAULT_EXPORT_DESTINATION = '~/Downloads'
 export const DEFAULT_PARTITION_SORT: PartitionSortSettings = {
   active: { field: 'idle', direction: 'asc' },
   archive: { field: 'idle', direction: 'asc' },
@@ -246,7 +252,7 @@ export const TRANSCRIPT_BATCH_SIZE = 50
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const FONT_SCALE_MULTIPLIERS: Record<number, number> = { 1: 0.85, 2: 0.93, 3: 1, 4: 1.1, 5: 1.25 }
 export const PAGE_SIZES = [20, 50, 100] as const
-const AGENT_AGNOSTIC = new Set(['list-dirs', 'check-dir', 'agents'])
+const AGENT_AGNOSTIC = new Set(['list-dirs', 'check-dir', 'classify-export-destination', 'agents'])
 const DEFAULT_AGENT: AgentId = 'claude-code'
 const UNAVAILABLE_CAPABILITIES: ConnectorCapabilities = {
   archive: false,
@@ -276,6 +282,43 @@ const RESUME_ARG_TOKEN_RE = /^[A-Za-z0-9_@%+=:,./-]+$/
 
 type Translate = ReturnType<typeof initI18n>['t']
 type CompactView = 'tree' | 'list' | 'detail'
+
+function localizedExportError(failure: Pick<CliFailure, 'error'>, destination: string, t: Translate): string {
+  switch (failure.error) {
+  case 'export-destination-outside-home':
+    return t('export-error-destination-outside-home', { path: destination })
+  case 'export-destination-not-directory':
+    return t('export-error-destination-not-directory', { path: destination })
+  case 'export-destination-not-writable':
+    return t('export-error-destination-not-writable', { path: destination })
+  case 'export-destination-create-failed':
+    return t('export-error-destination-create-failed', { path: destination })
+  case 'export-destination-inspection-failed':
+    return t('export-error-destination-inspection-failed', { path: destination })
+  case 'export-destination-resolve-failed':
+    return t('export-error-destination-resolve-failed', { path: destination })
+  case 'export-home-resolve-failed':
+    return t('export-error-home-resolve-failed', { path: destination })
+  case 'export-file-open-failed':
+    return t('export-error-file-open-failed')
+  case 'export-file-close-failed':
+    return t('export-error-file-close-failed')
+  case 'export-file-write-failed':
+    return t('export-error-file-write-failed')
+  case 'export-name-exhausted':
+    return t('export-error-name-exhausted')
+  case 'export-session-not-indexed':
+    return t('export-error-session-not-indexed')
+  case 'export-index-output-invalid':
+    return t('export-error-index-output-invalid')
+  case 'export-session-output-invalid':
+    return t('export-error-session-output-invalid')
+  case 'export-session-failed':
+    return t('export-error-session-failed')
+  default:
+    return t('export-error-generic')
+  }
+}
 
 export function shQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`
@@ -413,6 +456,24 @@ export function clampPage(page: number, total: number, pageSize: number): number
   return Math.min(maxPage, Math.max(1, Math.floor(page) || 1))
 }
 
+export function parseCliFailure(stderr: string, fallback: string): CliFailure {
+  const trimmed = stderr.trim()
+  const lines = trimmed.split(/\r?\n/).filter(line => line.trim())
+  const candidates = [lines.at(-1)?.trim(), trimmed].filter((value, index, values): value is string => (
+    Boolean(value) && values.indexOf(value) === index
+  ))
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate) as Partial<CliFailure>
+      return {
+        error: typeof parsed.error === 'string' ? parsed.error : '',
+        message: typeof parsed.message === 'string' ? parsed.message : fallback,
+      }
+    } catch { /* try the next representation */ }
+  }
+  return { error: '', message: trimmed || fallback }
+}
+
 export function selectionReducer(state: SelectionState, action: SelectionAction): SelectionState {
   if (action.type === 'clear-partition') return { selected: new Set(), anchor: null }
   if (action.type === 'clear-anchor') return { selected: new Set(state.selected), anchor: null }
@@ -450,13 +511,262 @@ export function selectionReducer(state: SelectionState, action: SelectionAction)
   return { selected, anchor: state.anchor }
 }
 
-export async function runBulkSerial(options: {
-  action: BulkAction
+const MAX_EXPORT_SEGMENT_BYTES = 255
+const EXPORT_COLLISION_SUFFIX_BYTES = 9
+
+function truncateUtf8(value: string, maxBytes: number): string {
+  const encoder = new TextEncoder()
+  if (encoder.encode(value).length <= maxBytes) return value
+  let truncated = ''
+  let bytes = 0
+  for (const character of value) {
+    const characterBytes = encoder.encode(character).length
+    if (bytes + characterBytes > maxBytes) break
+    truncated += character
+    bytes += characterBytes
+  }
+  return truncated
+}
+
+function legalizeExportProjectName(value: string): string {
+  let legalized = value
+    .replace(/^\.+/, '')
+    .replace(/[. ]+$/g, '')
+    .trim()
+  if (/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i.test(legalized)) legalized = `_${legalized}`
+  return legalized
+}
+
+function sanitizeExportProjectName(value: string, fallback: string): string {
+  const sanitized = legalizeExportProjectName(value
+    .replace(/[<>:"|?*\\/]/g, '')
+    .replace(/\.\./g, '')
+    .replace(/[\u0000-\u001f\u007f-\u009f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim())
+  const legalizedFallback = legalizeExportProjectName(fallback)
+  return legalizeExportProjectName(truncateUtf8(
+    sanitized || legalizedFallback,
+    MAX_EXPORT_SEGMENT_BYTES - EXPORT_COLLISION_SUFFIX_BYTES,
+  )) || legalizedFallback
+}
+
+function exportProjectName(rootPath: string, fallback: string): string {
+  const lastSegment = rootPath.split(/[\\/]/).filter(Boolean).at(-1) || ''
+  return sanitizeExportProjectName(lastSegment, fallback)
+}
+
+function stablePathSuffix(rootPath: string): string {
+  let hash = 0x811c9dc5
+  for (let index = 0; index < rootPath.length; index += 1) {
+    hash ^= rootPath.charCodeAt(index)
+    hash = Math.imul(hash, 0x01000193)
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0')
+}
+
+function exportProjectNameKey(name: string): string {
+  return name.normalize('NFC').toLowerCase().normalize('NFC')
+}
+
+function exportProjectNameWithSuffix(name: string, suffix: string): string {
+  const suffixWithSeparator = `-${suffix}`
+  const suffixBytes = new TextEncoder().encode(suffixWithSeparator).length
+  return `${truncateUtf8(name, MAX_EXPORT_SEGMENT_BYTES - suffixBytes)}${suffixWithSeparator}`
+}
+
+function bulkExportProjectNames(items: IndexedSession[], fallback: string): Map<string, string> {
+  const rootsByName = new Map<string, Array<{ name: string; rootPath: string }>>()
+  for (const rootPath of new Set(items.map(item => item.rootPath))) {
+    const name = exportProjectName(rootPath, fallback)
+    const nameKey = exportProjectNameKey(name)
+    rootsByName.set(nameKey, [...(rootsByName.get(nameKey) || []), { name, rootPath }])
+  }
+  const names = new Map<string, string>()
+  const reservedNames = new Set([...rootsByName].flatMap(([nameKey, roots]) => roots.length === 1 ? [nameKey] : []))
+  const usedNames = new Set(reservedNames)
+  const sortedGroups = [...rootsByName].sort(([left], [right]) => left < right ? -1 : left > right ? 1 : 0)
+  for (const [, roots] of sortedGroups) {
+    if (roots.length === 1) {
+      names.set(roots[0].rootPath, roots[0].name)
+      continue
+    }
+    for (const { name, rootPath } of [...roots].sort((left, right) => (
+      left.rootPath < right.rootPath ? -1 : left.rootPath > right.rootPath ? 1 : 0
+    ))) {
+      const hash = stablePathSuffix(rootPath)
+      const hashedName = exportProjectNameWithSuffix(name, hash)
+      let uniqueName = hashedName
+      let attempt = 2
+      while (usedNames.has(exportProjectNameKey(uniqueName))) uniqueName = exportProjectNameWithSuffix(name, `${hash}-${attempt++}`)
+      usedNames.add(exportProjectNameKey(uniqueName))
+      names.set(rootPath, uniqueName)
+    }
+  }
+  return names
+}
+
+function bulkExportTimestamp(now: Date): string {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${pad(now.getFullYear() % 100)}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
+}
+
+function joinExportDestination(destination: string, ...segments: string[]): string {
+  const separator = destination.includes('\\') && !destination.includes('/') ? '\\' : '/'
+  const base = destination.replace(/[\\/]+$/, '')
+  return `${base || separator}${base ? separator : ''}${segments.join(separator)}`
+}
+
+function exportAgentFolderName(agent: string): string {
+  const agentName = agent === 'claude-code' ? 'claude' : agent
+  return sanitizeExportProjectName(`${agentName}_exp`, 'agent_exp')
+}
+
+function singleExportFolderName(): string {
+  return sanitizeExportProjectName('single files', 'single files')
+}
+
+async function isExportDestinationOutsideHome(
+  destination: string,
+  run: (args: string[], timeout?: number) => Promise<{ code: number; stdout: string; stderr: string }>,
+): Promise<boolean> {
+  const result = await run(['classify-export-destination', destination.trim()], 10_000)
+  if (result.code !== 0) throw new Error(result.stderr || 'export destination classification failed')
+  const classified = JSON.parse(result.stdout)
+  if (typeof classified?.outsideHome !== 'boolean') throw new Error('export destination classification returned an invalid response')
+  return classified.outsideHome
+}
+
+async function runBulkExport(options: {
   items: IndexedSession[]
-  run: (args: string[]) => Promise<{ code: number; stdout: string; stderr: string }>
+  exportDestination?: string
+  exportFailureMessage?: string
+  invalidExportMessage?: string
+  earlyAbortMessage?: string
+  unknownProjectName?: string
+  exportAgent?: string
+  allowOutsideHome?: boolean
+  localizeExportError?: (failure: CliFailure, destination: string) => string
+  run: (args: string[], timeout?: number) => Promise<{ code: number; stdout: string; stderr: string }>
   isCancelled?: () => boolean
   onProgress?: (completed: number, total: number, session: IndexedSession) => void
 }): Promise<BulkRunResult> {
+  const destination = options.exportDestination || DEFAULT_EXPORT_DESTINATION
+  const invalidResponse = options.invalidExportMessage || translate('en', 'bulk-export-command-failed')
+  const earlyAbortReason = options.earlyAbortMessage || translate('en', 'bulk-export-early-abort')
+  const unknownProjectName = options.unknownProjectName || translate('en', 'export-unknown-project')
+  const projectNames = bulkExportProjectNames(options.items, unknownProjectName)
+  const agentFolder = exportAgentFolderName(options.exportAgent || DEFAULT_AGENT)
+  const timestamp = bulkExportTimestamp(new Date())
+  const destinationsByGroup = new Map<string, string>()
+  const results: BulkItemResult[] = []
+  let completed = 0
+  let consecutiveFailures = 0
+  let earlyAborted = false
+  for (const session of options.items) {
+    const groupKey = JSON.stringify([session.attributionKey, session.rootPath])
+    if (!destinationsByGroup.has(groupKey)) {
+      const projectName = projectNames.get(session.rootPath) || unknownProjectName
+      destinationsByGroup.set(groupKey, joinExportDestination(destination, agentFolder, timestamp, projectName))
+    }
+  }
+
+  const record = (session: IndexedSession, status: BulkItemStatus, reason?: string) => {
+    results.push({ key: sessionKey(session), session, status, reason })
+    completed += 1
+    options.onProgress?.(completed, options.items.length, session)
+  }
+
+  for (let index = 0; index < options.items.length; index += 1) {
+    if (options.isCancelled?.()) break
+    const session = options.items[index]
+    const groupKey = JSON.stringify([session.attributionKey, session.rootPath])
+    const groupDestination = destinationsByGroup.get(groupKey)!
+    let succeeded = false
+    let rawOutput: string | undefined
+    try {
+      const executed = await options.run([
+        'export-session',
+        session.attributionKey,
+        session.id,
+        '--dest',
+        groupDestination,
+        ...(options.allowOutsideHome ? ['--allow-outside-home'] : []),
+      ], 30_000)
+      rawOutput = executed.stdout
+      if (executed.code !== 0) {
+        const failure = parseCliFailure(executed.stderr, options.exportFailureMessage || translate('en', 'bulk-export-command-failed'))
+        console.warn(failure)
+        record(session, 'failed', options.localizeExportError?.(failure, groupDestination) || failure.message)
+      } else {
+        let exported: any
+        let malformed = false
+        try {
+          exported = JSON.parse(executed.stdout)
+        } catch (caught) {
+          console.warn(caught, executed.stdout)
+          record(session, 'failed', invalidResponse)
+          malformed = true
+        }
+        if (!malformed) {
+          if (exported?.ok === true && typeof exported.path === 'string' && exported.path) {
+            record(session, 'done')
+            succeeded = true
+          } else if (exported?.ok === false && typeof exported.error === 'string') {
+            const failure = {
+              error: exported.error,
+              message: typeof exported.message === 'string' ? exported.message : options.exportFailureMessage || invalidResponse,
+            }
+            console.warn(exported)
+            record(session, 'failed', options.localizeExportError?.(failure, groupDestination) || failure.message)
+          } else {
+            console.warn(exported)
+            record(session, 'failed', invalidResponse)
+          }
+        }
+      }
+    } catch (caught: any) {
+      console.warn(caught, rawOutput)
+      const failure = { error: '', message: invalidResponse }
+      record(session, 'failed', options.localizeExportError?.(failure, groupDestination) || invalidResponse)
+    }
+
+    consecutiveFailures = succeeded ? 0 : consecutiveFailures + 1
+    if (options.isCancelled?.()) break
+    if (consecutiveFailures === 5 && index + 1 < options.items.length) {
+      earlyAborted = true
+      for (const untried of options.items.slice(index + 1)) record(untried, 'skipped', earlyAbortReason)
+      break
+    }
+  }
+
+  return {
+    results,
+    done: results.filter(result => result.status === 'done').length,
+    failed: results.filter(result => result.status === 'failed').length,
+    skipped: results.filter(result => result.status === 'skipped').length,
+    rebuildRequired: false,
+    cancelled: results.length < options.items.length,
+    earlyAborted,
+  }
+}
+
+export async function runBulkSerial(options: {
+  action: BulkAction
+  items: IndexedSession[]
+  exportDestination?: string
+  exportFailureMessage?: string
+  invalidExportMessage?: string
+  earlyAbortMessage?: string
+  unknownProjectName?: string
+  exportAgent?: string
+  allowOutsideHome?: boolean
+  localizeExportError?: (failure: CliFailure, destination: string) => string
+  run: (args: string[], timeout?: number) => Promise<{ code: number; stdout: string; stderr: string }>
+  isCancelled?: () => boolean
+  onProgress?: (completed: number, total: number, session: IndexedSession) => void
+}): Promise<BulkRunResult> {
+  if (options.action === 'export') return runBulkExport(options)
   const results: BulkItemResult[] = []
   let rebuildRequired = false
   for (let index = 0; index < options.items.length; index += 1) {
@@ -469,7 +779,7 @@ export async function runBulkSerial(options: {
       const executed = await options.run(args)
       if (executed.code !== 0) {
         let reason = executed.stderr || 'command failed'
-        try { reason = (JSON.parse(executed.stderr) as MutationReason).message || reason } catch { /* raw stderr */ }
+        try { reason = (JSON.parse(executed.stderr) as MutationReason).message || reason } catch { /* use fallback */ }
         results.push({ key: sessionKey(session), session, status: 'failed', reason })
         continue
       }
@@ -491,7 +801,7 @@ export async function runBulkSerial(options: {
     } catch (caught: any) {
       results.push({ key: sessionKey(session), session, status: 'failed', reason: caught?.message || String(caught) })
     } finally {
-      options.onProgress?.(index + 1, options.items.length, session)
+      if (results.length > index) options.onProgress?.(index + 1, options.items.length, session)
     }
   }
   return {
@@ -747,12 +1057,14 @@ export function activate(ctx: PluginContext): PluginExports {
   const transientHighlightPath = ctx.ref<string | null>(null)
   const expandedPaths = ctx.ref<Set<string>>(new Set())
   const hideScriptedSessions = ctx.ref(false)
+  const exportDestination = ctx.ref(DEFAULT_EXPORT_DESTINATION)
   const showRootPicker = ctx.ref(false)
   const pickerCurrentDir = ctx.ref('/')
   const pickerEntries = ctx.ref<DirectoryEntry[]>([])
   const pickerLoading = ctx.ref(false)
   const pickerError = ctx.ref<string | null>(null)
   const pickerManualPath = ctx.ref('')
+  const pickerTarget = ctx.ref<PickerTarget>('tree-root')
   const pickerTriggerRef = ctx.ref<HTMLElement | null>(null)
   const pickerInputRef = ctx.ref<HTMLInputElement | null>(null)
   const paneWidths = ctx.ref<PaneWidths>({ ...DEFAULT_PANE_WIDTHS })
@@ -916,6 +1228,12 @@ export function activate(ctx: PluginContext): PluginExports {
       resetTranscript()
     }
     applyFilterChange()
+  }
+
+  function setExportDestination(value: string) {
+    if (activeMount) activeMount.displayGeneration++
+    exportDestination.value = value.trim() || DEFAULT_EXPORT_DESTINATION
+    persist(STORAGE_KEYS.exportDestination, exportDestination.value)
   }
 
   function setLocaleSetting(value: unknown) {
@@ -1246,18 +1564,6 @@ export function activate(ctx: PluginContext): PluginExports {
     }
   }
 
-  function parseCliFailure(stderr: string, fallback: string): CliFailure {
-    try {
-      const parsed = JSON.parse(stderr.trim()) as Partial<CliFailure>
-      return {
-        error: typeof parsed.error === 'string' ? parsed.error : '',
-        message: typeof parsed.message === 'string' ? parsed.message : fallback,
-      }
-    } catch {
-      return { error: '', message: stderr.trim() || fallback }
-    }
-  }
-
   function parseMutationResult(stdout: string): MutationResult {
     const parsed = JSON.parse(stdout) as Partial<MutationResult>
     if (parsed.outcome === 'success' && typeof parsed.cacheRefreshed === 'boolean') return parsed as MutationResult
@@ -1549,6 +1855,77 @@ export function activate(ctx: PluginContext): PluginExports {
     })
   }
 
+  async function exportSession(session: IndexedSession): Promise<void> {
+    await coordinateMutation(undefined, async isCurrent => {
+      const destinationRoot = exportDestination.value.trim() || DEFAULT_EXPORT_DESTINATION
+      const destination = joinExportDestination(
+        destinationRoot,
+        exportAgentFolderName(activeAgent.value),
+        singleExportFolderName(),
+      )
+      const accepted = await ctx.ui.confirm(t('export-destination-confirm', { dest: destination }))
+      if (!isCurrent()) return
+      if (!accepted) {
+        return
+      }
+      clearError()
+      try {
+        const args = ['export-session', session.attributionKey, session.id, '--dest', destination]
+        let result = await runAgent(args, { timeout: 30_000 })
+        if (!isCurrent()) return
+        if (result.code !== 0) {
+          const failure = parseCliFailure(result.stderr, t('error-export'))
+          console.warn(failure)
+          if (failure.error !== 'export-destination-outside-home') {
+            showError(cliError(localizedExportError(failure, destination, t)))
+            return
+          }
+          const outsideHomeAccepted = await ctx.ui.confirm(t('export-outside-home-confirm', { dest: destinationRoot }))
+          if (!isCurrent()) return
+          if (!outsideHomeAccepted) {
+            return
+          }
+          result = await runAgent([...args, '--allow-outside-home'], { timeout: 30_000 })
+          if (!isCurrent()) return
+          if (result.code !== 0) {
+            const failure = parseCliFailure(result.stderr, t('error-export'))
+            console.warn(failure)
+            showError(cliError(localizedExportError(failure, destination, t)))
+            return
+          }
+        }
+        let exported: unknown
+        try {
+          exported = JSON.parse(result.stdout)
+        } catch (caught) {
+          console.warn(caught, result.stdout)
+          if (isCurrent()) showError(cliError(t('error-export-invalid-response')))
+          return
+        }
+        if (exported && typeof exported === 'object'
+          && (exported as any).ok === false
+          && typeof (exported as any).error === 'string') {
+          const failure = exported as CliFailure
+          console.warn(failure)
+          if (isCurrent()) showError(cliError(localizedExportError(failure, destination, t)))
+          return
+        }
+        if (!exported || typeof exported !== 'object'
+          || (exported as any).ok !== true
+          || typeof (exported as any).path !== 'string'
+          || !(exported as any).path) {
+          console.warn(exported)
+          if (isCurrent()) showError(cliError(t('error-export-invalid-response')))
+          return
+        }
+        if (!isCurrent()) return
+      } catch (caught: any) {
+        console.warn(caught)
+        if (isCurrent()) showError(cliError(t('export-error-generic')))
+      }
+    })
+  }
+
   async function deleteSession(session: IndexedSession): Promise<void> {
     await coordinateMutation(undefined, async isCurrent => {
       const caps = activeCapabilities.value
@@ -1762,11 +2139,12 @@ export function activate(ctx: PluginContext): PluginExports {
     if (!isActiveMount(mount)) return
     const generation = ++mount.displayGeneration
     try {
-      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize] = await Promise.all([
+      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize, savedExportDestination] = await Promise.all([
         ctx.storage.get(STORAGE_KEYS.locale),
         ctx.storage.get(STORAGE_KEYS.fontScale),
         ctx.storage.get(STORAGE_KEYS.themeFollowHost),
         ctx.storage.get(STORAGE_KEYS.pageSize),
+        ctx.storage.get(STORAGE_KEYS.exportDestination),
       ])
       if (!isActiveMount(mount) || generation !== mount.displayGeneration) return
       localeSetting.value = normalizeLocaleSetting(savedLocale)
@@ -1777,6 +2155,9 @@ export function activate(ctx: PluginContext): PluginExports {
       updateCompactMode(rootWidth)
       themeFollowHost.value = typeof savedThemeFollowHost === 'boolean' ? savedThemeFollowHost : true
       pageSize.value = PAGE_SIZES.includes(savedPageSize as any) ? savedPageSize as (typeof PAGE_SIZES)[number] : 50
+      exportDestination.value = typeof savedExportDestination === 'string' && savedExportDestination.trim()
+        ? savedExportDestination.trim()
+        : DEFAULT_EXPORT_DESTINATION
     } catch { /* use defaults */ }
   }
 
@@ -1799,23 +2180,34 @@ export function activate(ctx: PluginContext): PluginExports {
     const requestSeq = ++mount.pickerRequestSeq
     pickerLoading.value = true
     pickerError.value = null
+    let rawOutput: string | undefined
     try {
       const result = await runAgent(['list-dirs', dir], { timeout: 10_000 })
       if (!isActiveMount(mount) || requestSeq !== mount.pickerRequestSeq) return
-      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, 'list-dirs failed').message)
+      rawOutput = result.stdout
+      if (result.code !== 0) {
+        console.warn(parseCliFailure(result.stderr, t('picker-list-error')))
+        pickerEntries.value = []
+        pickerError.value = t('picker-list-error')
+        return
+      }
       const parsed = JSON.parse(result.stdout) as ListDirsResult
       if ('error' in parsed) {
+        console.warn(parsed)
         pickerEntries.value = []
-        pickerError.value = parsed.message
+        pickerError.value = t('picker-list-error')
       } else if (Array.isArray(parsed.dirs)) {
         pickerEntries.value = parsed.dirs
       } else {
-        throw new Error('list-dirs returned invalid JSON')
+        console.warn(parsed)
+        pickerEntries.value = []
+        pickerError.value = t('picker-list-error')
       }
     } catch (caught: any) {
       if (!isActiveMount(mount) || requestSeq !== mount.pickerRequestSeq) return
+      console.warn(caught, rawOutput)
       pickerEntries.value = []
-      pickerError.value = caught?.message || t('picker-list-error')
+      pickerError.value = t('picker-list-error')
     } finally {
       if (isActiveMount(mount) && requestSeq === mount.pickerRequestSeq) pickerLoading.value = false
     }
@@ -1834,12 +2226,17 @@ export function activate(ctx: PluginContext): PluginExports {
     }
     showRootPicker.value = false
     pickerLoading.value = false
+    pickerTarget.value = 'tree-root'
     scheduleMountTimeout(() => pickerTriggerRef.value?.focus(), 0)
   }
 
-  function openRootPicker() {
-    pickerCurrentDir.value = visibleRoot.value
-    pickerManualPath.value = visibleRoot.value
+  function openRootPicker(target: PickerTarget) {
+    if (activeMount) activeMount.pickerValidationSeq++
+    pickerTarget.value = target
+    const targetPath = target === 'export-destination' ? exportDestination.value : visibleRoot.value
+    const startDir = targetPath.startsWith('/') ? normalizePath(targetPath) : visibleRoot.value
+    pickerCurrentDir.value = startDir
+    pickerManualPath.value = startDir
     pickerEntries.value = []
     pickerError.value = null
     showRootPicker.value = true
@@ -1850,8 +2247,12 @@ export function activate(ctx: PluginContext): PluginExports {
   async function validateAndCommitRoot(candidate: string) {
     const mount = activeMount
     if (!isActiveMount(mount)) return
+    const target = pickerTarget.value
     const requestSeq = ++mount.pickerValidationSeq
-    const isCurrent = () => isActiveMount(mount) && showRootPicker.value && requestSeq === mount.pickerValidationSeq
+    const isCurrent = () => isActiveMount(mount)
+      && showRootPicker.value
+      && target === pickerTarget.value
+      && requestSeq === mount.pickerValidationSeq
     const nextRoot = candidate.trim()
     if (!nextRoot.startsWith('/')) {
       if (isCurrent()) pickerError.value = t('tree-root-absolute-error')
@@ -1860,8 +2261,18 @@ export function activate(ctx: PluginContext): PluginExports {
     try {
       const result = await runAgent(['check-dir', nextRoot], { timeout: 10_000 })
       if (!isCurrent()) return
-      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, 'check-dir failed').message)
+      if (result.code !== 0) {
+        const failure = parseCliFailure(result.stderr, t('picker-check-error'))
+        console.warn(failure)
+        pickerError.value = localizedExportError(failure, nextRoot, t)
+        return
+      }
       const checked = JSON.parse(result.stdout) as { exists?: boolean; dir?: boolean }
+      if (typeof checked?.exists !== 'boolean' || typeof checked?.dir !== 'boolean') {
+        console.warn(checked)
+        pickerError.value = t('picker-check-error')
+        return
+      }
       if (!checked.exists) {
         pickerError.value = t('picker-path-missing', { path: nextRoot })
         return
@@ -1871,12 +2282,14 @@ export function activate(ctx: PluginContext): PluginExports {
         return
       }
     } catch (caught: any) {
-      if (isCurrent()) pickerError.value = caught?.message || t('picker-check-error')
+      console.warn(caught)
+      if (isCurrent()) pickerError.value = t('picker-check-error')
       return
     }
     if (!isCurrent()) return
     clearError()
-    setVisibleRoot(nextRoot)
+    if (target === 'export-destination') setExportDestination(nextRoot)
+    else setVisibleRoot(nextRoot)
     closeRootPicker()
   }
 
@@ -2123,6 +2536,7 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function expectedBulkSkips(action: BulkAction, items: IndexedSession[], now = Date.now()): number {
+    if (action === 'export') return 0
     return items.filter(session => session.live || (action === 'archive' && now - timestampValue(session.lastActiveAt) < 60_000)).length
   }
 
@@ -2138,6 +2552,25 @@ export function activate(ctx: PluginContext): PluginExports {
       if (!isCurrent() || !accepted) return
       const items = selectedItems()
       if (!items.length) return
+      const bulkExportDestination = exportDestination.value.trim() || DEFAULT_EXPORT_DESTINATION
+      let allowOutsideHome = false
+      let outsideHome = false
+      if (action === 'export') {
+        try {
+          outsideHome = await isExportDestinationOutsideHome(
+            bulkExportDestination,
+            (args, timeout = 10_000) => runAgent(args, { timeout }),
+          )
+        } catch (caught) {
+          console.warn(caught)
+          if (isCurrent()) showError(cliError(t('error-export-destination-classification')))
+          return
+        }
+      }
+      if (outsideHome) {
+        allowOutsideHome = await ctx.ui.confirm(t('export-outside-home-confirm', { dest: bulkExportDestination }))
+        if (!isCurrent() || !allowOutsideHome) return
+      }
       bulkRunning.value = true
       bulkCancelRequested.value = false
       bulkResult.value = null
@@ -2147,7 +2580,15 @@ export function activate(ctx: PluginContext): PluginExports {
         const outcome = await runBulkSerial({
           action,
           items,
-          run: args => runAgent(args, { timeout: 30_000 }),
+          exportDestination: bulkExportDestination,
+          allowOutsideHome,
+          exportFailureMessage: t('error-export'),
+          invalidExportMessage: t('error-export-invalid-response'),
+          earlyAbortMessage: t('bulk-export-early-abort'),
+          unknownProjectName: t('export-unknown-project'),
+          exportAgent: activeAgent.value,
+          localizeExportError: (failure, destination) => localizedExportError(failure, destination, t),
+          run: (args, timeout = 30_000) => runAgent(args, { timeout }),
           isCancelled: () => !isCurrent() || bulkCancelRequested.value,
           onProgress: (completed, total, session) => {
             if (isCurrent()) bulkProgress.value = { completed, total, title: resolveSessionTitle(session) || t('untitled-session') }
@@ -2155,6 +2596,10 @@ export function activate(ctx: PluginContext): PluginExports {
         })
         if (!isCurrent()) return
         bulkResult.value = outcome
+        if (action === 'export') {
+          bulkProgress.value = { completed: outcome.results.length, total: items.length, title: '' }
+          return
+        }
         const completed = outcome.results.filter(result => result.status === 'done')
         for (const result of completed) {
           if (result.retaggedKey) retagSession(result.session, action === 'archive' ? 'archive' : 'active')
@@ -2295,7 +2740,7 @@ export function activate(ctx: PluginContext): PluginExports {
             'aria-label': t('change-tree-root'),
             disabled: loading.value || bulkRunning.value,
             ref: (element: HTMLElement | null) => { pickerTriggerRef.value = element },
-            onClick: openRootPicker,
+            onClick: () => openRootPicker('tree-root'),
           }, [IconPencil(15)]),
         ]),
       ]),
@@ -2315,8 +2760,9 @@ export function activate(ctx: PluginContext): PluginExports {
     const actions: Array<{
       label: string
       icon: typeof IconTerminal
-      action: 'resume' | 'archive' | 'restore' | 'delete'
+      action: 'resume' | 'archive' | 'restore' | 'delete' | 'export'
     }> = []
+    actions.push({ label: t('export-session'), icon: IconDownload, action: 'export' })
     if (session.partition === 'active') {
       actions.push({ label: t('resume-session'), icon: IconTerminal, action: 'resume' })
       if (caps.archive) actions.push({ label: t('archive-session'), icon: IconArchive, action: 'archive' })
@@ -2336,6 +2782,7 @@ export function activate(ctx: PluginContext): PluginExports {
         event.stopPropagation()
         if (bulkRunning.value) return
         if (action === 'resume') void resumeSession(session)
+        else if (action === 'export') void exportSession(session)
         else if (action === 'archive') void archiveSession(session)
         else if (action === 'restore') void restoreSession(session)
         else void deleteSession(session)
@@ -2351,17 +2798,21 @@ export function activate(ctx: PluginContext): PluginExports {
     const titles = resolveSessionTitles(session)
     const title = titles.primary || untitled
     const health = session.health === 'ok' ? '' : t(`health-${session.health}`)
+    const activateCard = () => {
+      if (bulkRunning.value) return
+      if (selectMode.value) toggleSelected(session, false, pageKeys)
+      else selectSession(session)
+    }
     return h('article', {
       class: ['ccm-browser-session-card', selected ? 'ccm-browser-session-card-selected' : ''],
       key: sessionKey(session),
       role: 'button',
       tabindex: 0,
-      onClick: () => { if (!bulkRunning.value) selectSession(session) },
+      onClick: activateCard,
       onKeydown: (event: KeyboardEvent) => {
-        if (bulkRunning.value) return
         if (event.key !== 'Enter' && event.key !== ' ') return
         event.preventDefault()
-        selectSession(session)
+        activateCard()
       },
     }, [
       selectMode.value ? h('input', {
@@ -2463,6 +2914,8 @@ export function activate(ctx: PluginContext): PluginExports {
 
   function renderRootPicker(): any {
     if (!showRootPicker.value) return null
+    const selectingExportDestination = pickerTarget.value === 'export-destination'
+    const pickerTitle = t(selectingExportDestination ? 'picker-export-title' : 'picker-title')
     const dir = pickerCurrentDir.value
     const segments = dir.split('/').filter(Boolean)
     const breadcrumbs: any[] = [
@@ -2506,9 +2959,9 @@ export function activate(ctx: PluginContext): PluginExports {
       },
     }, [
       h('div', { class: 'ccm-picker-backdrop', onClick: closeRootPicker }),
-      h('section', { class: 'ccm-picker-panel', role: 'dialog', 'aria-modal': 'true', 'aria-label': t('picker-title') }, [
+      h('section', { class: 'ccm-picker-panel', role: 'dialog', 'aria-modal': 'true', 'aria-label': pickerTitle }, [
         h('div', { class: 'ccm-picker-header' }, [
-          h('span', { class: 'ccm-picker-title' }, t('picker-title')),
+          h('span', { class: 'ccm-picker-title' }, pickerTitle),
           h('button', {
             class: 'ccm-icon-btn ccm-icon-btn-sm',
             title: t('picker-close'),
@@ -2522,7 +2975,7 @@ export function activate(ctx: PluginContext): PluginExports {
             ref: (element: HTMLInputElement | null) => { pickerInputRef.value = element },
             value: pickerManualPath.value,
             placeholder: t('absolute-path-placeholder'),
-            'aria-label': t('picker-manual-path'),
+            'aria-label': t(selectingExportDestination ? 'picker-export-manual-path' : 'picker-manual-path'),
             onInput: (event: Event) => { pickerManualPath.value = (event.target as HTMLInputElement).value },
             onKeydown: (event: KeyboardEvent) => {
               if (event.key === 'Enter') {
@@ -2535,7 +2988,7 @@ export function activate(ctx: PluginContext): PluginExports {
             class: 'ccm-picker-action-btn',
             type: 'button',
             onClick: () => { void validateAndCommitRoot(pickerManualPath.value) },
-          }, [IconCheck(14), h('span', {}, t('picker-use-manual-path'))]),
+          }, [IconCheck(14), h('span', {}, t(selectingExportDestination ? 'picker-export-use-manual-path' : 'picker-use-manual-path'))]),
         ]),
         h('div', { class: 'ccm-picker-current' }, [IconFolder(14), h('span', {}, t('picker-current', { path: dir }))]),
         h('div', { class: 'ccm-picker-actions' }, [
@@ -2543,13 +2996,13 @@ export function activate(ctx: PluginContext): PluginExports {
             class: 'ccm-picker-action-btn',
             type: 'button',
             onClick: () => { void validateAndCommitRoot(dir) },
-          }, [IconCheck(14), h('span', {}, t('picker-select-current', { name: dir.split('/').pop() || '/' }))]),
+          }, [IconCheck(14), h('span', {}, t(selectingExportDestination ? 'picker-export-select-current' : 'picker-select-current', { name: dir.split('/').pop() || '/' }))]),
         ]),
         h('div', { class: 'ccm-picker-breadcrumb' }, breadcrumbs),
         h('div', { class: 'ccm-picker-list' }, pickerLoading.value
           ? h('div', { class: 'ccm-picker-empty' }, [h('span', { class: 'ccm-browser-spinner' }), h('span', {}, t('picker-loading'))])
           : pickerError.value
-            ? h('div', { class: 'ccm-picker-empty', role: 'alert' }, t('picker-error', { msg: pickerError.value }))
+            ? h('div', { class: 'ccm-picker-empty', role: 'alert' }, pickerError.value)
             : pickerEntries.value.length
               ? pickerEntries.value.map(entry => h('div', {
                   class: 'ccm-picker-item',
@@ -2625,6 +3078,24 @@ export function activate(ctx: PluginContext): PluginExports {
           checked: themeFollowHost.value,
           onChange: (event: Event) => setThemeFollowHost((event.target as HTMLInputElement).checked),
         }),
+      ]),
+      h('div', { class: 'ccm-browser-settings-row' }, [
+        h('span', { class: 'ccm-browser-settings-label' }, t('settings-export-destination')),
+        h('div', { class: 'ccm-browser-settings-path-control' }, [
+          h('input', {
+            type: 'text',
+            value: exportDestination.value,
+            'aria-label': t('settings-export-destination'),
+            onInput: (event: Event) => setExportDestination((event.target as HTMLInputElement).value),
+          }),
+          h('button', {
+            class: 'ccm-icon-btn',
+            type: 'button',
+            title: t('settings-export-destination-browse'),
+            'aria-label': t('settings-export-destination-browse'),
+            onClick: () => openRootPicker('export-destination'),
+          }, [IconFolder(14)]),
+        ]),
       ]),
       activeCapabilities.value.originFilter ? h('label', {
         class: 'ccm-browser-settings-row ccm-browser-settings-toggle',
@@ -3019,6 +3490,7 @@ export function activate(ctx: PluginContext): PluginExports {
         }, [IconX(13)]) : null,
       ]) : null,
       !overlay && selection.value.selected.size ? h('div', { class: 'ccm-browser-filter-row ccm-browser-bulk-toolbar', role: 'toolbar', 'aria-label': t('bulk-actions') }, [
+        h('button', { class: 'ccm-icon-btn ccm-browser-action-control', disabled: bulkRunning.value, onClick: () => { void executeBulk('export') } }, [IconDownload(13), t('bulk-export', { n: selectedItems().length })]),
         caps.archive && partition === 'active'
           ? h('button', { class: 'ccm-icon-btn ccm-browser-action-control', disabled: bulkRunning.value, onClick: () => { void executeBulk('archive') } }, [IconArchive(13), t('bulk-archive', { n: selectedItems().length })])
           : null,
@@ -3045,10 +3517,11 @@ export function activate(ctx: PluginContext): PluginExports {
           }, [IconX(13)]),
         ]),
         bulkRefreshFailed.value ? h('div', {}, t('bulk-refresh-stale')) : null,
-        ...bulkResult.value.results.filter(result => result.status !== 'done').map(result => h('div', { key: result.key }, [
-          h('strong', {}, resolveSessionTitle(result.session) || t('untitled-session')),
-          h('code', {}, result.session.id),
-          h('span', {}, result.reason || ''),
+        bulkResult.value.earlyAborted ? h('div', {}, t('bulk-export-early-abort')) : null,
+        ...bulkResult.value.results.filter(result => result.status !== 'done').map(result => h('div', { class: 'ccm-browser-bulk-result-item', key: result.key }, [
+          h('strong', { class: 'ccm-browser-bulk-result-title' }, resolveSessionTitle(result.session) || t('untitled-session')),
+          h('code', { class: 'ccm-browser-bulk-result-id' }, result.session.id),
+          h('span', { class: 'ccm-browser-bulk-result-reason' }, result.reason || t('bulk-result-unknown-reason')),
         ])),
       ]) : null,
       !overlay ? h('footer', { class: 'ccm-browser-filter-row ccm-browser-pager' }, [
