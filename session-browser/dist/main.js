@@ -13,6 +13,8 @@ var ICON_PATHS = {
   "chevron-right": [["path", { d: "m9 18 6-6-6-6" }]],
   "chevron-down": [["path", { d: "m6 9 6 6 6-6" }]],
   "arrow-left": [["path", { d: "m12 19-7-7 7-7" }], ["path", { d: "M19 12H5" }]],
+  "arrow-up": [["path", { d: "m18 15-6-6-6 6" }]],
+  "arrow-down": [["path", { d: "m6 9 6 6 6-6" }]],
   send: [
     ["path", { d: "M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" }],
     ["path", { d: "m21.854 2.147-10.94 10.939" }]
@@ -34,6 +36,12 @@ var ICON_PATHS = {
   check: [["path", { d: "M20 6 9 17l-5-5" }]],
   folder: [
     ["path", { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }]
+  ],
+  pin: [
+    ["path", { d: "M12 17v5" }],
+    ["path", { d: "M5 17h14" }],
+    ["path", { d: "M6 17 7 7h10l1 10" }],
+    ["path", { d: "M8 7V2h8v5" }]
   ],
   "folder-down": [
     ["path", { d: "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z" }],
@@ -154,6 +162,12 @@ function IconChevronDown(size) {
 function IconArrowLeft(size) {
   return renderIcon(ICON_PATHS["arrow-left"], size);
 }
+function IconArrowUp(size) {
+  return renderIcon(ICON_PATHS["arrow-up"], size);
+}
+function IconArrowDown(size) {
+  return renderIcon(ICON_PATHS["arrow-down"], size);
+}
 function IconCopy(size) {
   return renderIcon(ICON_PATHS.copy, size);
 }
@@ -162,6 +176,9 @@ function IconCheck(size) {
 }
 function IconFolder(size) {
   return renderIcon(ICON_PATHS.folder, size);
+}
+function IconPin(size) {
+  return renderIcon(ICON_PATHS.pin, size);
 }
 function IconFolderDown(size) {
   return renderIcon(ICON_PATHS["folder-down"], size);
@@ -380,6 +397,31 @@ var dictionaries = {
     "picker-select-current": 'Use "{name}" as the tree root',
     "picker-title": "Select tree root directory",
     "picker-use-manual-path": "Use the entered path as the tree root",
+    "pin-collapse-persist-warning": "Could not verify the saved pinned-folders collapse setting.",
+    "pin-collapse-section": "Collapse pinned folders",
+    "pin-current-folder-add": "Pin selected folder",
+    "pin-current-folder-remove": "Unpin selected folder",
+    "pin-edit-mode": "Edit pinned folders",
+    "pin-empty-onboarding": "Pin a selected folder to keep it close at hand.",
+    "pin-expand-section": "Expand pinned folders",
+    "pin-folder-missing": "Folder no longer exists",
+    "pin-invalid-response": "Pinned folders returned an invalid response.",
+    "pin-last-activity": "Last active {time}",
+    "pin-list-changed": "Pinned folders changed in another window.",
+    "pin-list-load-failed": "Could not load pinned folders.",
+    "pin-list-loading": "Loading pinned folders\u2026",
+    "pin-list-unreadable": "Pinned folders are unreadable. The previous list was preserved at {path}.",
+    "pin-move-down": "Move {name} down",
+    "pin-move-up": "Move {name} up",
+    "pin-mutation-failed": "Could not update pinned folders.",
+    "pin-no-sessions": "This pinned folder has no sessions for this view.",
+    "pin-promote-selected": "Promote {n}",
+    "pin-remove-selected": "Remove {n}",
+    "pin-reset-list": "Reset pinned folders",
+    "pin-select-folder": "Select {name}",
+    "pin-session-count-one": "{n} session",
+    "pin-session-count-other": "{n} sessions",
+    "pinned-folders": "Pinned folders",
     "picker-export-manual-path": "Manual absolute export destination path",
     "picker-export-select-current": 'Use "{name}" as the export destination',
     "picker-export-title": "Select export destination",
@@ -629,6 +671,31 @@ var dictionaries = {
     "picker-select-current": '\u9009\u62E9"{name}"\u4F5C\u4E3A\u5DE5\u4F5C\u533A\u6811\u8D77\u59CB\u76EE\u5F55',
     "picker-title": "\u9009\u62E9\u76EE\u5F55\u6811\u6839\u76EE\u5F55",
     "picker-use-manual-path": "\u9009\u62E9\u8F93\u5165\u7684\u8DEF\u5F84\u4F5C\u4E3A\u5DE5\u4F5C\u533A\u6811\u8D77\u59CB\u76EE\u5F55",
+    "pin-collapse-persist-warning": "\u65E0\u6CD5\u9A8C\u8BC1\u5DF2\u4FDD\u5B58\u7684\u56FA\u5B9A\u76EE\u5F55\u6298\u53E0\u8BBE\u7F6E\u3002",
+    "pin-collapse-section": "\u6298\u53E0\u56FA\u5B9A\u76EE\u5F55",
+    "pin-current-folder-add": "\u56FA\u5B9A\u6240\u9009\u76EE\u5F55",
+    "pin-current-folder-remove": "\u53D6\u6D88\u56FA\u5B9A\u6240\u9009\u76EE\u5F55",
+    "pin-edit-mode": "\u7F16\u8F91\u56FA\u5B9A\u76EE\u5F55",
+    "pin-empty-onboarding": "\u56FA\u5B9A\u6240\u9009\u76EE\u5F55\uFF0C\u4EE5\u4FBF\u968F\u65F6\u8BBF\u95EE\u3002",
+    "pin-expand-section": "\u5C55\u5F00\u56FA\u5B9A\u76EE\u5F55",
+    "pin-folder-missing": "\u76EE\u5F55\u5DF2\u4E0D\u5B58\u5728",
+    "pin-invalid-response": "\u56FA\u5B9A\u76EE\u5F55\u8FD4\u56DE\u4E86\u65E0\u6548\u54CD\u5E94\u3002",
+    "pin-last-activity": "\u6700\u540E\u6D3B\u52A8 {time}",
+    "pin-list-changed": "\u56FA\u5B9A\u76EE\u5F55\u5DF2\u5728\u53E6\u4E00\u4E2A\u7A97\u53E3\u4E2D\u66F4\u6539\u3002",
+    "pin-list-load-failed": "\u65E0\u6CD5\u52A0\u8F7D\u56FA\u5B9A\u76EE\u5F55\u3002",
+    "pin-list-loading": "\u6B63\u5728\u52A0\u8F7D\u56FA\u5B9A\u76EE\u5F55\u2026",
+    "pin-list-unreadable": "\u65E0\u6CD5\u8BFB\u53D6\u56FA\u5B9A\u76EE\u5F55\u3002\u5148\u524D\u7684\u5217\u8868\u5DF2\u4FDD\u5B58\u5728 {path}\u3002",
+    "pin-move-down": "\u4E0B\u79FB {name}",
+    "pin-move-up": "\u4E0A\u79FB {name}",
+    "pin-mutation-failed": "\u65E0\u6CD5\u66F4\u65B0\u56FA\u5B9A\u76EE\u5F55\u3002",
+    "pin-no-sessions": "\u6B64\u56FA\u5B9A\u76EE\u5F55\u5728\u5F53\u524D\u89C6\u56FE\u4E2D\u6CA1\u6709\u4F1A\u8BDD\u3002",
+    "pin-promote-selected": "\u7F6E\u9876 {n} \u4E2A",
+    "pin-remove-selected": "\u79FB\u9664 {n} \u4E2A",
+    "pin-reset-list": "\u91CD\u7F6E\u56FA\u5B9A\u76EE\u5F55",
+    "pin-select-folder": "\u9009\u62E9 {name}",
+    "pin-session-count-one": "{n} \u4E2A\u4F1A\u8BDD",
+    "pin-session-count-other": "{n} \u4E2A\u4F1A\u8BDD",
+    "pinned-folders": "\u56FA\u5B9A\u76EE\u5F55",
     "picker-export-manual-path": "\u624B\u52A8\u8F93\u5165\u7EDD\u5BF9\u5BFC\u51FA\u4F4D\u7F6E\u8DEF\u5F84",
     "picker-export-select-current": "\u9009\u62E9\u201C{name}\u201D\u4F5C\u4E3A\u5BFC\u51FA\u4F4D\u7F6E",
     "picker-export-title": "\u9009\u62E9\u5BFC\u51FA\u4F4D\u7F6E",
@@ -749,7 +816,8 @@ var STORAGE_KEYS = {
   hideScriptedSessions: "hideScriptedSessions",
   exportDestination: "exportDestination",
   sessionListSort: "sessionListSort",
-  pageSize: "pageSize"
+  pageSize: "pageSize",
+  pinsCollapsed: "pinsCollapsed"
 };
 var DEFAULT_PANE_WIDTHS = { left: 280, middle: 360 };
 var DEFAULT_EXPORT_DESTINATION = "~/Downloads";
@@ -872,6 +940,9 @@ function normalizePath(value) {
     else parts.push(part);
   }
   return parts.length ? `/${parts.join("/")}` : "/";
+}
+function normalizePinMatchKey(value) {
+  return normalizePath(value.normalize("NFC").toLowerCase());
 }
 function normalizeStoredTreeRoot(value) {
   return typeof value === "string" ? normalizePath(value) : null;
@@ -1481,6 +1552,19 @@ function activate(ctx) {
   const bulkProgress = ctx.ref({ completed: 0, total: 0, title: "" });
   const bulkResult = ctx.ref(null);
   const bulkRefreshFailed = ctx.ref(false);
+  const pinsSelectMode = ctx.ref(false);
+  const pinsSelection = ctx.ref({
+    selected: /* @__PURE__ */ new Set(),
+    anchor: null,
+    pins: [],
+    loading: true,
+    error: null,
+    corruptSidecar: null,
+    collapsed: false,
+    conflictNote: false,
+    activePath: null
+  });
+  const pinsBulkRunning = ctx.ref(false);
   let resizeStartX = 0;
   let resizeStartWidth = 0;
   let resizeActive = false;
@@ -1491,6 +1575,8 @@ function activate(ctx) {
   let mutationInFlight = false;
   let hasMounted = false;
   let warnedPersistFailure = false;
+  const pinMutationQueue = [];
+  let pinMutationInFlight = false;
   function runAgent(args, opts) {
     if (AGENT_AGNOSTIC.has(args[0])) return ctx.exec.run(args, opts);
     return ctx.exec.run([...args, "--agent", activeAgent.value], opts);
@@ -1529,6 +1615,195 @@ function activate(ctx) {
     if (!activeCapabilities.value.originFilter || !hideScriptedSessions.value) return true;
     return session.origin !== "exec" && session.origin !== "subagent";
   }
+  function updatePinsState(patch) {
+    pinsSelection.value = { ...pinsSelection.value, ...patch };
+  }
+  function reducePinsSelection(action) {
+    pinsSelection.value = {
+      ...pinsSelection.value,
+      ...selectionReducer(pinsSelection.value, action)
+    };
+  }
+  function pinMatchKeys(pin) {
+    return new Set(pin.matchKeys?.length ? pin.matchKeys : [normalizePinMatchKey(pin.path)]);
+  }
+  function currentFolderPin() {
+    const selectedKey = normalizePinMatchKey(committedSelection.value.path);
+    return pinsSelection.value.pins.find((pin) => pinMatchKeys(pin).has(selectedKey));
+  }
+  function parsePinsResponse(stdout) {
+    const parsed = JSON.parse(stdout);
+    if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.pins)) {
+      throw new Error(t("pin-invalid-response"));
+    }
+    const pins = parsed.pins.map((pin) => {
+      const validMatchKeys = pin?.matchKeys === void 0 || Array.isArray(pin.matchKeys) && pin.matchKeys.every((key) => typeof key === "string");
+      if (!pin || typeof pin.path !== "string" || typeof pin.addedAt !== "number" || typeof pin.exists !== "boolean" || !validMatchKeys) {
+        throw new Error(t("pin-invalid-response"));
+      }
+      return {
+        path: pin.path,
+        addedAt: pin.addedAt,
+        exists: pin.exists,
+        ...pin.matchKeys ? { matchKeys: [...pin.matchKeys] } : {}
+      };
+    });
+    if (parsed.corrupt === true) {
+      if (typeof parsed.sidecar !== "string" || !parsed.sidecar) throw new Error(t("pin-invalid-response"));
+      return { pins, corruptSidecar: parsed.sidecar };
+    }
+    return { pins, corruptSidecar: null };
+  }
+  function pinPaths() {
+    return pinsSelection.value.pins.map((pin) => pin.path);
+  }
+  function samePinOrder(left, right) {
+    return left.length === right.length && left.every((pinPath, index) => pinPath === right[index]);
+  }
+  function showPinConflict(mount) {
+    updatePinsState({ conflictNote: true });
+    if (mount.pinsNoteTimer) clearTimeout(mount.pinsNoteTimer);
+    mount.pinsNoteTimer = scheduleMountTimeout(() => {
+      if (isActiveMount(mount)) updatePinsState({ conflictNote: false });
+      mount.pinsNoteTimer = null;
+    }, 4e3);
+  }
+  async function loadPins(requestGeneration, expectedPaths) {
+    const mount = activeMount;
+    if (!isActiveMount(mount)) return false;
+    const generation = requestGeneration ?? ++mount.pinsGeneration;
+    const requestAgent = activeAgent.value;
+    const isCurrent = () => isActiveMount(mount) && generation === mount.pinsGeneration && requestAgent === activeAgent.value;
+    if (isCurrent()) updatePinsState({ loading: true, error: null });
+    try {
+      const result = await ctx.exec.run(["list-pins", requestAgent], { timeout: 1e4 });
+      if (!isCurrent()) return false;
+      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t("pin-list-load-failed")).message);
+      const loaded = parsePinsResponse(result.stdout);
+      updatePinsState({
+        pins: loaded.pins,
+        loading: false,
+        error: null,
+        corruptSidecar: loaded.corruptSidecar
+      });
+      reducePinsSelection({ type: "intersect", keys: loaded.pins.map((pin) => pin.path) });
+      if (expectedPaths && !samePinOrder(expectedPaths, loaded.pins.map((pin) => pin.path))) showPinConflict(mount);
+      return true;
+    } catch (caught) {
+      console.warn("[session-browser]", caught);
+      if (isCurrent()) updatePinsState({ loading: false, error: t("pin-list-load-failed") });
+      return false;
+    } finally {
+      if (isCurrent() && pinsSelection.value.loading) updatePinsState({ loading: false });
+    }
+  }
+  function expectedMove(paths, pinPath, direction) {
+    const next = [...paths];
+    const index = next.indexOf(pinPath);
+    if (index < 0) return next;
+    const target = direction === "up" ? Math.max(0, index - 1) : Math.min(next.length - 1, index + 1);
+    if (target !== index) {
+      const [moved] = next.splice(index, 1);
+      next.splice(target, 0, moved);
+    }
+    return next;
+  }
+  function comparePinPaths(left, right) {
+    const leftBase = pathName(left).toLowerCase();
+    const rightBase = pathName(right).toLowerCase();
+    if (leftBase < rightBase) return -1;
+    if (leftBase > rightBase) return 1;
+    return left < right ? -1 : left > right ? 1 : 0;
+  }
+  function expectedPromote(paths, selectedPaths) {
+    const selected = new Set(selectedPaths);
+    const promoted = paths.filter((pinPath) => selected.has(pinPath)).sort(comparePinPaths);
+    return [...promoted, ...paths.filter((pinPath) => !selected.has(pinPath))];
+  }
+  async function executePinMutation(task) {
+    const { mount, agent, generation, intent } = task;
+    const isCurrent = () => isActiveMount(mount) && generation === mount.pinsGeneration && agent === activeAgent.value;
+    if (!isCurrent()) return;
+    const before = pinPaths();
+    let args;
+    if (intent.type === "add") args = ["add-pin", agent, intent.path];
+    else if (intent.type === "remove") args = ["remove-pin", agent, ...intent.paths];
+    else if (intent.type === "move") args = ["move-pin", agent, intent.path, intent.direction];
+    else if (intent.type === "promote") args = ["promote-pins", agent, ...intent.paths];
+    else args = ["remove-pin", agent, "--reset-corrupt"];
+    try {
+      const result = await ctx.exec.run(args, { timeout: 1e4 });
+      if (!isCurrent()) return;
+      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t("pin-mutation-failed")).message);
+      const parsed = JSON.parse(result.stdout);
+      let expected = before;
+      let expectedAfterReload = before;
+      let shouldReload = true;
+      if (intent.type === "add") {
+        if (typeof parsed?.canonicalPath !== "string" || parsed.outcome !== "applied" && parsed.outcome !== "duplicate") {
+          throw new Error(t("pin-invalid-response"));
+        }
+        expected = parsed.outcome === "applied" ? [parsed.canonicalPath, ...before.filter((pinPath) => pinPath !== parsed.canonicalPath)] : before;
+      } else if (intent.type === "move") {
+        if (parsed?.outcome !== "applied" && parsed?.outcome !== "absent") throw new Error(t("pin-invalid-response"));
+        expected = parsed.outcome === "applied" ? expectedMove(before, intent.path, intent.direction) : before;
+      } else {
+        if (!Array.isArray(parsed?.results) || typeof parsed.changed !== "boolean") throw new Error(t("pin-invalid-response"));
+        shouldReload = intent.type === "reset-corrupt" || parsed.changed;
+        if (intent.type === "remove") {
+          const removed = new Set(parsed.results.filter((item) => item?.outcome === "applied" && typeof item.path === "string").map((item) => item.path));
+          expected = before.filter((pinPath) => !removed.has(pinPath));
+        } else if (intent.type === "promote") {
+          expected = expectedPromote(before, intent.paths);
+        } else {
+          expected = [];
+          if (!parsed.changed) expectedAfterReload = void 0;
+        }
+      }
+      if (expectedAfterReload !== void 0) expectedAfterReload = expected;
+      if (!isCurrent()) return;
+      if (shouldReload) await loadPins(generation, expectedAfterReload);
+    } catch (caught) {
+      console.warn("[session-browser]", caught);
+      if (isCurrent()) showError(t("pin-mutation-failed"));
+    }
+  }
+  async function drainPinMutationQueue() {
+    if (pinMutationInFlight) return;
+    pinMutationInFlight = true;
+    try {
+      while (pinMutationQueue.length > 0) {
+        const task = pinMutationQueue.shift();
+        const current = isActiveMount(task.mount) && task.generation === task.mount.pinsGeneration && task.agent === activeAgent.value;
+        if (!current) continue;
+        pinsBulkRunning.value = true;
+        await executePinMutation(task);
+        if (current && task.generation === task.mount.pinsGeneration && task.agent === activeAgent.value) {
+          pinsBulkRunning.value = false;
+        }
+      }
+    } finally {
+      pinMutationInFlight = false;
+      const mount = activeMount;
+      if (isActiveMount(mount) && pinMutationQueue.length === 0) pinsBulkRunning.value = false;
+    }
+  }
+  function enqueuePinMutation(intent) {
+    const mount = activeMount;
+    if (!isActiveMount(mount)) return;
+    pinMutationQueue.push({ mount, agent: activeAgent.value, generation: mount.pinsGeneration, intent });
+    pinsBulkRunning.value = true;
+    void drainPinMutationQueue();
+  }
+  async function persistPinsCollapsed(collapsed) {
+    try {
+      await ctx.storage.set(STORAGE_KEYS.pinsCollapsed, collapsed);
+      const verified = await ctx.storage.get(STORAGE_KEYS.pinsCollapsed);
+      if (verified !== collapsed) console.warn("[session-browser]", t("pin-collapse-persist-warning"));
+    } catch (caught) {
+      console.warn("[session-browser]", t("pin-collapse-persist-warning"), caught);
+    }
+  }
   function createMountContext() {
     return {
       active: false,
@@ -1539,6 +1814,7 @@ function activate(ctx) {
       paneGeneration: 0,
       sortGeneration: 0,
       treeGeneration: 0,
+      pinsGeneration: 0,
       disposers: /* @__PURE__ */ new Set(),
       highlightTimer: null,
       copiedTimer: null,
@@ -1548,7 +1824,8 @@ function activate(ctx) {
       pickerValidationSeq: 0,
       allTranscriptMessages: [],
       rootResizeObserver: null,
-      localeObserver: null
+      localeObserver: null,
+      pinsNoteTimer: null
     };
   }
   function isActiveMount(mount) {
@@ -1756,8 +2033,11 @@ function activate(ctx) {
       activeMount.indexGeneration++;
       activeMount.searchGeneration++;
       activeMount.treeGeneration++;
+      activeMount.pinsGeneration++;
       activeMount.pickerRequestSeq++;
       activeMount.pickerValidationSeq++;
+      if (activeMount.pinsNoteTimer) clearTimeout(activeMount.pinsNoteTimer);
+      activeMount.pinsNoteTimer = null;
     }
     clearSearchOverlay(true);
     resetTranscript();
@@ -1767,6 +2047,19 @@ function activate(ctx) {
     page.value = 1;
     selection.value = selectionReducer(selection.value, { type: "clear-partition" });
     selectMode.value = false;
+    pinsSelectMode.value = false;
+    pinsBulkRunning.value = false;
+    pinsSelection.value = {
+      ...pinsSelection.value,
+      selected: /* @__PURE__ */ new Set(),
+      anchor: null,
+      pins: [],
+      loading: true,
+      error: null,
+      corruptSidecar: null,
+      conflictNote: false,
+      activePath: null
+    };
     timeRange.value = "all";
     branchFilter.value = "";
     branchPickerOpen.value = false;
@@ -1788,7 +2081,7 @@ function activate(ctx) {
     activeAgent.value = nextAgent;
     persist(STORAGE_KEYS.activeAgent, nextAgent);
     resetForAgentSwitch();
-    const loaded = await loadIndex();
+    const [loaded] = await Promise.all([loadIndex(), loadPins()]);
     if (!loaded) return;
     if (sessions.value.length === 0) {
       ctx.ui.notify(t("agent-empty-notice", { agent: agentLabel(descriptor) }), "warn", t("agent-empty-title"));
@@ -1840,7 +2133,7 @@ function activate(ctx) {
         if (switchedAgent) resetForAgentSwitch();
         activeAgent.value = candidate.id;
         const preserveCandidateState = preserveState && !switchedAgent && candidate.id === previousAgent && candidate.id === requestedId;
-        const loaded = await loadIndex(preserveCandidateState);
+        const [loaded] = await Promise.all([loadIndex(preserveCandidateState), loadPins()]);
         if (!isActiveMount(mount)) return;
         if (candidate.id === requestedId) requestedLoaded = loaded;
         if (loaded && sessions.value.length > 0) {
@@ -1853,7 +2146,7 @@ function activate(ctx) {
         if (activeAgent.value !== emptyAgent.id) {
           resetForAgentSwitch();
           activeAgent.value = emptyAgent.id;
-          await loadIndex();
+          await Promise.all([loadIndex(), loadPins()]);
           if (!isActiveMount(mount)) return;
         } else if (requestedLoaded && sessions.value.length === 0) {
           clearSearchOverlay(true);
@@ -2411,12 +2704,13 @@ function activate(ctx) {
     if (!isActiveMount(mount)) return;
     const generation = ++mount.displayGeneration;
     try {
-      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize, savedExportDestination] = await Promise.all([
+      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize, savedExportDestination, savedPinsCollapsed] = await Promise.all([
         ctx.storage.get(STORAGE_KEYS.locale),
         ctx.storage.get(STORAGE_KEYS.fontScale),
         ctx.storage.get(STORAGE_KEYS.themeFollowHost),
         ctx.storage.get(STORAGE_KEYS.pageSize),
-        ctx.storage.get(STORAGE_KEYS.exportDestination)
+        ctx.storage.get(STORAGE_KEYS.exportDestination),
+        ctx.storage.get(STORAGE_KEYS.pinsCollapsed)
       ]);
       if (!isActiveMount(mount) || generation !== mount.displayGeneration) return;
       localeSetting.value = normalizeLocaleSetting(savedLocale);
@@ -2426,6 +2720,7 @@ function activate(ctx) {
       themeFollowHost.value = typeof savedThemeFollowHost === "boolean" ? savedThemeFollowHost : true;
       pageSize.value = PAGE_SIZES.includes(savedPageSize) ? savedPageSize : 50;
       exportDestination.value = typeof savedExportDestination === "string" && savedExportDestination.trim() ? savedExportDestination.trim() : DEFAULT_EXPORT_DESTINATION;
+      updatePinsState({ collapsed: savedPinsCollapsed === true });
     } catch {
     }
   }
@@ -2433,6 +2728,7 @@ function activate(ctx) {
     if (bulkRunning.value) return;
     if (activeMount) activeMount.treeGeneration++;
     visibleRoot.value = normalizePath(nextRoot);
+    updatePinsState({ activePath: null });
     clearSearchOverlay();
     committedSelection.value = { path: visibleRoot.value, mode: committedSelection.value.mode, sessionId: null };
     applyFilterChange();
@@ -2563,6 +2859,7 @@ function activate(ctx) {
   function selectNode(nodePath) {
     if (bulkRunning.value) return;
     clearSearchOverlay();
+    updatePinsState({ activePath: null });
     committedSelection.value = { ...committedSelection.value, path: nodePath, sessionId: null };
     applyFilterChange();
     resetTranscript();
@@ -2859,6 +3156,174 @@ function activate(ctx) {
       }
     });
   }
+  function activatePin(pin) {
+    if (pinsBulkRunning.value) return;
+    if (activeMount) activeMount.treeGeneration++;
+    clearSearchOverlay();
+    visibleRoot.value = pin.path;
+    committedSelection.value = { path: pin.path, mode: "exact", sessionId: null };
+    updatePinsState({ activePath: pin.path });
+    applyFilterChange();
+    resetTranscript();
+    expandedPaths.value = new Set(expandedPaths.value).add(pin.path);
+    persist(perAgentStorageKey(STORAGE_KEYS.treeRoot), pin.path);
+    persistExpandedPaths();
+    if (compactMode.value) compactView.value = "list";
+  }
+  function pinMetadata(pin) {
+    const keys = pinMatchKeys(pin);
+    const exactSessions = originFilteredSessions.value.filter((session) => keys.has(normalizePinMatchKey(session.rootPath)));
+    return {
+      count: exactSessions.length,
+      lastActiveAt: exactSessions.reduce((newest, session) => newerTimestamp(newest, session.lastActiveAt), "")
+    };
+  }
+  function renderPinRow(pin, index) {
+    const metadata = pinMetadata(pin);
+    const name = pathName(pin.path);
+    const count = t(metadata.count === 1 ? "pin-session-count-one" : "pin-session-count-other", { n: metadata.count });
+    const activity = t("pin-last-activity", { time: formatRelativeTime(metadata.lastActiveAt, t) });
+    const missingTitle = pin.exists ? pin.path : t("pin-folder-missing");
+    if (!pinsSelectMode.value) {
+      return h("button", {
+        class: ["ccm-browser-pin-row", !pin.exists ? "ccm-browser-pin-row-missing" : ""],
+        type: "button",
+        key: pin.path,
+        title: missingTitle,
+        disabled: pinsBulkRunning.value,
+        onClick: () => activatePin(pin)
+      }, [
+        IconFolder(14),
+        h("span", { class: "ccm-browser-pin-name" }, name),
+        h("span", { class: "ccm-browser-pin-meta" }, [
+          h("span", {}, count),
+          h("span", {}, activity)
+        ])
+      ]);
+    }
+    return h("div", {
+      class: ["ccm-browser-pin-row", "ccm-browser-pin-row-edit", !pin.exists ? "ccm-browser-pin-row-missing" : ""],
+      key: pin.path,
+      title: missingTitle
+    }, [
+      h("input", {
+        type: "checkbox",
+        checked: pinsSelection.value.selected.has(pin.path),
+        disabled: pinsBulkRunning.value,
+        "aria-label": t("pin-select-folder", { name }),
+        onClick: (event) => {
+          event.stopPropagation();
+          reducePinsSelection(event.shiftKey ? { type: "shift-range", key: pin.path, pageKeys: pinPaths() } : { type: "toggle", key: pin.path });
+        }
+      }),
+      IconFolder(14),
+      h("span", { class: "ccm-browser-pin-name" }, name),
+      h("span", { class: "ccm-browser-pin-meta" }, [
+        h("span", {}, count),
+        h("span", {}, activity)
+      ]),
+      h("button", {
+        class: "ccm-icon-btn ccm-browser-pin-move",
+        type: "button",
+        title: t("pin-move-up", { name }),
+        "aria-label": t("pin-move-up", { name }),
+        disabled: pinsBulkRunning.value || index === 0,
+        onClick: () => enqueuePinMutation({ type: "move", path: pin.path, direction: "up" })
+      }, [IconArrowUp(13)]),
+      h("button", {
+        class: "ccm-icon-btn ccm-browser-pin-move",
+        type: "button",
+        title: t("pin-move-down", { name }),
+        "aria-label": t("pin-move-down", { name }),
+        disabled: pinsBulkRunning.value || index === pinsSelection.value.pins.length - 1,
+        onClick: () => enqueuePinMutation({ type: "move", path: pin.path, direction: "down" })
+      }, [IconArrowDown(13)])
+    ]);
+  }
+  function renderPinsSection() {
+    const state = pinsSelection.value;
+    const allSelected = state.pins.length > 0 && state.pins.every((pin) => state.selected.has(pin.path));
+    const selectedPins = state.pins.filter((pin) => state.selected.has(pin.path));
+    return h("section", { class: ["ccm-browser-pins-section", state.collapsed ? "ccm-browser-pins-collapsed" : ""] }, [
+      h("div", { class: "ccm-browser-pins-header" }, [
+        IconPin(14),
+        h("span", { class: "ccm-browser-pins-title" }, t("pinned-folders")),
+        h("span", { class: "ccm-browser-pane-count" }, String(state.pins.length)),
+        !state.collapsed ? h("button", {
+          class: ["ccm-icon-btn", pinsSelectMode.value ? "ccm-icon-btn-active" : ""],
+          type: "button",
+          title: t("pin-edit-mode"),
+          "aria-label": t("pin-edit-mode"),
+          "aria-pressed": pinsSelectMode.value,
+          disabled: pinsBulkRunning.value || Boolean(state.corruptSidecar),
+          onClick: () => {
+            pinsSelectMode.value = !pinsSelectMode.value;
+            if (!pinsSelectMode.value) reducePinsSelection({ type: "clear-partition" });
+          }
+        }, [IconCheck(14)]) : null,
+        h("button", {
+          class: "ccm-icon-btn",
+          type: "button",
+          title: t(state.collapsed ? "pin-expand-section" : "pin-collapse-section"),
+          "aria-label": t(state.collapsed ? "pin-expand-section" : "pin-collapse-section"),
+          "aria-expanded": !state.collapsed,
+          "aria-pressed": state.collapsed,
+          onClick: () => {
+            const collapsed = !state.collapsed;
+            updatePinsState({ collapsed });
+            void persistPinsCollapsed(collapsed);
+          }
+        }, [state.collapsed ? IconChevronRight(14) : IconChevronDown(14)])
+      ]),
+      state.collapsed ? null : h("div", { class: "ccm-browser-pins-body" }, [
+        state.conflictNote ? h("div", { class: "ccm-browser-pin-note", role: "status" }, t("pin-list-changed")) : null,
+        state.corruptSidecar ? h("div", { class: "ccm-browser-pin-banner", role: "alert" }, [
+          h("span", {}, t("pin-list-unreadable", { path: state.corruptSidecar })),
+          h("button", {
+            class: "ccm-primary-btn ccm-primary-btn-sm",
+            type: "button",
+            disabled: pinsBulkRunning.value,
+            onClick: () => enqueuePinMutation({ type: "reset-corrupt" })
+          }, t("pin-reset-list"))
+        ]) : state.error ? h("div", { class: "ccm-browser-pin-banner", role: "alert" }, state.error) : state.loading ? h("div", { class: "ccm-browser-pin-state", role: "status" }, t("pin-list-loading")) : state.pins.length === 0 ? h("div", { class: "ccm-browser-pin-state" }, t("pin-empty-onboarding")) : h("div", { class: "ccm-browser-pin-list" }, state.pins.map(renderPinRow)),
+        pinsSelectMode.value && !state.corruptSidecar ? h("div", { class: "ccm-browser-filter-row ccm-browser-select-bar ccm-browser-pin-select-bar" }, [
+          h("button", {
+            class: "ccm-icon-btn ccm-browser-action-control",
+            type: "button",
+            disabled: pinsBulkRunning.value || state.pins.length === 0,
+            onClick: () => reducePinsSelection(allSelected ? { type: "clear-partition" } : { type: "snapshot-all", keys: state.pins.map((pin) => pin.path) })
+          }, [IconCheck(13), t(allSelected ? "deselect-all" : "select-all-filtered", { n: state.pins.length })]),
+          h("span", { class: "ccm-browser-selected-count" }, t("selected-count", { n: state.selected.size })),
+          state.selected.size > 0 ? h("button", {
+            class: "ccm-icon-btn ccm-browser-clear-selection",
+            type: "button",
+            title: t("clear-selection"),
+            "aria-label": t("clear-selection"),
+            disabled: pinsBulkRunning.value,
+            onClick: () => reducePinsSelection({ type: "clear-partition" })
+          }, [IconX(13)]) : null
+        ]) : null,
+        state.selected.size > 0 && !state.corruptSidecar ? h("div", {
+          class: "ccm-browser-filter-row ccm-browser-bulk-toolbar ccm-browser-pin-toolbar",
+          role: "toolbar",
+          "aria-label": t("bulk-actions")
+        }, [
+          h("button", {
+            class: "ccm-icon-btn ccm-browser-action-control ccm-browser-danger-control",
+            type: "button",
+            disabled: pinsBulkRunning.value,
+            onClick: () => enqueuePinMutation({ type: "remove", paths: selectedPins.map((pin) => pin.path) })
+          }, [IconTrash2(13), t("pin-remove-selected", { n: selectedPins.length })]),
+          h("button", {
+            class: "ccm-icon-btn ccm-browser-action-control",
+            type: "button",
+            disabled: pinsBulkRunning.value,
+            onClick: () => enqueuePinMutation({ type: "promote", paths: selectedPins.map((pin) => pin.path) })
+          }, [IconArrowUp(13), t("pin-promote-selected", { n: selectedPins.length })])
+        ]) : null
+      ])
+    ]);
+  }
   function renderTreeNode(node, depth) {
     const selected = committedSelection.value.path === node.path;
     const highlighted = transientHighlightPath.value === node.path;
@@ -2902,6 +3367,7 @@ function activate(ctx) {
     ]);
   }
   function renderTreePane() {
+    const pinnedFolder = currentFolderPin();
     return h("aside", {
       class: "ccm-browser-pane ccm-browser-tree-pane",
       style: compactMode.value ? void 0 : { width: `calc(${paneWidths.value.left}px * var(--ccm-fs, 1))` }
@@ -2917,6 +3383,15 @@ function activate(ctx) {
               compactView.value = "list";
             }
           }, [IconChevronLeft(15)]) : null,
+          h("button", {
+            class: ["ccm-icon-btn", pinnedFolder ? "ccm-icon-btn-active" : ""],
+            type: "button",
+            title: t(pinnedFolder ? "pin-current-folder-remove" : "pin-current-folder-add"),
+            "aria-label": t(pinnedFolder ? "pin-current-folder-remove" : "pin-current-folder-add"),
+            "aria-pressed": Boolean(pinnedFolder),
+            disabled: loading.value || pinsSelection.value.loading || pinsBulkRunning.value || Boolean(pinsSelection.value.corruptSidecar) || !committedSelection.value.path,
+            onClick: () => enqueuePinMutation(pinnedFolder ? { type: "remove", paths: [pinnedFolder.path] } : { type: "add", path: committedSelection.value.path })
+          }, [IconPin(15)]),
           h("button", {
             class: "ccm-icon-btn",
             title: t("navigate-parent"),
@@ -2959,6 +3434,7 @@ function activate(ctx) {
         ])
       ]),
       h("div", { class: "ccm-browser-root-path", title: visibleRoot.value }, visibleRoot.value),
+      renderPinsSection(),
       h("div", { class: "ccm-browser-tree-body" }, [
         loading.value ? h("div", { class: "ccm-browser-pane-state" }, t("building-index")) : tree.value ? renderTreeNode(tree.value, 0) : h("div", { class: "ccm-browser-pane-state" }, t("no-indexed-sessions"))
       ])
@@ -3337,6 +3813,7 @@ function activate(ctx) {
     const displayedCount = overlay ? overlay.results.length : listedSessions.length;
     const maxPage = Math.max(1, Math.ceil(listedSessions.length / pageSize.value));
     const pageSessions = listedSessions.slice((page.value - 1) * pageSize.value, page.value * pageSize.value);
+    const pinSpecificEmpty = pinsSelection.value.activePath === committedSelection.value.path && scopedPartitionSessions(partition).length === 0;
     const pageKeys = pageSessions.map(sessionKey);
     const allSelected = listedSessions.length > 0 && listedSessions.every((session) => selection.value.selected.has(sessionKey(session)));
     const createdRangeActive = Boolean(createdRange.value.from || createdRange.value.to);
@@ -3401,6 +3878,7 @@ function activate(ctx) {
           class: ["ccm-icon-btn", selectMode.value ? "ccm-icon-btn-active" : ""],
           title: t("select-mode"),
           "aria-label": t("select-mode"),
+          "aria-pressed": selectMode.value,
           disabled: bulkRunning.value || Boolean(overlay),
           onClick: () => {
             selectMode.value = !selectMode.value;
@@ -3647,7 +4125,7 @@ function activate(ctx) {
         }, [IconX(13)]) : null
       ]),
       h("div", { class: "ccm-browser-session-list" }, [
-        loading.value ? h("div", { class: "ccm-browser-pane-state" }, t("loading-sessions")) : searching.value ? h("div", { class: "ccm-browser-pane-state" }, t("searching-session-text")) : overlay ? overlay.results.length ? overlay.results.map(renderSearchResult) : h("div", { class: "ccm-browser-pane-state" }, t("no-full-text-matches")) : pageSessions.length ? pageSessions.map((session) => renderSessionCard(session, pageKeys)) : h("div", { class: "ccm-browser-pane-state" }, t("no-matching-sessions", { partition: t(partition) }))
+        loading.value ? h("div", { class: "ccm-browser-pane-state" }, t("loading-sessions")) : searching.value ? h("div", { class: "ccm-browser-pane-state" }, t("searching-session-text")) : overlay ? overlay.results.length ? overlay.results.map(renderSearchResult) : h("div", { class: "ccm-browser-pane-state" }, t("no-full-text-matches")) : pageSessions.length ? pageSessions.map((session) => renderSessionCard(session, pageKeys)) : h("div", { class: "ccm-browser-pane-state" }, pinSpecificEmpty ? t("pin-no-sessions") : t("no-matching-sessions", { partition: t(partition) }))
       ]),
       !overlay && selectMode.value ? h("div", { class: "ccm-browser-filter-row ccm-browser-select-bar" }, [
         h("button", {
@@ -4032,6 +4510,7 @@ function activate(ctx) {
         ctx.onUnmounted(() => {
           bulkCancelRequested.value = true;
           bulkRunning.value = false;
+          pinsBulkRunning.value = false;
           loading.value = false;
           transcriptLoading.value = false;
           searching.value = false;
@@ -4040,15 +4519,18 @@ function activate(ctx) {
           mount.active = false;
           mount.indexGeneration++;
           mount.searchGeneration++;
+          mount.pinsGeneration++;
           mount.transcriptLoadToken++;
           mount.pickerRequestSeq++;
           mount.pickerValidationSeq++;
           mount.rootResizeObserver?.disconnect();
           mount.localeObserver?.disconnect();
+          if (mount.pinsNoteTimer) clearTimeout(mount.pinsNoteTimer);
           for (const dispose of mount.disposers) dispose();
           mount.disposers.clear();
           mount.highlightTimer = null;
           mount.copiedTimer = null;
+          mount.pinsNoteTimer = null;
           mount.transcriptFrame = null;
           if (activeMount === mount) activeMount = null;
         });
@@ -4132,6 +4614,7 @@ export {
   nextTranscriptBatchEnd,
   normalizeDateRange,
   normalizePartitionSortSettings,
+  normalizePinMatchKey,
   normalizeStoredExpandedPaths,
   normalizeStoredTreeRoot,
   parseCliFailure,

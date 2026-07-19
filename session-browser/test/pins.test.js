@@ -626,6 +626,33 @@ test('corrupt list response is explicit and a later successful list clears it', 
   assert.deepEqual(corrupt.pins, [])
   writeStore([storedPin('/healthy-again')])
   assert.deepEqual(runJson(['list-pins', AGENT]), {
-    pins: [{ path: '/healthy-again', addedAt: 1, exists: false }],
+    pins: [{ path: '/healthy-again', addedAt: 1, exists: false, matchKeys: ['/healthy-again'] }],
+  })
+})
+
+test('list-pins exposes canonical and symlink-form match keys', () => {
+  const target = mkdir('listed-symlink-target')
+  const link = path.join(fixture, 'listed-symlink-link')
+  fs.symlinkSync(target, link, 'dir')
+  const added = runJson(['add-pin', AGENT, link])
+
+  const [listed] = runJson(['list-pins', AGENT]).pins
+  assert.deepEqual(new Set(listed.matchKeys), new Set([
+    matchKey(added.canonicalPath),
+    matchKey(link),
+  ]))
+})
+
+test('list-pins degrades missing or malformed stored match keys to empty arrays', () => {
+  writeStore([
+    { path: '/legacy-pin', addedAt: 1 },
+    { path: '/malformed-pin', addedAt: 2, matchKeys: 'not-an-array' },
+  ])
+
+  assert.deepEqual(runJson(['list-pins', AGENT]), {
+    pins: [
+      { path: '/legacy-pin', addedAt: 1, exists: false, matchKeys: [] },
+      { path: '/malformed-pin', addedAt: 2, exists: false, matchKeys: [] },
+    ],
   })
 })

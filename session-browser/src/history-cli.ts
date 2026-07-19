@@ -124,8 +124,18 @@ interface PinStore {
   pins: StoredPin[]
 }
 
+interface ListableStoredPin {
+  path: string
+  addedAt: number
+  matchKeys?: unknown
+}
+
 type PinReadResult =
   | { kind: 'ok'; pins: StoredPin[] }
+  | { kind: 'corrupt'; sidecar: string }
+
+type PinListingReadResult =
+  | { kind: 'ok'; pins: ListableStoredPin[] }
   | { kind: 'corrupt'; sidecar: string }
 
 type PinMutationState = { pins: StoredPin[]; resetCorrupt: boolean }
@@ -216,6 +226,21 @@ function isPinStore(value: unknown): value is PinStore {
   })
 }
 
+function isPinStoreForListing(value: unknown): value is { version: 1; pins: ListableStoredPin[] } {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Record<string, unknown>
+  if (candidate.version !== 1 || !Array.isArray(candidate.pins)) return false
+  return candidate.pins.every(pin => {
+    if (!pin || typeof pin !== 'object') return false
+    const item = pin as Record<string, unknown>
+    return typeof item.path === 'string'
+      && path.isAbsolute(item.path)
+      && typeof item.addedAt === 'number'
+      && Number.isSafeInteger(item.addedAt)
+      && item.addedAt >= 0
+  })
+}
+
 function prunePinSidecars(agent: AgentId) {
   const prefix = `${agent}.json.corrupt.`
   const sidecars = fs.readdirSync(PINS_DIR)
@@ -279,6 +304,24 @@ function readPinStore(agent: AgentId): PinReadResult {
   try {
     const parsed: unknown = JSON.parse(bytes.toString('utf8'))
     if (!isPinStore(parsed)) throw new Error('Pin list schema is invalid')
+    return { kind: 'ok', pins: parsed.pins }
+  } catch {
+    return { kind: 'corrupt', sidecar: preserveCorruptPinBytes(agent, bytes) }
+  }
+}
+
+function readPinStoreForListing(agent: AgentId): PinListingReadResult {
+  let bytes: Buffer
+  try {
+    bytes = fs.readFileSync(pinStorePath(agent))
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return { kind: 'ok', pins: [] }
+    fail('pin-list-read-failed', error?.message || `Could not read pin list for ${agent}`)
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(bytes.toString('utf8'))
+    if (!isPinStoreForListing(parsed)) throw new Error('Pin list schema is invalid')
     return { kind: 'ok', pins: parsed.pins }
   } catch {
     return { kind: 'corrupt', sidecar: preserveCorruptPinBytes(agent, bytes) }
@@ -352,7 +395,7 @@ function findPinPath(pins: StoredPin[], requestedPath: string): string | undefin
 
 function cmdListPins(agentValue: string) {
   validatePinAgent(agentValue)
-  const loaded = readPinStore(agentValue)
+  const loaded = readPinStoreForListing(agentValue)
   if (loaded.kind === 'corrupt') {
     output({ pins: [], corrupt: true, sidecar: loaded.sidecar })
     return
@@ -361,7 +404,12 @@ function cmdListPins(agentValue: string) {
     pins: loaded.pins.map(pin => {
       let exists = false
       try { exists = fs.statSync(pin.path).isDirectory() } catch { /* missing and unreadable pins remain listed */ }
-      return { path: pin.path, addedAt: pin.addedAt, exists }
+      const matchKeys = Array.isArray(pin.matchKeys)
+        && pin.matchKeys.length > 0
+        && pin.matchKeys.every(key => typeof key === 'string' && key.length > 0)
+        ? [...pin.matchKeys] as string[]
+        : []
+      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys }
     }),
   })
 }

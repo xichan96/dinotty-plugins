@@ -685,6 +685,16 @@ function isPinStore(value) {
     return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0 && Array.isArray(item.matchKeys) && item.matchKeys.length > 0 && item.matchKeys.every((key) => typeof key === "string" && key.length > 0);
   });
 }
+function isPinStoreForListing(value) {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value;
+  if (candidate.version !== 1 || !Array.isArray(candidate.pins)) return false;
+  return candidate.pins.every((pin) => {
+    if (!pin || typeof pin !== "object") return false;
+    const item = pin;
+    return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0;
+  });
+}
 function prunePinSidecars(agent) {
   const prefix = `${agent}.json.corrupt.`;
   const sidecars = fs2.readdirSync(PINS_DIR).filter((name) => name.startsWith(prefix)).map((name) => {
@@ -748,6 +758,22 @@ function readPinStore(agent) {
   try {
     const parsed = JSON.parse(bytes.toString("utf8"));
     if (!isPinStore(parsed)) throw new Error("Pin list schema is invalid");
+    return { kind: "ok", pins: parsed.pins };
+  } catch {
+    return { kind: "corrupt", sidecar: preserveCorruptPinBytes(agent, bytes) };
+  }
+}
+function readPinStoreForListing(agent) {
+  let bytes;
+  try {
+    bytes = fs2.readFileSync(pinStorePath(agent));
+  } catch (error) {
+    if (error?.code === "ENOENT") return { kind: "ok", pins: [] };
+    fail("pin-list-read-failed", error?.message || `Could not read pin list for ${agent}`);
+  }
+  try {
+    const parsed = JSON.parse(bytes.toString("utf8"));
+    if (!isPinStoreForListing(parsed)) throw new Error("Pin list schema is invalid");
     return { kind: "ok", pins: parsed.pins };
   } catch {
     return { kind: "corrupt", sidecar: preserveCorruptPinBytes(agent, bytes) };
@@ -819,7 +845,7 @@ function findPinPath(pins, requestedPath) {
 }
 function cmdListPins(agentValue) {
   validatePinAgent(agentValue);
-  const loaded = readPinStore(agentValue);
+  const loaded = readPinStoreForListing(agentValue);
   if (loaded.kind === "corrupt") {
     output2({ pins: [], corrupt: true, sidecar: loaded.sidecar });
     return;
@@ -831,7 +857,8 @@ function cmdListPins(agentValue) {
         exists = fs2.statSync(pin.path).isDirectory();
       } catch {
       }
-      return { path: pin.path, addedAt: pin.addedAt, exists };
+      const matchKeys = Array.isArray(pin.matchKeys) && pin.matchKeys.length > 0 && pin.matchKeys.every((key) => typeof key === "string" && key.length > 0) ? [...pin.matchKeys] : [];
+      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys };
     })
   });
 }
