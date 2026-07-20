@@ -490,7 +490,7 @@
   cursor: pointer;
 }
 
-.ccm-browser-pin-row-active {
+.ccm-browser-pin-row.ccm-browser-pin-row-active {
   border-left-color: var(--ccm-accent);
   background: var(--ccm-accent-bg);
   color: var(--ccm-text);

@@ -1298,11 +1298,14 @@ export function activate(ctx: PluginContext): PluginExports {
       if (!isCurrent()) return false
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t('pin-list-load-failed')).message)
       const loaded = parsePinsResponse(result.stdout)
+      const priorActive = pinsSelection.value.activePath
+      const nextActivePath = priorActive !== null && loaded.pins.some(pin => normalizePath(pin.path) === normalizePath(priorActive)) ? priorActive : null
       updatePinsState({
         pins: loaded.pins,
         loading: false,
         error: null,
         corruptSidecar: loaded.corruptSidecar,
+        activePath: nextActivePath,
       })
       reducePinsSelection({ type: 'intersect', keys: loaded.pins.map(pin => pin.path) })
       if (expectedPaths && !samePinOrder(expectedPaths, loaded.pins.map(pin => pin.path))) showPinConflict(mount)
@@ -2967,7 +2970,7 @@ export function activate(ctx: PluginContext): PluginExports {
   function revealActivePinInTree() {
     const state = pinsSelection.value
     const activePath = state.activePath
-    if (!activePath || state.loading || pinsBulkRunning.value || state.corruptSidecar) return
+    if (!activePath || state.loading || pinsBulkRunning.value || bulkRunning.value || state.corruptSidecar) return
     clearSearchOverlay()
     committedSelection.value = { path: activePath, mode: 'subtree', sessionId: null }
 
@@ -3000,6 +3003,7 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function renderPinRow(pin: FolderPin, index: number): any {
+    const selectMode = pinsSelectMode.value
     const metadata = pinMetadata(pin)
     const name = pathName(pin.path)
     const count = t(metadata.count === 1 ? 'pin-session-count-one' : 'pin-session-count-other', { n: metadata.count })
@@ -3027,16 +3031,16 @@ export function activate(ctx: PluginContext): PluginExports {
       ],
       key: pin.path,
       title: missingTitle,
-      role: 'button',
-      tabindex: pinsBulkRunning.value ? -1 : 0,
-      'aria-disabled': pinsBulkRunning.value,
-      'aria-current': active ? 'true' : undefined,
+      role: !selectMode ? 'button' : undefined,
+      tabindex: !selectMode ? (pinsBulkRunning.value ? -1 : 0) : undefined,
+      'aria-disabled': !selectMode ? pinsBulkRunning.value : undefined,
+      'aria-current': !selectMode && active ? 'true' : undefined,
       onClick: (event?: MouseEvent) => activateOrToggle(Boolean(event?.shiftKey)),
-      onKeydown: (event: KeyboardEvent) => {
+      onKeydown: !selectMode ? (event: KeyboardEvent) => {
         if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
         event.preventDefault()
         activateOrToggle(event.shiftKey)
-      },
+      } : undefined,
     }, [
       pinsSelectMode.value ? h('input', {
         type: 'checkbox',
@@ -3104,14 +3108,14 @@ export function activate(ctx: PluginContext): PluginExports {
               if (!pinsSelectMode.value) reducePinsSelection({ type: 'clear-partition' })
             },
           }, [IconCheck(14)]) : null,
-          h('button', {
+          !state.collapsed ? h('button', {
             class: 'ccm-icon-btn',
             type: 'button',
             title: t('pin-reveal-in-tree'),
             'aria-label': t('pin-reveal-in-tree'),
-            disabled: headerControlsDisabled || !state.activePath,
+            disabled: headerControlsDisabled || !state.activePath || bulkRunning.value,
             onClick: revealActivePinInTree,
-          }, [IconCornerUpRight(14)]),
+          }, [IconCornerUpRight(14)]) : null,
           h('button', {
             class: 'ccm-icon-btn',
             type: 'button',

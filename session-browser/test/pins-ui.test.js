@@ -400,6 +400,35 @@ test('pin header reveal moves visibleRoot to the active outside pin', async () =
   }
 })
 
+test('pin header reveal is disabled while a session bulk action is running', async () => {
+  const pendingArchive = deferred()
+  const harness = await mountPins({
+    pinsByAgent: {
+      'claude-code': [{ path: '/work', addedAt: 1, exists: true }],
+      codex: [],
+    },
+    run: async args => args[0] === 'archive' ? pendingArchive.promise : undefined,
+  })
+  try {
+    findPinRow(harness.render(), '/work').props.onClick()
+    let nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
+    nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox').props.onClick({ stopPropagation() {}, shiftKey: false })
+    nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'button' && textOf(node) === 'Archive 1').props.onClick()
+    await flush(4)
+
+    assert.equal(findPinReveal(harness.render()).props.disabled, true,
+      'pin header reveal is enabled while a session bulk action is running')
+
+    pendingArchive.resolve({ code: 0, stdout: JSON.stringify({ outcome: 'success', cacheRefreshed: true }), stderr: '' })
+    await flush(8)
+  } finally {
+    harness.cleanup()
+  }
+})
+
 test('pin row click and keyboard behavior switches between activation and selection with edit mode', async () => {
   const harness = await mountPins({
     pinsByAgent: {
@@ -428,11 +457,12 @@ test('pin row click and keyboard behavior switches between activation and select
     checkbox = flatten(harness.render()).find(node => node?.tag === 'input' && node.props?.['aria-label'] === 'Select two')
     assert.equal(checkbox.props.checked, false, 'select-mode row click did not toggle the checkbox off')
 
-    const keyboardRow = findPinRow(harness.render(), '/two')
-    const target = {}
-    keyboardRow.props.onKeydown({ key: ' ', target, currentTarget: target, shiftKey: false, preventDefault() {} })
-    checkbox = flatten(harness.render()).find(node => node?.tag === 'input' && node.props?.['aria-label'] === 'Select two')
-    assert.equal(checkbox.props.checked, true, 'select-mode Space did not toggle the checkbox')
+    const editModeRow = findPinRow(harness.render(), '/two')
+    assert.equal(editModeRow.props.role, undefined, 'select-mode pin row retains a button role')
+    assert.equal(editModeRow.props.tabindex, undefined, 'select-mode pin row remains in the tab order')
+    assert.equal(editModeRow.props['aria-disabled'], undefined, 'select-mode pin row retains aria-disabled')
+    assert.equal(editModeRow.props['aria-current'], undefined, 'select-mode pin row retains aria-current')
+    assert.equal(editModeRow.props.onKeydown, undefined, 'select-mode pin row retains a keyboard activation handler')
 
     nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === dictionaries.en['pin-edit-mode']).props.onClick()
@@ -440,6 +470,31 @@ test('pin row click and keyboard behavior switches between activation and select
     normalRow.props.onKeydown({ key: 'Enter', target: normalRow, currentTarget: normalRow, shiftKey: false, preventDefault() {} })
     assert.match(textOf(flatten(harness.render()).find(node => hasClass(node, 'ccm-browser-scope-summary'))),
       /Exact directory.*\/two/, 'normal-mode Enter did not activate the pin')
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('pin move buttons do not change row checkbox selection in edit mode', async () => {
+  const harness = await mountPins({
+    pinsByAgent: {
+      'claude-code': ['/a', '/b', '/c'].map((pinPath, index) => ({ path: pinPath, addedAt: index + 1, exists: true })),
+      codex: [],
+    },
+  })
+  try {
+    let nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'button' && node.props?.title === dictionaries.en['pin-edit-mode']).props.onClick()
+
+    for (const title of ['Move b up', 'Move b down']) {
+      nodes = flatten(harness.render())
+      const event = { stopped: false, stopPropagation() { this.stopped = true } }
+      nodes.find(node => node?.tag === 'button' && node.props?.title === title).props.onClick(event)
+      assert.equal(event.stopped, true, `${title} did not stop row click propagation`)
+      const checkbox = flatten(harness.render()).find(node => node?.tag === 'input' && node.props?.['aria-label'] === 'Select b')
+      assert.equal(checkbox.props.checked, false, `${title} changed the row checkbox selection`)
+      await flush(6)
+    }
   } finally {
     harness.cleanup()
   }
@@ -684,6 +739,43 @@ test('a successful no-op mutation reloads pins changed concurrently while the co
   }
 })
 
+test('reloading pins clears the active path when the active pin was removed concurrently', async () => {
+  const harness = await mountPins({
+    pinsByAgent: {
+      'claude-code': [{ path: '/work', addedAt: 1, exists: true }],
+      codex: [],
+    },
+    run: async (args, state) => {
+      if (args[0] !== 'remove-pin' || args[1] !== 'claude-code') return undefined
+      state.pinsByAgent['claude-code'] = []
+      return {
+        code: 0,
+        stdout: JSON.stringify({ results: [{ path: args[2], outcome: 'absent' }], changed: false }),
+        stderr: '',
+      }
+    },
+  })
+  try {
+    findPinRow(harness.render(), '/work').props.onClick()
+    let rendered = harness.render()
+    assert.equal(hasClass(findPinRow(rendered, '/work'), 'ccm-browser-pin-row-active'), true,
+      'activated pin row is missing its active modifier')
+    assert.equal(findPinReveal(rendered).props.disabled, false, 'pin header reveal is disabled for an active pin')
+
+    flatten(rendered).find(node => node?.tag === 'button'
+      && node.props?.title === dictionaries.en['pin-current-folder-remove']).props.onClick()
+    await flush(8)
+
+    rendered = harness.render()
+    assert.equal(hasClass(findPinRow(rendered, '/work'), 'ccm-browser-pin-row-active'), false,
+      'removed pin row retains its active modifier after reload')
+    assert.equal(findPinReveal(rendered).props.disabled, true,
+      'pin header reveal remains enabled after the active pin was removed')
+  } finally {
+    harness.cleanup()
+  }
+})
+
 test('agent generations discard stale list and add completions, then switch-back reload reconciles the add', async () => {
   const slowList = deferred()
   const slowAdd = deferred()
@@ -848,8 +940,9 @@ test('collapsing pinned folders hides rows, selection, arrows, and both edit too
     assert.equal(sectionNodes.some(node => hasClass(node, 'ccm-browser-pin-select-bar')), false)
     assert.equal(sectionNodes.some(node => hasClass(node, 'ccm-browser-pin-toolbar')), false)
     const headerButtons = sectionNodes.filter(node => node?.tag === 'button')
-    assert.deepEqual(headerButtons.map(node => node.props.title), ['Reveal in tree', 'Expand pinned folders'])
-    assert.equal(headerButtons[0].props.disabled, true, 'collapsed header reveal is enabled without an active pin')
+    assert.deepEqual(headerButtons.map(node => node.props.title), ['Expand pinned folders'])
+    assert.equal(headerButtons.some(node => node.props.title === 'Reveal in tree'), false,
+      'collapsed header still renders the pin reveal action')
     assert.equal(harness.storage.get('pinsCollapsed'), true)
   } finally {
     harness.cleanup()
