@@ -1,6 +1,7 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as readline from 'readline'
+import * as crypto from 'crypto'
 import { codexConnector } from './codex-connector'
 
 let settingsMigrationAttempted = false
@@ -38,6 +39,7 @@ const PLUGIN_DATA_BASE = path.join(HOME, '.dinotty', 'plugin-data')
 if (process.env.CC_SB_DATA_DIR === undefined) migratePluginSettings(PLUGIN_DATA_BASE, 'cc-session-browser', 'session-browser')
 const DATA_DIR = process.env.CC_SB_DATA_DIR || path.join(HOME, '.dinotty/plugin-data/session-browser')
 const INDEX_CACHE_PATH = path.join(DATA_DIR, 'index-cache.json')
+const PINS_DIR = path.join(DATA_DIR, 'pins')
 
 // --- Types ---
 export type AgentId = 'claude-code' | 'codex'
@@ -109,6 +111,24 @@ const EXPORT_FILENAME_ATTEMPTS = 1000
 const EXPORT_LINK_FALLBACK_CODES = new Set(['EPERM', 'ENOSYS', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'EMLINK'])
 const TERMINAL_SESSION_STATUSES = new Set(['closed', 'completed', 'dead', 'done', 'ended', 'exited', 'failed', 'stopped', 'terminated'])
 let exportTempCounter = 0
+let pinTempCounter = 0
+
+interface StoredPin {
+  path: string
+  addedAt: number
+  matchKeys?: string[]
+}
+
+interface PinStore {
+  version: 1
+  pins: StoredPin[]
+}
+
+type PinReadResult =
+  | { kind: 'ok'; pins: StoredPin[] }
+  | { kind: 'corrupt'; sidecar: string }
+
+type PinMutationState = { pins: StoredPin[]; resetCorrupt: boolean }
 
 // --- Helpers ---
 function output(value: unknown) {
@@ -151,6 +171,309 @@ function injectedFault(name: string, code = 'EIO') {
     error.code = code
     throw error
   }
+}
+
+function validatePinAgent(agent: string): asserts agent is AgentId {
+  if (agent !== 'claude-code' && agent !== 'codex') fail('invalid-arguments', `Unknown agent: ${agent}`)
+}
+
+function pinStorePath(agent: AgentId): string {
+  return path.join(PINS_DIR, `${agent}.json`)
+}
+
+function lexicalNormalizePinPath(value: string): string {
+  const trimmed = value.trim()
+  if (!trimmed) return '/'
+  const absolute = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
+  const parts: string[] = []
+  for (const part of absolute.split('/')) {
+    if (!part || part === '.') continue
+    if (part === '..') parts.pop()
+    else parts.push(part)
+  }
+  return parts.length ? `/${parts.join('/')}` : '/'
+}
+
+function pinMatchKey(value: string): string {
+  return lexicalNormalizePinPath(value.normalize('NFC').toLowerCase())
+}
+
+function isPinStore(value: unknown): value is PinStore {
+  if (!value || typeof value !== 'object') return false
+  const candidate = value as Record<string, unknown>
+  if (candidate.version !== 1 || !Array.isArray(candidate.pins)) return false
+  return candidate.pins.every(pin => {
+    if (!pin || typeof pin !== 'object') return false
+    const item = pin as Record<string, unknown>
+    return typeof item.path === 'string'
+      && path.isAbsolute(item.path)
+      && typeof item.addedAt === 'number'
+      && Number.isSafeInteger(item.addedAt)
+      && item.addedAt >= 0
+      && (item.matchKeys === undefined
+        || (Array.isArray(item.matchKeys)
+          && item.matchKeys.every(key => typeof key === 'string' && key.length > 0)))
+  })
+}
+
+function prunePinSidecars(agent: AgentId, keepPath?: string) {
+  const prefix = `${agent}.json.corrupt.`
+  const sidecars = fs.readdirSync(PINS_DIR)
+    .filter(name => name.startsWith(prefix))
+    .flatMap(name => {
+      const sidecarPath = path.join(PINS_DIR, name)
+      try {
+        return [{ path: sidecarPath, name, mtimeMs: fs.statSync(sidecarPath).mtimeMs }]
+      } catch {
+        return []
+      }
+    })
+    .sort((a, b) => a.mtimeMs - b.mtimeMs || (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+  const retained = new Set(sidecars.slice(-10).map(sidecar => sidecar.path))
+  if (keepPath) retained.add(keepPath)
+  for (const sidecar of sidecars.filter(item => !retained.has(item.path))) {
+    try {
+      fs.unlinkSync(sidecar.path)
+    } catch (error: any) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+  }
+}
+
+function preserveCorruptPinBytes(agent: AgentId, bytes: Buffer): string {
+  fs.mkdirSync(PINS_DIR, { recursive: true })
+  const hash = crypto.createHash('sha256').update(bytes).digest('hex').slice(0, 16)
+  const sidecar = path.join(PINS_DIR, `${agent}.json.corrupt.${hash}`)
+  let fd: number | undefined
+  let created = false
+  try {
+    try {
+      fd = fs.openSync(sidecar, 'wx', 0o600)
+      created = true
+    } catch (error: any) {
+      if (error?.code !== 'EEXIST') throw error
+    }
+    if (fd !== undefined) {
+      fs.writeFileSync(fd, bytes)
+      fs.fsyncSync(fd)
+      const descriptor = fd
+      fd = undefined
+      fs.closeSync(descriptor)
+    }
+  } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd) } catch { /* preserve the primary failure */ }
+      fd = undefined
+    }
+    if (created) {
+      try { fs.unlinkSync(sidecar) } catch { /* preserve the primary failure */ }
+    }
+    throw error
+  }
+  prunePinSidecars(agent, sidecar)
+  return sidecar
+}
+
+function readPinStore(agent: AgentId): PinReadResult {
+  let bytes: Buffer
+  try {
+    bytes = fs.readFileSync(pinStorePath(agent))
+  } catch (error: any) {
+    if (error?.code === 'ENOENT') return { kind: 'ok', pins: [] }
+    fail('pin-list-read-failed', error?.message || `Could not read pin list for ${agent}`)
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(bytes.toString('utf8'))
+    if (!isPinStore(parsed)) throw new Error('Pin list schema is invalid')
+    return { kind: 'ok', pins: parsed.pins }
+  } catch {
+    return { kind: 'corrupt', sidecar: preserveCorruptPinBytes(agent, bytes) }
+  }
+}
+
+function loadPinsForMutation(agent: AgentId, resetCorrupt: boolean): PinMutationState {
+  const loaded = readPinStore(agent)
+  if (loaded.kind === 'ok') return { pins: loaded.pins, resetCorrupt: false }
+  if (!resetCorrupt) {
+    fail('corrupt-pin-list', `Pin list is corrupt; preserved bytes at ${loaded.sidecar}`)
+  }
+  return { pins: [], resetCorrupt: true }
+}
+
+function writePinStore(agent: AgentId, pins: StoredPin[]) {
+  fs.mkdirSync(PINS_DIR, { recursive: true })
+  pinTempCounter = (pinTempCounter + 1) >>> 0
+  const destination = pinStorePath(agent)
+  const tempPath = path.join(PINS_DIR, `.${agent}.json.tmp.${process.pid}.${pinTempCounter}`)
+  const serialized = JSON.stringify({ version: 1, pins })
+  let fd: number | undefined
+  let created = false
+  try {
+    fd = fs.openSync(tempPath, 'wx', 0o600)
+    created = true
+    fs.writeFileSync(fd, serialized, { encoding: 'utf8' })
+    fs.fsyncSync(fd)
+    const descriptor = fd
+    fd = undefined
+    fs.closeSync(descriptor)
+    fs.renameSync(tempPath, destination)
+
+    const directoryFd = fs.openSync(PINS_DIR, 'r')
+    try {
+      fs.fsyncSync(directoryFd)
+    } finally {
+      fs.closeSync(directoryFd)
+    }
+  } finally {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd) } catch { /* preserve the primary failure */ }
+    }
+    if (created) {
+      try { fs.unlinkSync(tempPath) } catch { /* renamed, removed, or cleanup is best-effort */ }
+    }
+  }
+}
+
+function parseResetCorrupt(args: string[]): { resetCorrupt: boolean; rest: string[] } {
+  const count = args.filter(arg => arg === '--reset-corrupt').length
+  if (count > 1) fail('invalid-arguments', '--reset-corrupt may be specified only once')
+  return { resetCorrupt: count === 1, rest: args.filter(arg => arg !== '--reset-corrupt') }
+}
+
+function validateCanonicalPinPath(value: string) {
+  validateAbsolutePath(value)
+}
+
+function resolvePinLookupPath(value: string): string | undefined {
+  try {
+    return fs.realpathSync.native(value)
+  } catch {
+    return undefined
+  }
+}
+
+function findPinPath(pins: StoredPin[], requestedPath: string): string | undefined {
+  const resolvedPath = resolvePinLookupPath(requestedPath)
+  return pins.find(pin => pin.path === resolvedPath || pin.path === requestedPath)?.path
+}
+
+function cmdListPins(agentValue: string) {
+  validatePinAgent(agentValue)
+  const loaded = readPinStore(agentValue)
+  if (loaded.kind === 'corrupt') {
+    output({ pins: [], corrupt: true, sidecar: loaded.sidecar })
+    return
+  }
+  output({
+    pins: loaded.pins.map(pin => {
+      let exists = false
+      try { exists = fs.statSync(pin.path).isDirectory() } catch { /* missing and unreadable pins remain listed */ }
+      const matchKeys = pin.matchKeys ? [...pin.matchKeys] : []
+      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys }
+    }),
+  })
+}
+
+function cmdAddPin(agentValue: string, suppliedPath: string, resetCorrupt: boolean) {
+  validatePinAgent(agentValue)
+  let canonicalPath: string
+  try {
+    canonicalPath = fs.realpathSync.native(path.resolve(suppliedPath))
+    if (!fs.statSync(canonicalPath).isDirectory()) fail('pin-path-not-directory', `Path is not a directory: ${suppliedPath}`)
+  } catch (error: any) {
+    if (error?.code === 'pin-path-not-directory') throw error
+    fail('pin-path-unavailable', error?.message || `Could not resolve pin path: ${suppliedPath}`)
+  }
+
+  const suppliedAbsolutePath = path.resolve(suppliedPath)
+  const incomingMatchKeys = Array.from(new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]))
+  const state = loadPinsForMutation(agentValue, resetCorrupt)
+  const existing = state.pins.find(pin => pin.path === canonicalPath)
+  if (existing) {
+    const storedMatchKeys = existing.matchKeys || []
+    const mergedMatchKeys = Array.from(new Set([...storedMatchKeys, ...incomingMatchKeys]))
+    const matchKeysMerged = mergedMatchKeys.length !== storedMatchKeys.length
+    if (matchKeysMerged) existing.matchKeys = mergedMatchKeys
+    if (state.resetCorrupt || matchKeysMerged) writePinStore(agentValue, state.pins)
+    output({ canonicalPath, outcome: 'duplicate', matchKeysMerged })
+    return
+  }
+  if (state.pins.length >= 500) fail('pin-limit-reached', 'Cannot add pin: the 500-pin limit has been reached')
+
+  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys: incomingMatchKeys }, ...state.pins])
+  output({ canonicalPath, outcome: 'applied' })
+}
+
+function cmdRemovePins(agentValue: string, requestedPaths: string[], resetCorrupt: boolean) {
+  validatePinAgent(agentValue)
+  requestedPaths.forEach(validateCanonicalPinPath)
+  const state = loadPinsForMutation(agentValue, resetCorrupt)
+  const seen = new Set<string>()
+  const remove = new Set<string>()
+  const results = requestedPaths.map(requestedPath => {
+    if (seen.has(requestedPath)) return { path: requestedPath, outcome: 'duplicate' as const }
+    seen.add(requestedPath)
+    const storedPath = findPinPath(state.pins, requestedPath)
+    if (storedPath === undefined) return { path: requestedPath, outcome: 'absent' as const }
+    remove.add(storedPath)
+    return { path: requestedPath, outcome: 'applied' as const }
+  })
+  const changed = state.resetCorrupt || remove.size > 0
+  if (changed) writePinStore(agentValue, state.pins.filter(pin => !remove.has(pin.path)))
+  output({ results, changed })
+}
+
+function cmdMovePin(agentValue: string, requestedPath: string, direction: string, resetCorrupt: boolean) {
+  validatePinAgent(agentValue)
+  validateCanonicalPinPath(requestedPath)
+  if (direction !== 'up' && direction !== 'down') fail('invalid-arguments', 'Direction must be up or down')
+  const state = loadPinsForMutation(agentValue, resetCorrupt)
+  const storedPath = findPinPath(state.pins, requestedPath)
+  const index = storedPath === undefined ? -1 : state.pins.findIndex(pin => pin.path === storedPath)
+  if (index < 0) {
+    if (state.resetCorrupt) writePinStore(agentValue, state.pins)
+    output({ outcome: 'absent' })
+    return
+  }
+  const target = direction === 'up' ? Math.max(0, index - 1) : Math.min(state.pins.length - 1, index + 1)
+  if (target !== index) {
+    const [pin] = state.pins.splice(index, 1)
+    state.pins.splice(target, 0, pin)
+  }
+  if (state.resetCorrupt || target !== index) writePinStore(agentValue, state.pins)
+  output({ outcome: 'applied' })
+}
+
+function comparePinPaths(left: string, right: string): number {
+  const leftBase = path.basename(left).toLowerCase()
+  const rightBase = path.basename(right).toLowerCase()
+  if (leftBase < rightBase) return -1
+  if (leftBase > rightBase) return 1
+  return left < right ? -1 : left > right ? 1 : 0
+}
+
+function cmdPromotePins(agentValue: string, requestedPaths: string[], resetCorrupt: boolean) {
+  validatePinAgent(agentValue)
+  requestedPaths.forEach(validateCanonicalPinPath)
+  const state = loadPinsForMutation(agentValue, resetCorrupt)
+  const seen = new Set<string>()
+  const selected = new Set<string>()
+  const results = requestedPaths.map(requestedPath => {
+    if (seen.has(requestedPath)) return { path: requestedPath, outcome: 'duplicate' as const }
+    seen.add(requestedPath)
+    const storedPath = findPinPath(state.pins, requestedPath)
+    if (storedPath === undefined) return { path: requestedPath, outcome: 'absent' as const }
+    selected.add(storedPath)
+    return { path: requestedPath, outcome: 'applied' as const }
+  })
+  const promoted = state.pins.filter(pin => selected.has(pin.path)).sort((a, b) => comparePinPaths(a.path, b.path))
+  const remaining = state.pins.filter(pin => !selected.has(pin.path))
+  const nextPins = [...promoted, ...remaining]
+  const reordered = nextPins.some((pin, index) => pin.path !== state.pins[index]?.path)
+  const changed = state.resetCorrupt || reordered
+  if (changed) writePinStore(agentValue, nextPins)
+  output({ results, changed })
 }
 
 let moveAttempt = 0
@@ -1729,6 +2052,34 @@ async function main() {
     if (args.length !== 1) fail('invalid-arguments', 'Usage: check-dir <absolutePath>')
     cmdCheckDir(args[0])
     break
+  case 'list-pins':
+    if (args.length !== 1) fail('invalid-arguments', 'Usage: list-pins <agent>')
+    cmdListPins(args[0])
+    break
+  case 'add-pin': {
+    const parsed = parseResetCorrupt(args)
+    if (parsed.rest.length !== 2) fail('invalid-arguments', 'Usage: add-pin <agent> <path> [--reset-corrupt]')
+    cmdAddPin(parsed.rest[0], parsed.rest[1], parsed.resetCorrupt)
+    break
+  }
+  case 'remove-pin': {
+    const parsed = parseResetCorrupt(args)
+    if (parsed.rest.length < 1) fail('invalid-arguments', 'Usage: remove-pin <agent> <path>... [--reset-corrupt]')
+    cmdRemovePins(parsed.rest[0], parsed.rest.slice(1), parsed.resetCorrupt)
+    break
+  }
+  case 'move-pin': {
+    const parsed = parseResetCorrupt(args)
+    if (parsed.rest.length !== 3) fail('invalid-arguments', 'Usage: move-pin <agent> <path> up|down [--reset-corrupt]')
+    cmdMovePin(parsed.rest[0], parsed.rest[1], parsed.rest[2], parsed.resetCorrupt)
+    break
+  }
+  case 'promote-pins': {
+    const parsed = parseResetCorrupt(args)
+    if (parsed.rest.length < 1) fail('invalid-arguments', 'Usage: promote-pins <agent> <path>... [--reset-corrupt]')
+    cmdPromotePins(parsed.rest[0], parsed.rest.slice(1), parsed.resetCorrupt)
+    break
+  }
   case 'classify-export-destination':
     if (args.length !== 1) fail('invalid-arguments', 'Usage: classify-export-destination <path>')
     console.log(JSON.stringify({ outsideHome: isExportDestinationOutsideHome(args[0]) }))

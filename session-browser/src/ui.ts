@@ -3,13 +3,16 @@ import {
   initIcons,
   IconArchive,
   IconArchiveRestore,
+  IconArrowDown,
   IconArrowLeft,
+  IconArrowUp,
   IconCheck,
   IconChevronDown,
   IconChevronLeft,
   IconChevronRight,
   IconClaude,
   IconCopy,
+  IconCornerUpRight,
   IconDownload,
   IconEye,
   IconFileText,
@@ -18,6 +21,7 @@ import {
   IconGlobe,
   IconHash,
   IconPencil,
+  IconPin,
   IconRefresh,
   IconSearch,
   IconSettings,
@@ -155,6 +159,37 @@ interface CommittedSelection {
   sessionId: string | null
 }
 
+interface FolderPin {
+  path: string
+  addedAt: number
+  exists: boolean
+  matchKeys?: string[]
+}
+
+interface PinsState extends SelectionState {
+  pins: FolderPin[]
+  loading: boolean
+  error: string | null
+  corruptSidecar: string | null
+  collapsed: boolean
+  conflictNote: boolean
+  activePath: string | null
+}
+
+type PinMutationIntent =
+  | { type: 'add'; path: string }
+  | { type: 'remove'; paths: string[] }
+  | { type: 'move'; path: string; direction: 'up' | 'down' }
+  | { type: 'promote'; paths: string[] }
+  | { type: 'reset-corrupt' }
+
+interface QueuedPinMutation {
+  mount: MountContext
+  agent: AgentId
+  generation: number
+  intent: PinMutationIntent
+}
+
 interface CliFailure {
   error: string
   message: string
@@ -214,6 +249,7 @@ interface MountContext {
   paneGeneration: number
   sortGeneration: number
   treeGeneration: number
+  pinsGeneration: number
   disposers: Set<() => void>
   highlightTimer: ReturnType<typeof setTimeout> | null
   copiedTimer: ReturnType<typeof setTimeout> | null
@@ -224,6 +260,7 @@ interface MountContext {
   allTranscriptMessages: TranscriptMessage[]
   rootResizeObserver: ResizeObserver | null
   localeObserver: MutationObserver | null
+  pinsNoteTimer: ReturnType<typeof setTimeout> | null
 }
 
 const STORAGE_KEYS = {
@@ -238,6 +275,7 @@ const STORAGE_KEYS = {
   exportDestination: 'exportDestination',
   sessionListSort: 'sessionListSort',
   pageSize: 'pageSize',
+  pinsCollapsed: 'pinsCollapsed',
 } as const
 
 const DEFAULT_PANE_WIDTHS: PaneWidths = { left: 280, middle: 360 }
@@ -377,6 +415,10 @@ function normalizePath(value: string): string {
     else parts.push(part)
   }
   return parts.length ? `/${parts.join('/')}` : '/'
+}
+
+export function normalizePinMatchKey(value: string): string {
+  return normalizePath(value.normalize('NFC').toLowerCase())
 }
 
 export function normalizeStoredTreeRoot(value: unknown): string | null {
@@ -1104,6 +1146,19 @@ export function activate(ctx: PluginContext): PluginExports {
   const bulkProgress = ctx.ref({ completed: 0, total: 0, title: '' })
   const bulkResult = ctx.ref<BulkRunResult | null>(null)
   const bulkRefreshFailed = ctx.ref(false)
+  const pinsSelectMode = ctx.ref(false)
+  const pinsSelection = ctx.ref<PinsState>({
+    selected: new Set(),
+    anchor: null,
+    pins: [],
+    loading: true,
+    error: null,
+    corruptSidecar: null,
+    collapsed: false,
+    conflictNote: false,
+    activePath: null,
+  })
+  const pinsBulkRunning = ctx.ref(false)
   let resizeStartX = 0
   let resizeStartWidth = 0
   let resizeActive = false
@@ -1114,6 +1169,8 @@ export function activate(ctx: PluginContext): PluginExports {
   let mutationInFlight = false
   let hasMounted = false
   let warnedPersistFailure = false
+  const pinMutationQueue: QueuedPinMutation[] = []
+  let pinMutationInFlight = false
 
   function runAgent(args: string[], opts: Parameters<typeof ctx.exec.run>[1]) {
     if (AGENT_AGNOSTIC.has(args[0])) return ctx.exec.run(args, opts)
@@ -1159,6 +1216,243 @@ export function activate(ctx: PluginContext): PluginExports {
     return session.origin !== 'exec' && session.origin !== 'subagent'
   }
 
+  function updatePinsState(patch: Partial<PinsState>) {
+    pinsSelection.value = { ...pinsSelection.value, ...patch }
+  }
+
+  function reducePinsSelection(action: SelectionAction) {
+    pinsSelection.value = {
+      ...pinsSelection.value,
+      ...selectionReducer(pinsSelection.value, action),
+    }
+  }
+
+  function pinMatchKeys(pin: FolderPin): Set<string> {
+    return new Set(pin.matchKeys?.length
+      ? pin.matchKeys
+      : [normalizePinMatchKey(pin.path)])
+  }
+
+  function currentFolderPin(): FolderPin | undefined {
+    const selectedPath = normalizePath(committedSelection.value.path)
+    const exact = pinsSelection.value.pins.find(pin => normalizePath(pin.path) === selectedPath)
+    if (exact) return exact
+    const selectedKey = normalizePinMatchKey(selectedPath)
+    return pinsSelection.value.pins.find(pin => pinMatchKeys(pin).has(selectedKey))
+  }
+
+  function parsePinsResponse(stdout: string): { pins: FolderPin[]; corruptSidecar: string | null } {
+    const parsed = JSON.parse(stdout) as any
+    if (!parsed || typeof parsed !== 'object' || !Array.isArray(parsed.pins)) {
+      throw new Error(t('pin-invalid-response'))
+    }
+    const pins = parsed.pins.map((pin: any) => {
+      const validMatchKeys = pin?.matchKeys === undefined
+        || (Array.isArray(pin.matchKeys) && pin.matchKeys.every((key: unknown) => typeof key === 'string'))
+      if (!pin || typeof pin.path !== 'string' || typeof pin.addedAt !== 'number'
+        || typeof pin.exists !== 'boolean' || !validMatchKeys) {
+        throw new Error(t('pin-invalid-response'))
+      }
+      return {
+        path: pin.path,
+        addedAt: pin.addedAt,
+        exists: pin.exists,
+        ...(pin.matchKeys ? { matchKeys: [...pin.matchKeys] } : {}),
+      } as FolderPin
+    })
+    if (parsed.corrupt === true) {
+      if (typeof parsed.sidecar !== 'string' || !parsed.sidecar) throw new Error(t('pin-invalid-response'))
+      return { pins, corruptSidecar: parsed.sidecar }
+    }
+    return { pins, corruptSidecar: null }
+  }
+
+  function pinPaths(): string[] {
+    return pinsSelection.value.pins.map(pin => pin.path)
+  }
+
+  function samePinOrder(left: string[], right: string[]): boolean {
+    return left.length === right.length && left.every((pinPath, index) => pinPath === right[index])
+  }
+
+  function showPinConflict(mount: MountContext) {
+    updatePinsState({ conflictNote: true })
+    if (mount.pinsNoteTimer) clearTimeout(mount.pinsNoteTimer)
+    mount.pinsNoteTimer = scheduleMountTimeout(() => {
+      if (isActiveMount(mount)) updatePinsState({ conflictNote: false })
+      mount.pinsNoteTimer = null
+    }, 4_000)
+  }
+
+  async function loadPins(requestGeneration?: number, expectedPaths?: string[]): Promise<boolean> {
+    const mount = activeMount
+    if (!isActiveMount(mount)) return false
+    const generation = requestGeneration ?? ++mount.pinsGeneration
+    const requestAgent = activeAgent.value
+    const isCurrent = () => isActiveMount(mount)
+      && generation === mount.pinsGeneration
+      && requestAgent === activeAgent.value
+    if (isCurrent()) updatePinsState({ loading: true, error: null })
+    try {
+      const result = await ctx.exec.run(['list-pins', requestAgent], { timeout: 10_000 })
+      if (!isCurrent()) return false
+      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t('pin-list-load-failed')).message)
+      const loaded = parsePinsResponse(result.stdout)
+      const priorActive = pinsSelection.value.activePath
+      const nextActivePath = priorActive !== null && loaded.pins.some(pin => normalizePath(pin.path) === normalizePath(priorActive)) ? priorActive : null
+      updatePinsState({
+        pins: loaded.pins,
+        loading: false,
+        error: null,
+        corruptSidecar: loaded.corruptSidecar,
+        activePath: nextActivePath,
+      })
+      reducePinsSelection({ type: 'intersect', keys: loaded.pins.map(pin => pin.path) })
+      if (expectedPaths && !samePinOrder(expectedPaths, loaded.pins.map(pin => pin.path))) showPinConflict(mount)
+      return true
+    } catch (caught) {
+      console.warn('[session-browser]', caught)
+      if (isCurrent()) updatePinsState({ loading: false, error: t('pin-list-load-failed') })
+      return false
+    } finally {
+      if (isCurrent() && pinsSelection.value.loading) updatePinsState({ loading: false })
+    }
+  }
+
+  function expectedMove(paths: string[], pinPath: string, direction: 'up' | 'down'): string[] {
+    const next = [...paths]
+    const index = next.indexOf(pinPath)
+    if (index < 0) return next
+    const target = direction === 'up' ? Math.max(0, index - 1) : Math.min(next.length - 1, index + 1)
+    if (target !== index) {
+      const [moved] = next.splice(index, 1)
+      next.splice(target, 0, moved)
+    }
+    return next
+  }
+
+  function comparePinPaths(left: string, right: string): number {
+    const leftBase = pathName(left).toLowerCase()
+    const rightBase = pathName(right).toLowerCase()
+    if (leftBase < rightBase) return -1
+    if (leftBase > rightBase) return 1
+    return left < right ? -1 : left > right ? 1 : 0
+  }
+
+  function expectedPromote(paths: string[], selectedPaths: string[]): string[] {
+    const selected = new Set(selectedPaths)
+    const promoted = paths.filter(pinPath => selected.has(pinPath)).sort(comparePinPaths)
+    return [...promoted, ...paths.filter(pinPath => !selected.has(pinPath))]
+  }
+
+  async function reconcilePinsAfterStaleMutation() {
+    const mount = activeMount
+    if (!isActiveMount(mount)) return
+    await loadPins(mount.pinsGeneration)
+  }
+
+  async function executePinMutation(task: QueuedPinMutation) {
+    const { mount, agent, generation, intent } = task
+    const isCurrent = () => isActiveMount(mount)
+      && generation === mount.pinsGeneration
+      && agent === activeAgent.value
+    if (!isCurrent()) return
+    const before = pinPaths()
+    let args: string[]
+    if (intent.type === 'add') args = ['add-pin', agent, intent.path]
+    else if (intent.type === 'remove') args = ['remove-pin', agent, ...intent.paths]
+    else if (intent.type === 'move') args = ['move-pin', agent, intent.path, intent.direction]
+    else if (intent.type === 'promote') args = ['promote-pins', agent, ...intent.paths]
+    else args = ['remove-pin', agent, '--reset-corrupt']
+
+    try {
+      const result = await ctx.exec.run(args, { timeout: 10_000 })
+      if (!isCurrent()) {
+        await reconcilePinsAfterStaleMutation()
+        return
+      }
+      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t('pin-mutation-failed')).message)
+      const parsed = JSON.parse(result.stdout) as any
+      let expected = before
+      let expectedAfterReload: string[] | undefined = before
+      if (intent.type === 'add') {
+        if (typeof parsed?.canonicalPath !== 'string' || (parsed.outcome !== 'applied' && parsed.outcome !== 'duplicate')) {
+          throw new Error(t('pin-invalid-response'))
+        }
+        expected = parsed.outcome === 'applied'
+          ? [parsed.canonicalPath, ...before.filter(pinPath => pinPath !== parsed.canonicalPath)]
+          : before
+      } else if (intent.type === 'move') {
+        if (parsed?.outcome !== 'applied' && parsed?.outcome !== 'absent') throw new Error(t('pin-invalid-response'))
+        expected = parsed.outcome === 'applied' ? expectedMove(before, intent.path, intent.direction) : before
+      } else {
+        if (!Array.isArray(parsed?.results) || typeof parsed.changed !== 'boolean') throw new Error(t('pin-invalid-response'))
+        if (intent.type === 'remove') {
+          const removed = new Set(parsed.results
+            .filter((item: any) => item?.outcome === 'applied' && typeof item.path === 'string')
+            .map((item: any) => item.path))
+          expected = before.filter(pinPath => !removed.has(pinPath))
+        } else if (intent.type === 'promote') {
+          expected = expectedPromote(before, intent.paths)
+        } else {
+          expected = []
+          if (!parsed.changed) expectedAfterReload = undefined
+        }
+      }
+      if (expectedAfterReload !== undefined) expectedAfterReload = expected
+      if (!isCurrent()) return
+      await loadPins(generation, expectedAfterReload)
+    } catch (caught) {
+      console.warn('[session-browser]', caught)
+      if (!isCurrent()) await reconcilePinsAfterStaleMutation()
+      else {
+        showError(t('pin-mutation-failed'))
+        await loadPins(generation)
+      }
+    }
+  }
+
+  async function drainPinMutationQueue() {
+    if (pinMutationInFlight) return
+    pinMutationInFlight = true
+    try {
+      while (pinMutationQueue.length > 0) {
+        const task = pinMutationQueue.shift()!
+        const current = isActiveMount(task.mount)
+          && task.generation === task.mount.pinsGeneration
+          && task.agent === activeAgent.value
+        if (!current) continue
+        pinsBulkRunning.value = true
+        await executePinMutation(task)
+        if (current && task.generation === task.mount.pinsGeneration && task.agent === activeAgent.value) {
+          pinsBulkRunning.value = false
+        }
+      }
+    } finally {
+      pinMutationInFlight = false
+      const mount = activeMount
+      if (isActiveMount(mount) && pinMutationQueue.length === 0) pinsBulkRunning.value = false
+    }
+  }
+
+  function enqueuePinMutation(intent: PinMutationIntent) {
+    const mount = activeMount
+    if (!isActiveMount(mount)) return
+    pinMutationQueue.push({ mount, agent: activeAgent.value, generation: mount.pinsGeneration, intent })
+    pinsBulkRunning.value = true
+    void drainPinMutationQueue()
+  }
+
+  async function persistPinsCollapsed(collapsed: boolean) {
+    try {
+      await ctx.storage.set(STORAGE_KEYS.pinsCollapsed, collapsed)
+      const verified = await ctx.storage.get(STORAGE_KEYS.pinsCollapsed)
+      if (verified !== collapsed) console.warn('[session-browser]', t('pin-collapse-persist-warning'))
+    } catch (caught) {
+      console.warn('[session-browser]', t('pin-collapse-persist-warning'), caught)
+    }
+  }
+
   function createMountContext(): MountContext {
     return {
       active: false,
@@ -1169,6 +1463,7 @@ export function activate(ctx: PluginContext): PluginExports {
       paneGeneration: 0,
       sortGeneration: 0,
       treeGeneration: 0,
+      pinsGeneration: 0,
       disposers: new Set(),
       highlightTimer: null,
       copiedTimer: null,
@@ -1179,6 +1474,7 @@ export function activate(ctx: PluginContext): PluginExports {
       allTranscriptMessages: [],
       rootResizeObserver: null,
       localeObserver: null,
+      pinsNoteTimer: null,
     }
   }
 
@@ -1418,8 +1714,11 @@ export function activate(ctx: PluginContext): PluginExports {
       activeMount.indexGeneration++
       activeMount.searchGeneration++
       activeMount.treeGeneration++
+      activeMount.pinsGeneration++
       activeMount.pickerRequestSeq++
       activeMount.pickerValidationSeq++
+      if (activeMount.pinsNoteTimer) clearTimeout(activeMount.pinsNoteTimer)
+      activeMount.pinsNoteTimer = null
     }
     clearSearchOverlay(true)
     resetTranscript()
@@ -1429,6 +1728,19 @@ export function activate(ctx: PluginContext): PluginExports {
     page.value = 1
     selection.value = selectionReducer(selection.value, { type: 'clear-partition' })
     selectMode.value = false
+    pinsSelectMode.value = false
+    pinsBulkRunning.value = false
+    pinsSelection.value = {
+      ...pinsSelection.value,
+      selected: new Set(),
+      anchor: null,
+      pins: [],
+      loading: true,
+      error: null,
+      corruptSidecar: null,
+      conflictNote: false,
+      activePath: null,
+    }
     timeRange.value = 'all'
     branchFilter.value = ''
     branchPickerOpen.value = false
@@ -1451,7 +1763,7 @@ export function activate(ctx: PluginContext): PluginExports {
     activeAgent.value = nextAgent
     persist(STORAGE_KEYS.activeAgent, nextAgent)
     resetForAgentSwitch()
-    const loaded = await loadIndex()
+    const [loaded] = await Promise.all([loadIndex(), loadPins()])
     if (!loaded) return
     if (sessions.value.length === 0) {
       ctx.ui.notify(t('agent-empty-notice', { agent: agentLabel(descriptor) }), 'warn', t('agent-empty-title'))
@@ -1510,7 +1822,7 @@ export function activate(ctx: PluginContext): PluginExports {
           && !switchedAgent
           && candidate.id === previousAgent
           && candidate.id === requestedId
-        const loaded = await loadIndex(preserveCandidateState)
+        const [loaded] = await Promise.all([loadIndex(preserveCandidateState), loadPins()])
         if (!isActiveMount(mount)) return
         if (candidate.id === requestedId) requestedLoaded = loaded
         if (loaded && sessions.value.length > 0) {
@@ -1524,7 +1836,7 @@ export function activate(ctx: PluginContext): PluginExports {
         if (activeAgent.value !== emptyAgent.id) {
           resetForAgentSwitch()
           activeAgent.value = emptyAgent.id
-          await loadIndex()
+          await Promise.all([loadIndex(), loadPins()])
           if (!isActiveMount(mount)) return
         } else if (requestedLoaded && sessions.value.length === 0) {
           clearSearchOverlay(true)
@@ -2139,12 +2451,13 @@ export function activate(ctx: PluginContext): PluginExports {
     if (!isActiveMount(mount)) return
     const generation = ++mount.displayGeneration
     try {
-      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize, savedExportDestination] = await Promise.all([
+      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize, savedExportDestination, savedPinsCollapsed] = await Promise.all([
         ctx.storage.get(STORAGE_KEYS.locale),
         ctx.storage.get(STORAGE_KEYS.fontScale),
         ctx.storage.get(STORAGE_KEYS.themeFollowHost),
         ctx.storage.get(STORAGE_KEYS.pageSize),
         ctx.storage.get(STORAGE_KEYS.exportDestination),
+        ctx.storage.get(STORAGE_KEYS.pinsCollapsed),
       ])
       if (!isActiveMount(mount) || generation !== mount.displayGeneration) return
       localeSetting.value = normalizeLocaleSetting(savedLocale)
@@ -2158,6 +2471,7 @@ export function activate(ctx: PluginContext): PluginExports {
       exportDestination.value = typeof savedExportDestination === 'string' && savedExportDestination.trim()
         ? savedExportDestination.trim()
         : DEFAULT_EXPORT_DESTINATION
+      updatePinsState({ collapsed: savedPinsCollapsed === true })
     } catch { /* use defaults */ }
   }
 
@@ -2165,6 +2479,7 @@ export function activate(ctx: PluginContext): PluginExports {
     if (bulkRunning.value) return
     if (activeMount) activeMount.treeGeneration++
     visibleRoot.value = normalizePath(nextRoot)
+    updatePinsState({ activePath: null })
     clearSearchOverlay()
     committedSelection.value = { path: visibleRoot.value, mode: committedSelection.value.mode, sessionId: null }
     applyFilterChange()
@@ -2305,6 +2620,7 @@ export function activate(ctx: PluginContext): PluginExports {
   function selectNode(nodePath: string) {
     if (bulkRunning.value) return
     clearSearchOverlay()
+    updatePinsState({ activePath: null })
     committedSelection.value = { ...committedSelection.value, path: nodePath, sessionId: null }
     applyFilterChange()
     resetTranscript()
@@ -2640,6 +2956,244 @@ export function activate(ctx: PluginContext): PluginExports {
     })
   }
 
+  function activatePin(pin: FolderPin) {
+    if (pinsBulkRunning.value) return
+    if (activeMount) activeMount.treeGeneration++
+    clearSearchOverlay()
+    committedSelection.value = { path: pin.path, mode: 'exact', sessionId: null }
+    updatePinsState({ activePath: pin.path })
+    applyFilterChange()
+    resetTranscript()
+    if (compactMode.value) compactView.value = 'list'
+  }
+
+  function revealActivePinInTree() {
+    const state = pinsSelection.value
+    const activePath = state.activePath
+    if (!activePath || state.loading || pinsBulkRunning.value || bulkRunning.value || state.corruptSidecar) return
+    clearSearchOverlay()
+    committedSelection.value = { path: activePath, mode: 'subtree', sessionId: null }
+
+    const nextExpanded = new Set(expandedPaths.value)
+    let ancestor = parentPath(activePath)
+    while (true) {
+      nextExpanded.add(ancestor)
+      if (ancestor === '/') break
+      ancestor = parentPath(ancestor)
+    }
+    expandedPaths.value = nextExpanded
+    persistExpandedPaths()
+
+    if (!isPathWithin(visibleRoot.value, activePath)) {
+      setVisibleRoot(activePath)
+      updatePinsState({ activePath })
+    }
+    applyFilterChange()
+    resetTranscript()
+    if (compactMode.value) compactView.value = 'tree'
+  }
+
+  function pinMetadata(pin: FolderPin): { count: number; lastActiveAt: string } {
+    const keys = pinMatchKeys(pin)
+    const exactSessions = originFilteredSessions.value.filter(session => keys.has(normalizePinMatchKey(session.rootPath)))
+    return {
+      count: exactSessions.length,
+      lastActiveAt: exactSessions.reduce((newest, session) => newerTimestamp(newest, session.lastActiveAt), ''),
+    }
+  }
+
+  function renderPinRow(pin: FolderPin, index: number): any {
+    const selectMode = pinsSelectMode.value
+    const metadata = pinMetadata(pin)
+    const name = pathName(pin.path)
+    const count = t(metadata.count === 1 ? 'pin-session-count-one' : 'pin-session-count-other', { n: metadata.count })
+    const activity = t('pin-last-activity', { time: formatRelativeTime(metadata.lastActiveAt, t) })
+    const missingTitle = pin.exists ? pin.path : t('pin-folder-missing')
+    const activePath = pinsSelection.value.activePath
+    const active = activePath !== null && normalizePath(pin.path) === normalizePath(activePath)
+    const activateOrToggle = (shiftKey = false) => {
+      if (pinsBulkRunning.value) return
+      if (pinsSelectMode.value) {
+        reducePinsSelection(shiftKey
+          ? { type: 'shift-range', key: pin.path, pageKeys: pinPaths() }
+          : { type: 'toggle', key: pin.path })
+      } else {
+        activatePin(pin)
+      }
+    }
+
+    return h('div', {
+      class: [
+        'ccm-browser-pin-row',
+        pinsSelectMode.value ? 'ccm-browser-pin-row-edit' : '',
+        !pin.exists ? 'ccm-browser-pin-row-missing' : '',
+        active ? 'ccm-browser-pin-row-active' : '',
+      ],
+      key: pin.path,
+      title: missingTitle,
+      role: !selectMode ? 'button' : undefined,
+      tabindex: !selectMode ? (pinsBulkRunning.value ? -1 : 0) : undefined,
+      'aria-disabled': !selectMode ? pinsBulkRunning.value : undefined,
+      'aria-current': !selectMode && active ? 'true' : undefined,
+      onClick: (event?: MouseEvent) => activateOrToggle(Boolean(event?.shiftKey)),
+      onKeydown: !selectMode ? (event: KeyboardEvent) => {
+        if (event.target !== event.currentTarget || (event.key !== 'Enter' && event.key !== ' ')) return
+        event.preventDefault()
+        activateOrToggle(event.shiftKey)
+      } : undefined,
+    }, [
+      pinsSelectMode.value ? h('input', {
+        type: 'checkbox',
+        checked: pinsSelection.value.selected.has(pin.path),
+        disabled: pinsBulkRunning.value,
+        'aria-label': t('pin-select-folder', { name }),
+        onClick: (event: MouseEvent) => {
+          event.stopPropagation()
+          reducePinsSelection(event.shiftKey
+            ? { type: 'shift-range', key: pin.path, pageKeys: pinPaths() }
+            : { type: 'toggle', key: pin.path })
+        },
+      }) : null,
+      IconFolder(14),
+      h('span', { class: 'ccm-browser-pin-name' }, name),
+      h('span', { class: 'ccm-browser-pin-meta' }, [
+        h('span', {}, count),
+        h('span', {}, activity),
+      ]),
+      pinsSelectMode.value ? h('button', {
+        class: 'ccm-icon-btn ccm-browser-pin-move',
+        type: 'button',
+        title: t('pin-move-up', { name }),
+        'aria-label': t('pin-move-up', { name }),
+        disabled: pinsBulkRunning.value || index === 0,
+        onClick: (event?: MouseEvent) => {
+          event?.stopPropagation()
+          enqueuePinMutation({ type: 'move', path: pin.path, direction: 'up' })
+        },
+      }, [IconArrowUp(13)]) : null,
+      pinsSelectMode.value ? h('button', {
+        class: 'ccm-icon-btn ccm-browser-pin-move',
+        type: 'button',
+        title: t('pin-move-down', { name }),
+        'aria-label': t('pin-move-down', { name }),
+        disabled: pinsBulkRunning.value || index === pinsSelection.value.pins.length - 1,
+        onClick: (event?: MouseEvent) => {
+          event?.stopPropagation()
+          enqueuePinMutation({ type: 'move', path: pin.path, direction: 'down' })
+        },
+      }, [IconArrowDown(13)]) : null,
+    ])
+  }
+
+  function renderPinsSection(): any {
+    const state = pinsSelection.value
+    const headerControlsDisabled = state.loading || pinsBulkRunning.value || Boolean(state.corruptSidecar)
+    const allSelected = state.pins.length > 0 && state.pins.every(pin => state.selected.has(pin.path))
+    const selectedPins = state.pins.filter(pin => state.selected.has(pin.path))
+    return h('section', { class: ['ccm-browser-pins-section', state.collapsed ? 'ccm-browser-pins-collapsed' : ''] }, [
+      h('div', { class: 'ccm-browser-pins-header' }, [
+        IconPin(14),
+        h('span', { class: 'ccm-browser-pins-title' }, t('pinned-folders')),
+        h('span', { class: 'ccm-browser-pane-count' }, String(state.pins.length)),
+        h('div', { class: 'ccm-browser-pins-controls' }, [
+          !state.collapsed ? h('button', {
+            class: ['ccm-icon-btn', pinsSelectMode.value ? 'ccm-icon-btn-active' : ''],
+            type: 'button',
+            title: t('pin-edit-mode'),
+            'aria-label': t('pin-edit-mode'),
+            'aria-pressed': pinsSelectMode.value,
+            disabled: headerControlsDisabled,
+            onClick: () => {
+              pinsSelectMode.value = !pinsSelectMode.value
+              if (!pinsSelectMode.value) reducePinsSelection({ type: 'clear-partition' })
+            },
+          }, [IconCheck(14)]) : null,
+          !state.collapsed ? h('button', {
+            class: 'ccm-icon-btn',
+            type: 'button',
+            title: t('pin-reveal-in-tree'),
+            'aria-label': t('pin-reveal-in-tree'),
+            disabled: headerControlsDisabled || !state.activePath || bulkRunning.value,
+            onClick: revealActivePinInTree,
+          }, [IconCornerUpRight(14)]) : null,
+          h('button', {
+            class: 'ccm-icon-btn',
+            type: 'button',
+            title: t(state.collapsed ? 'pin-expand-section' : 'pin-collapse-section'),
+            'aria-label': t(state.collapsed ? 'pin-expand-section' : 'pin-collapse-section'),
+            'aria-expanded': !state.collapsed,
+            'aria-pressed': state.collapsed,
+            disabled: headerControlsDisabled,
+            onClick: () => {
+              const collapsed = !state.collapsed
+              updatePinsState({ collapsed })
+              void persistPinsCollapsed(collapsed)
+            },
+          }, [state.collapsed ? IconChevronRight(14) : IconChevronDown(14)]),
+        ]),
+      ]),
+      state.collapsed ? null : h('div', { class: 'ccm-browser-pins-body' }, [
+        state.conflictNote
+          ? h('div', { class: 'ccm-browser-pin-note', role: 'status' }, t('pin-list-changed'))
+          : null,
+        state.corruptSidecar
+          ? h('div', { class: 'ccm-browser-pin-banner', role: 'alert' }, [
+              h('span', {}, t('pin-list-unreadable', { path: state.corruptSidecar })),
+              h('button', {
+                class: 'ccm-primary-btn ccm-primary-btn-sm',
+                type: 'button',
+                disabled: pinsBulkRunning.value,
+                onClick: () => enqueuePinMutation({ type: 'reset-corrupt' }),
+              }, t('pin-reset-list')),
+            ])
+          : state.error
+            ? h('div', { class: 'ccm-browser-pin-banner', role: 'alert' }, state.error)
+            : state.loading
+              ? h('div', { class: 'ccm-browser-pin-state', role: 'status' }, t('pin-list-loading'))
+              : state.pins.length === 0
+                ? h('div', { class: 'ccm-browser-pin-state' }, t('pin-empty-onboarding'))
+                : h('div', { class: 'ccm-browser-pin-list' }, state.pins.map(renderPinRow)),
+        pinsSelectMode.value && !state.corruptSidecar ? h('div', { class: 'ccm-browser-filter-row ccm-browser-select-bar ccm-browser-pin-select-bar' }, [
+          h('button', {
+            class: 'ccm-icon-btn ccm-browser-action-control',
+            type: 'button',
+            disabled: pinsBulkRunning.value || state.pins.length === 0,
+            onClick: () => reducePinsSelection(allSelected
+              ? { type: 'clear-partition' }
+              : { type: 'snapshot-all', keys: state.pins.map(pin => pin.path) }),
+          }, [IconCheck(13), t(allSelected ? 'deselect-all' : 'select-all-filtered', { n: state.pins.length })]),
+          h('span', { class: 'ccm-browser-selected-count' }, t('selected-count', { n: state.selected.size })),
+          state.selected.size > 0 ? h('button', {
+            class: 'ccm-icon-btn ccm-browser-clear-selection',
+            type: 'button',
+            title: t('clear-selection'),
+            'aria-label': t('clear-selection'),
+            disabled: pinsBulkRunning.value,
+            onClick: () => reducePinsSelection({ type: 'clear-partition' }),
+          }, [IconX(13)]) : null,
+        ]) : null,
+        state.selected.size > 0 && !state.corruptSidecar ? h('div', {
+          class: 'ccm-browser-filter-row ccm-browser-bulk-toolbar ccm-browser-pin-toolbar',
+          role: 'toolbar',
+          'aria-label': t('bulk-actions'),
+        }, [
+          h('button', {
+            class: 'ccm-icon-btn ccm-browser-action-control ccm-browser-danger-control',
+            type: 'button',
+            disabled: pinsBulkRunning.value,
+            onClick: () => enqueuePinMutation({ type: 'remove', paths: selectedPins.map(pin => pin.path) }),
+          }, [IconTrash2(13), t('pin-remove-selected', { n: selectedPins.length })]),
+          h('button', {
+            class: 'ccm-icon-btn ccm-browser-action-control',
+            type: 'button',
+            disabled: pinsBulkRunning.value,
+            onClick: () => enqueuePinMutation({ type: 'promote', paths: selectedPins.map(pin => pin.path) }),
+          }, [IconArrowUp(13), t('pin-promote-selected', { n: selectedPins.length })]),
+        ]) : null,
+      ]),
+    ])
+  }
+
   function renderTreeNode(node: SessionPathTreeNode, depth: number): any {
     const selected = committedSelection.value.path === node.path
     const highlighted = transientHighlightPath.value === node.path
@@ -2689,68 +3243,87 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function renderTreePane() {
+    const pinnedFolder = currentFolderPin()
     return h('aside', {
       class: 'ccm-browser-pane ccm-browser-tree-pane',
       style: compactMode.value ? undefined : { width: `calc(${paneWidths.value.left}px * var(--ccm-fs, 1))` },
     }, [
-      h('div', { class: 'ccm-browser-pane-header' }, [
-        h('div', { class: 'ccm-browser-pane-title' }, t('workspaces')),
-        h('div', { class: 'ccm-browser-pane-actions' }, [
-          compactMode.value ? h('button', {
-            class: 'ccm-icon-btn',
-            title: t('compact-back-to-sessions'),
-            'aria-label': t('compact-back-to-sessions'),
-            onClick: () => { compactView.value = 'list' },
-          }, [IconChevronLeft(15)]) : null,
-          h('button', {
-            class: 'ccm-icon-btn',
-            title: t('navigate-parent'),
-            'aria-label': t('navigate-parent'),
-            disabled: loading.value || bulkRunning.value || visibleRoot.value === '/',
-            onClick: () => setVisibleRoot(parentPath(visibleRoot.value)),
-          }, [IconArrowLeft(15)]),
-          h('button', {
-            class: ['ccm-icon-btn', committedSelection.value.mode === 'exact' ? 'ccm-icon-btn-active' : ''],
-            title: t(committedSelection.value.mode === 'subtree' ? 'scope-exact' : 'scope-subtree'),
-            'aria-label': t(committedSelection.value.mode === 'subtree' ? 'scope-exact' : 'scope-subtree'),
-            disabled: bulkRunning.value,
-            onClick: () => {
-              clearSearchOverlay()
-              committedSelection.value = {
-                ...committedSelection.value,
-                mode: committedSelection.value.mode === 'subtree' ? 'exact' : 'subtree',
-                sessionId: null,
-              }
-              applyFilterChange()
-            },
-          }, [committedSelection.value.mode === 'subtree' ? IconFolder(15) : IconFileText(15)]),
-          h('button', {
-            class: 'ccm-icon-btn',
-            title: t('use-selected-folder-as-tree-root'),
-            'aria-label': t('use-selected-folder-as-tree-root'),
-            disabled: loading.value
-              || bulkRunning.value
-              || !committedSelection.value.path
-              || committedSelection.value.path === visibleRoot.value,
-            onClick: () => setVisibleRoot(committedSelection.value.path),
-          }, [IconFolderDown(15)]),
-          h('button', {
-            class: 'ccm-icon-btn',
-            title: t('change-tree-root'),
-            'aria-label': t('change-tree-root'),
-            disabled: loading.value || bulkRunning.value,
-            ref: (element: HTMLElement | null) => { pickerTriggerRef.value = element },
-            onClick: () => openRootPicker('tree-root'),
-          }, [IconPencil(15)]),
+      renderPinsSection(),
+      h('div', { class: 'ccm-browser-tree-pane-main' }, [
+        h('div', { class: 'ccm-browser-pane-header' }, [
+          h('div', { class: 'ccm-browser-pane-title' }, t('workspaces')),
+          h('div', { class: 'ccm-browser-pane-actions' }, [
+            compactMode.value ? h('button', {
+              class: 'ccm-icon-btn',
+              title: t('compact-back-to-sessions'),
+              'aria-label': t('compact-back-to-sessions'),
+              onClick: () => { compactView.value = 'list' },
+            }, [IconChevronLeft(15)]) : null,
+            h('button', {
+              class: ['ccm-icon-btn', pinnedFolder ? 'ccm-icon-btn-active' : ''],
+              type: 'button',
+              title: t(pinnedFolder ? 'pin-current-folder-remove' : 'pin-current-folder-add'),
+              'aria-label': t(pinnedFolder ? 'pin-current-folder-remove' : 'pin-current-folder-add'),
+              'aria-pressed': Boolean(pinnedFolder),
+              disabled: loading.value
+                || pinsSelection.value.loading
+                || pinsBulkRunning.value
+                || Boolean(pinsSelection.value.corruptSidecar)
+                || !committedSelection.value.path,
+              onClick: () => enqueuePinMutation(pinnedFolder
+                ? { type: 'remove', paths: [pinnedFolder.path] }
+                : { type: 'add', path: committedSelection.value.path }),
+            }, [IconPin(15)]),
+            h('button', {
+              class: 'ccm-icon-btn',
+              title: t('navigate-parent'),
+              'aria-label': t('navigate-parent'),
+              disabled: loading.value || bulkRunning.value || visibleRoot.value === '/',
+              onClick: () => setVisibleRoot(parentPath(visibleRoot.value)),
+            }, [IconArrowLeft(15)]),
+            h('button', {
+              class: ['ccm-icon-btn', committedSelection.value.mode === 'exact' ? 'ccm-icon-btn-active' : ''],
+              title: t(committedSelection.value.mode === 'subtree' ? 'scope-exact' : 'scope-subtree'),
+              'aria-label': t(committedSelection.value.mode === 'subtree' ? 'scope-exact' : 'scope-subtree'),
+              disabled: bulkRunning.value,
+              onClick: () => {
+                clearSearchOverlay()
+                committedSelection.value = {
+                  ...committedSelection.value,
+                  mode: committedSelection.value.mode === 'subtree' ? 'exact' : 'subtree',
+                  sessionId: null,
+                }
+                applyFilterChange()
+              },
+            }, [committedSelection.value.mode === 'subtree' ? IconFolder(15) : IconFileText(15)]),
+            h('button', {
+              class: 'ccm-icon-btn',
+              title: t('use-selected-folder-as-tree-root'),
+              'aria-label': t('use-selected-folder-as-tree-root'),
+              disabled: loading.value
+                || bulkRunning.value
+                || !committedSelection.value.path
+                || committedSelection.value.path === visibleRoot.value,
+              onClick: () => setVisibleRoot(committedSelection.value.path),
+            }, [IconFolderDown(15)]),
+            h('button', {
+              class: 'ccm-icon-btn',
+              title: t('change-tree-root'),
+              'aria-label': t('change-tree-root'),
+              disabled: loading.value || bulkRunning.value,
+              ref: (element: HTMLElement | null) => { pickerTriggerRef.value = element },
+              onClick: () => openRootPicker('tree-root'),
+            }, [IconPencil(15)]),
+          ]),
         ]),
-      ]),
-      h('div', { class: 'ccm-browser-root-path', title: visibleRoot.value }, visibleRoot.value),
-      h('div', { class: 'ccm-browser-tree-body' }, [
-        loading.value
-          ? h('div', { class: 'ccm-browser-pane-state' }, t('building-index'))
-          : tree.value
-            ? renderTreeNode(tree.value, 0)
-            : h('div', { class: 'ccm-browser-pane-state' }, t('no-indexed-sessions')),
+        h('div', { class: 'ccm-browser-root-path', title: visibleRoot.value }, visibleRoot.value),
+        h('div', { class: 'ccm-browser-tree-body' }, [
+          loading.value
+            ? h('div', { class: 'ccm-browser-pane-state' }, t('building-index'))
+            : tree.value
+              ? renderTreeNode(tree.value, 0)
+              : h('div', { class: 'ccm-browser-pane-state' }, t('no-indexed-sessions')),
+        ]),
       ]),
     ])
   }
@@ -3143,6 +3716,8 @@ export function activate(ctx: PluginContext): PluginExports {
     const displayedCount = overlay ? overlay.results.length : listedSessions.length
     const maxPage = Math.max(1, Math.ceil(listedSessions.length / pageSize.value))
     const pageSessions = listedSessions.slice((page.value - 1) * pageSize.value, page.value * pageSize.value)
+    const pinSpecificEmpty = pinsSelection.value.activePath === committedSelection.value.path
+      && scopedPartitionSessions(partition).length === 0
     const pageKeys = pageSessions.map(sessionKey)
     const allSelected = listedSessions.length > 0 && listedSessions.every(session => selection.value.selected.has(sessionKey(session)))
     const createdRangeActive = Boolean(createdRange.value.from || createdRange.value.to)
@@ -3212,6 +3787,7 @@ export function activate(ctx: PluginContext): PluginExports {
           class: ['ccm-icon-btn', selectMode.value ? 'ccm-icon-btn-active' : ''],
           title: t('select-mode'),
           'aria-label': t('select-mode'),
+          'aria-pressed': selectMode.value,
           disabled: bulkRunning.value || Boolean(overlay),
           onClick: () => {
             selectMode.value = !selectMode.value
@@ -3468,7 +4044,9 @@ export function activate(ctx: PluginContext): PluginExports {
                 : h('div', { class: 'ccm-browser-pane-state' }, t('no-full-text-matches'))
               : pageSessions.length
                 ? pageSessions.map(session => renderSessionCard(session, pageKeys))
-                : h('div', { class: 'ccm-browser-pane-state' }, t('no-matching-sessions', { partition: t(partition) })),
+                : h('div', { class: 'ccm-browser-pane-state' }, pinSpecificEmpty
+                    ? t('pin-no-sessions')
+                    : t('no-matching-sessions', { partition: t(partition) })),
       ]),
       !overlay && selectMode.value ? h('div', { class: 'ccm-browser-filter-row ccm-browser-select-bar' }, [
         h('button', {
@@ -3838,6 +4416,7 @@ export function activate(ctx: PluginContext): PluginExports {
         ctx.onUnmounted(() => {
           bulkCancelRequested.value = true
           bulkRunning.value = false
+          pinsBulkRunning.value = false
           loading.value = false
           transcriptLoading.value = false
           searching.value = false
@@ -3846,15 +4425,18 @@ export function activate(ctx: PluginContext): PluginExports {
           mount.active = false
           mount.indexGeneration++
           mount.searchGeneration++
+          mount.pinsGeneration++
           mount.transcriptLoadToken++
           mount.pickerRequestSeq++
           mount.pickerValidationSeq++
           mount.rootResizeObserver?.disconnect()
           mount.localeObserver?.disconnect()
+          if (mount.pinsNoteTimer) clearTimeout(mount.pinsNoteTimer)
           for (const dispose of mount.disposers) dispose()
           mount.disposers.clear()
           mount.highlightTimer = null
           mount.copiedTimer = null
+          mount.pinsNoteTimer = null
           mount.transcriptFrame = null
           if (activeMount === mount) activeMount = null
         })

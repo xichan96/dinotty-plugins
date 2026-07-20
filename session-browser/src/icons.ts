@@ -19,6 +19,9 @@ const ICON_PATHS: Record<string, [string, Record<string, string>][]> = {
   'chevron-right': [['path', { d: 'm9 18 6-6-6-6' }]],
   'chevron-down': [['path', { d: 'm6 9 6 6 6-6' }]],
   'arrow-left': [['path', { d: 'm12 19-7-7 7-7' }], ['path', { d: 'M19 12H5' }]],
+  'arrow-up': [['path', { d: 'm18 15-6-6-6 6' }]],
+  'arrow-down': [['path', { d: 'm6 9 6 6 6-6' }]],
+  'corner-up-right': [['path', { d: 'M7 17 17 7' }], ['path', { d: 'M7 7h10v10' }]],
   send: [
     ['path', { d: 'M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z' }],
     ['path', { d: 'm21.854 2.147-10.94 10.939' }],
@@ -40,6 +43,12 @@ const ICON_PATHS: Record<string, [string, Record<string, string>][]> = {
   check: [['path', { d: 'M20 6 9 17l-5-5' }]],
   folder: [
     ['path', { d: 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z' }],
+  ],
+  pin: [
+    ['path', { d: 'M12 17v5' }],
+    ['path', { d: 'M5 17h14' }],
+    ['path', { d: 'M6 17 7 7h10l1 10' }],
+    ['path', { d: 'M8 7V2h8v5' }],
   ],
   'folder-down': [
     ['path', { d: 'M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z' }],
@@ -156,12 +165,16 @@ export function IconChevronLeft(size?: number) { return renderIcon(ICON_PATHS['c
 export function IconChevronRight(size?: number) { return renderIcon(ICON_PATHS['chevron-right'], size) }
 export function IconChevronDown(size?: number) { return renderIcon(ICON_PATHS['chevron-down'], size) }
 export function IconArrowLeft(size?: number) { return renderIcon(ICON_PATHS['arrow-left'], size) }
+export function IconArrowUp(size?: number) { return renderIcon(ICON_PATHS['arrow-up'], size) }
+export function IconArrowDown(size?: number) { return renderIcon(ICON_PATHS['arrow-down'], size) }
+export function IconCornerUpRight(size?: number) { return renderIcon(ICON_PATHS['corner-up-right'], size) }
 export function IconSend(size?: number) { return renderIcon(ICON_PATHS.send, size) }
 export function IconMenu(size?: number) { return renderIcon(ICON_PATHS.menu, size) }
 export function IconBrain(size?: number) { return renderIcon(ICON_PATHS.brain, size) }
 export function IconCopy(size?: number) { return renderIcon(ICON_PATHS.copy, size) }
 export function IconCheck(size?: number) { return renderIcon(ICON_PATHS.check, size) }
 export function IconFolder(size?: number) { return renderIcon(ICON_PATHS.folder, size) }
+export function IconPin(size?: number) { return renderIcon(ICON_PATHS.pin, size) }
 export function IconFolderDown(size?: number) { return renderIcon(ICON_PATHS['folder-down'], size) }
 export function IconZap(size?: number) { return renderIcon(ICON_PATHS.zap, size) }
 export function IconHash(size?: number) { return renderIcon(ICON_PATHS.hash, size) }
