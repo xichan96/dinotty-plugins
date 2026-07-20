@@ -51,36 +51,27 @@ const WINDOW_META = {
   monthly: { label: 'M', tooltip: 'Volcano Ark · monthly quota', priority: 53 },
 }
 
-// ─── Web Crypto Helpers ──────────────────────────────────────────────────────
+// ─── Crypto helpers (delegated to ctx.crypto so the plugin keeps working
+// in non-secure HTTP contexts where crypto.subtle is unavailable) ───────────
 
-const enc = new TextEncoder()
-
-function bytesToHex(bytes) {
-  return Array.from(bytes).map((b) => b.toString(16).padStart(2, '0')).join('')
-}
-
-/** @param {string} data */
-async function sha256Hex(data) {
-  const hash = await crypto.subtle.digest('SHA-256', enc.encode(data))
-  return bytesToHex(new Uint8Array(hash))
+/**
+ * @param {PluginContext} ctx
+ * @param {string} data
+ * @returns {Promise<string>} lowercase hex
+ */
+async function sha256Hex(ctx, data) {
+  const bytes = await ctx.crypto.hash('sha256', data)
+  return ctx.crypto.toHex(bytes)
 }
 
 /**
+ * @param {PluginContext} ctx
  * @param {Uint8Array | string} key
  * @param {string} data
  * @returns {Promise<Uint8Array>}
  */
-async function hmacSha256(key, data) {
-  const keyBytes = typeof key === 'string' ? enc.encode(key) : key
-  const cryptoKey = await crypto.subtle.importKey(
-    'raw',
-    keyBytes,
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    ['sign'],
-  )
-  const sig = await crypto.subtle.sign('HMAC', cryptoKey, enc.encode(data))
-  return new Uint8Array(sig)
+async function hmacSha256(ctx, key, data) {
+  return ctx.crypto.hmac('sha256', key, data)
 }
 
 // ─── Volcano Engine Signature v4 ────────────────────────────────────────────
@@ -102,26 +93,28 @@ function formatVolcDatetime(date) {
  *
  * Matches the official volcenginesdkcore SignerV4.get_signing_secret_key_v4.
  *
+ * @param {PluginContext} ctx
  * @param {string} secretKey
  * @param {string} shortDate  // YYYYMMDD
  * @returns {Promise<Uint8Array>}
  */
-async function deriveSigningKey(secretKey, shortDate) {
-  const kDate = await hmacSha256(secretKey, shortDate)
-  const kRegion = await hmacSha256(kDate, ARK_REGION)
-  const kService = await hmacSha256(kRegion, ARK_SERVICE)
-  const kSigning = await hmacSha256(kService, 'request')
+async function deriveSigningKey(ctx, secretKey, shortDate) {
+  const kDate = await hmacSha256(ctx, secretKey, shortDate)
+  const kRegion = await hmacSha256(ctx, kDate, ARK_REGION)
+  const kService = await hmacSha256(ctx, kRegion, ARK_SERVICE)
+  const kSigning = await hmacSha256(ctx, kService, 'request')
   return kSigning
 }
 
 /**
  * Sign and execute GetAFPUsage via curl (bypasses browser CORS).
  *
+ * @param {PluginContext} ctx
  * @param {{ run: (args: string[], opts?: any) => Promise<{ code: number, stdout: string, stderr: string }> }} exec
  * @param {{ accessKey: string, secretKey: string }} creds
  * @returns {Promise<Record<string, { used: number, total: number, resetAt?: string }>>}
  */
-async function fetchQuota(exec, creds) {
+async function fetchQuota(ctx, exec, creds) {
   const now = new Date()
   const datetime = formatVolcDatetime(now)
   const shortDate = datetime.slice(0, 8)
@@ -130,7 +123,7 @@ async function fetchQuota(exec, creds) {
   const pathName = '/'
   const query = `Action=${ARK_ACTION}&Version=${ARK_API_VERSION}`
   const payload = '{}'
-  const payloadHash = await sha256Hex(payload)
+  const payloadHash = await sha256Hex(ctx, payload)
 
   // Match the official volcenginesdkcore SignerV4 exactly:
   // signed headers = {content-type, content-md5, host} ∪ {any X-* header}.
@@ -162,14 +155,14 @@ async function fetchQuota(exec, creds) {
     signedHeaders,
     payloadHash,
   ].join('\n')
-  const canonicalHash = await sha256Hex(canonicalRequest)
+  const canonicalHash = await sha256Hex(ctx, canonicalRequest)
 
   const credentialScope = `${shortDate}/${ARK_REGION}/${ARK_SERVICE}/request`
   const stringToSign = `HMAC-SHA256\n${datetime}\n${credentialScope}\n${canonicalHash}`
 
-  const signingKey = await deriveSigningKey(creds.secretKey, shortDate)
-  const signatureBytes = await hmacSha256(signingKey, stringToSign)
-  const signature = bytesToHex(signatureBytes)
+  const signingKey = await deriveSigningKey(ctx, creds.secretKey, shortDate)
+  const signatureBytes = await hmacSha256(ctx, signingKey, stringToSign)
+  const signature = ctx.crypto.toHex(signatureBytes)
 
   const authorization =
     `HMAC-SHA256 Credential=${creds.accessKey}/${credentialScope}, ` +
@@ -388,7 +381,7 @@ export function activate(ctx) {
         lastError.value = ''
         return
       }
-      const data = await fetchQuota(ctx.exec, {
+      const data = await fetchQuota(ctx, ctx.exec, {
         accessKey: acc.accessKey,
         secretKey: acc.secretKey,
       })

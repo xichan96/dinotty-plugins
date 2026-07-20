@@ -1,7 +1,7 @@
 {
   "id": "volc-ark-quota",
   "name": "Volcano Ark Quota",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Display Volcano Engine Ark Flow Plan quota (5h / weekly / monthly) as monitor charts and status bar entries",
   "icon": "gauge",
   "entry": "./main.js",
