@@ -1,0 +1,38 @@
+{
+  "id": "cloudflare-quick-tunnel",
+  "name": "Cloudflare Tunnel",
+  "version": "0.1.0",
+  "minAppVersion": "0.17.2",
+  "description": "Create an independently authenticated, temporary Cloudflare Quick Tunnel for Dinotty.",
+  "icon": "radio-tower",
+  "entry": "./dist/main.js",
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "cloudflare-quick-tunnel.open", "title": "Open Cloudflare Tunnel" },
+    { "id": "cloudflare-quick-tunnel.stop", "title": "Stop Cloudflare Tunnel" }
+  ],
+  "permissions": [
+    "native.execute",
+    "process.long-running",
+    "network.outbound",
+    "network.listen-loopback",
+    "network.connect-loopback",
+    "clipboard.write-on-user-action"
+  ],
+  "bin": {
+    "mode": "cli",
+    "entries": {
+      "windows-x86_64": "bin/windows-x86_64/dinotty-quick-tunnel-supervisor-0.1.0-p3.exe",
+      "linux-x86_64": "bin/linux-x86_64/dinotty-quick-tunnel-supervisor",
+      "linux-aarch64": "bin/linux-aarch64/dinotty-quick-tunnel-supervisor",
+      "macos-x86_64": "bin/macos-x86_64/dinotty-quick-tunnel-supervisor",
+      "macos-aarch64": "bin/macos-aarch64/dinotty-quick-tunnel-supervisor"
+    },
+    "lifecycle": {
+      "scope": "host",
+      "stdinLease": true,
+      "shutdownDeadlineMs": 10000,
+      "forceKillAfterMs": 15000
+    }
+  }
+}
