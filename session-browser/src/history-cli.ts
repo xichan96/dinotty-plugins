@@ -63,7 +63,7 @@ export interface SessionConnector {
 }
 interface Project { path: string; encodedPath: string; sessionCount: number }
 interface Session { id: string; project: string; encodedPath: string; firstPrompt: string; lastTimestamp: string; messageCount?: number; gitBranch?: string; live?: true; aiTitle?: string; customTitle?: string }
-export interface Message { uuid: string; role: 'user' | 'assistant' | 'developer'; content: string; timestamp: string; model?: string; toolUses?: { name: string; summary: string; filePath?: string; oldString?: string; newString?: string; content?: string; replaceAll?: boolean }[] }
+export interface Message { uuid: string; role: 'user' | 'assistant' | 'developer'; content: string; timestamp: string; model?: string; isRealUser?: boolean; toolUses?: { name: string; summary: string; filePath?: string; oldString?: string; newString?: string; content?: string; replaceAll?: boolean }[] }
 export interface IndexedSession {
   id: string
   agent: AgentId
@@ -103,6 +103,16 @@ const TAIL_SCAN_BYTES = 1024 * 1024
 const READ_SESSION_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
 export const LIVE_WINDOW_MS = 60 * 1000
 const INDEX_CACHE_VERSION = 3
+export const INJECTED_PREFIXES = [
+  '<task-notification',
+  '<command-name',
+  '<command-message',
+  '<local-command-stdout',
+  '<local-command-caveat',
+  '<system-reminder',
+  '<bash-input',
+  '<bash-stdout',
+]
 const EXPORT_TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000
 const EXPORT_TEMP_RE = /^\.export-tmp-\d+-\d+-\d+$/
 const EXPORT_TEMP_SWEEP_MAX_DEPTH = 2
@@ -697,6 +707,17 @@ function readSessionMeta(filePath: string, id: string, attributionKey: string, p
   }
 }
 
+export function isInjectedUserMessage(obj: any): boolean {
+  if (obj?.type !== 'user' || typeof obj.message?.content !== 'string') return false
+  if (obj.isCompactSummary === true || obj.isVisibleInTranscriptOnly === true || obj.isMeta === true) return true
+  const content = obj.message.content.trimStart()
+  return INJECTED_PREFIXES.some((prefix) => {
+    if (!content.startsWith(prefix)) return false
+    const boundary = content.charAt(prefix.length)
+    return boundary === '>' || /\s/.test(boundary)
+  })
+}
+
 function parseMessage(obj: any): Message | null {
   if (obj.type === 'user') {
     if (typeof obj.message?.content !== 'string') return null
@@ -705,6 +726,7 @@ function parseMessage(obj: any): Message | null {
       role: 'user',
       content: obj.message.content,
       timestamp: obj.timestamp || '',
+      isRealUser: !isInjectedUserMessage(obj),
     }
   }
   if (obj.type === 'assistant') {

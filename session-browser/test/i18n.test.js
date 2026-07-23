@@ -86,6 +86,7 @@ test('zh locale renders the session list and localizes an archive confirmation',
   global.document = {
     documentElement: { lang: 'en-US' },
     body: { classList: { add() {}, remove() {} } },
+    getElementById() { return null },
     addEventListener() {},
     removeEventListener() {},
   }

@@ -32,6 +32,14 @@ const {
   filterBranchOptions,
   filterSessions,
   isSafeTranscriptHref,
+  findMinimapActiveTurn,
+  isMinimapPointerTap,
+  isMinimapTouchTickOpen,
+  mapMinimapTurnToTick,
+  minimapTickPosition,
+  nearestMinimapTickIndex,
+  nextMinimapPreviewLines,
+  nextJumpPillAtBottom,
   nextTranscriptBatchEnd,
   normalizeStoredExpandedPaths,
   normalizeStoredTreeRoot,
@@ -39,6 +47,7 @@ const {
   resolveSessionTitle,
   resolveSessionTitles,
   runBulkSerial,
+  sampleMinimapTurnIndices,
   shQuote,
   sortSessions,
 } = require(bundlePath)
@@ -58,6 +67,63 @@ test('transcript batches advance by 50 without exceeding the parsed message coun
   assert.equal(nextTranscriptBatchEnd(132, 50), 100)
   assert.equal(nextTranscriptBatchEnd(132, 100), 132)
   assert.equal(nextTranscriptBatchEnd(12, 0), 12)
+})
+
+test('minimap sampling preserves first and last turns and active mapping uses cached anchors', () => {
+  assert.deepEqual(sampleMinimapTurnIndices(5, 10), [0, 1, 2, 3, 4])
+  const sampled = sampleMinimapTurnIndices(10, 4)
+  assert.deepEqual(sampled, [0, 3, 6, 9])
+  assert.equal(findMinimapActiveTurn([100, 300, 700, 900], 0), 0)
+  assert.equal(findMinimapActiveTurn([100, 300, 700, 900], 699), 1)
+  assert.equal(findMinimapActiveTurn([100, 300, 700, 900], 700), 2)
+  assert.equal(findMinimapActiveTurn([100, 300, 700, 900], 500, true), 3)
+  assert.equal(mapMinimapTurnToTick(sampled, 0), 0)
+  assert.equal(mapMinimapTurnToTick(sampled, 5), 1)
+  assert.equal(mapMinimapTurnToTick(sampled, 9), 3)
+})
+
+test('minimap tick positions and nearest-tick mapping share the 12px rail inset', () => {
+  assert.equal(minimapTickPosition(0, 5, 100, 2), 13)
+  assert.equal(minimapTickPosition(4, 5, 100, 2), 87)
+  assert.equal(minimapTickPosition(2, 5, 100, 2), 50)
+  assert.equal(nearestMinimapTickIndex(100, 100, 100, 5, 2), 0)
+  assert.equal(nearestMinimapTickIndex(112, 100, 100, 5, 2), 0)
+  assert.equal(nearestMinimapTickIndex(140, 100, 100, 5, 2), 1)
+  assert.equal(nearestMinimapTickIndex(188, 100, 100, 5, 2), 4)
+  assert.equal(nearestMinimapTickIndex(200, 100, 100, 5, 2), 4)
+})
+
+test('focus-only minimap selection still counts as an open touch tick', () => {
+  assert.equal(isMinimapTouchTickOpen(2, 2, -1, 0, 'touch'), true)
+  assert.equal(isMinimapTouchTickOpen(2, 1, -1, 0, 'touch'), false)
+  assert.equal(isMinimapTouchTickOpen(2, 2, -1, 0, 'keyboard'), false)
+  assert.equal(isMinimapTouchTickOpen(2, 1, 2, 3, 'touch'), true)
+})
+
+test('minimap preview retries measured tiers from three lines to one line to focus-only', () => {
+  assert.equal(nextMinimapPreviewLines(3, 90, 89), 1)
+  assert.equal(nextMinimapPreviewLines(1, 54, 53), 0)
+  assert.equal(nextMinimapPreviewLines(3, 90, 90), 3)
+  assert.equal(nextMinimapPreviewLines(1, 54, 54), 1)
+})
+
+test('minimap card tap requires the initiating pointer within strict 8px slop', () => {
+  const start = { pointerId: 7, startX: 10, startY: 20 }
+  assert.equal(isMinimapPointerTap(start, { pointerId: 7, clientX: 13, clientY: 24 }), true)
+  assert.equal(isMinimapPointerTap(start, { pointerId: 8, clientX: 13, clientY: 24 }), false)
+  assert.equal(isMinimapPointerTap(start, { pointerId: 7, clientX: 18, clientY: 20 }), false)
+  assert.equal(isMinimapPointerTap({ ...start, exceededTapSlop: true }, { pointerId: 7, clientX: 10, clientY: 20 }), false)
+  assert.equal(isMinimapPointerTap(null, { pointerId: 7, clientX: 10, clientY: 20 }), false)
+})
+
+test('jump pill state uses 24px entry and max(200px, half-screen) exit hysteresis', () => {
+  assert.equal(nextJumpPillAtBottom(false, 24, 800), true)
+  assert.equal(nextJumpPillAtBottom(true, 25, 800), true)
+  assert.equal(nextJumpPillAtBottom(true, 400, 800), true)
+  assert.equal(nextJumpPillAtBottom(true, 401, 800), false)
+  assert.equal(nextJumpPillAtBottom(true, 200, 200), true)
+  assert.equal(nextJumpPillAtBottom(true, 201, 200), false)
+  assert.equal(nextJumpPillAtBottom(false, 100, 800), false)
 })
 
 test('transcript markdown links only allow http, https, and mailto protocols', () => {

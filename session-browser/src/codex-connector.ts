@@ -9,6 +9,14 @@ const LIVE_DB_PATH = path.join(HOME, '.codex', 'state_5.sqlite')
 const LEGACY_DB_PATH = path.join(HOME, '.codex', 'sqlite', 'state_5.sqlite')
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const READ_SESSION_MAX_OUTPUT_BYTES = 16 * 1024 * 1024
+export const CODEX_INJECTED_PREFIXES = [
+  '<environment_context',
+  '<user_action',
+  '<turn_aborted',
+  '<subagent_notification',
+  '<codex_internal_context',
+  '<skill',
+]
 const REQUIRED_THREAD_COLUMNS = [
   'id',
   'rollout_path',
@@ -400,6 +408,16 @@ function contentText(content: unknown): string {
     .join('\n')
 }
 
+export function isCodexInjectedUserMessage(content: unknown): boolean {
+  if (typeof content !== 'string') return false
+  const trimmed = content.trimStart()
+  return CODEX_INJECTED_PREFIXES.some((prefix) => {
+    if (!trimmed.startsWith(prefix)) return false
+    const boundary = trimmed.charAt(prefix.length)
+    return boundary === '>' || /\s/.test(boundary)
+  })
+}
+
 function compactText(value: unknown, limit = 160): string {
   const text = typeof value === 'string' ? value : JSON.stringify(value)
   return (text || '').replace(/\s+/g, ' ').trim().slice(0, limit)
@@ -459,11 +477,13 @@ function parseResponseRecord(record: any, messages: Message[], pending: Map<stri
   const payload = record.payload
   if (payload.type === 'message') {
     if (payload.role !== 'user' && payload.role !== 'assistant' && payload.role !== 'developer') return
+    const content = contentText(payload.content)
     messages.push({
       uuid: typeof payload.id === 'string' ? payload.id : '',
       role: payload.role,
-      content: contentText(payload.content),
+      content,
       timestamp: typeof record.timestamp === 'string' ? record.timestamp : '',
+      ...(payload.role === 'user' ? { isRealUser: !isCodexInjectedUserMessage(content) } : {}),
     })
     return
   }
