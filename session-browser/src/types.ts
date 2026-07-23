@@ -14,6 +14,7 @@ export interface Message {
   content: string
   timestamp: string
   model?: string
+  isRealUser?: boolean
   toolUses?: ToolUse[]
 }
 

@@ -88,6 +88,22 @@ function loadExportFilenameHelpers() {
   return loaded.exports
 }
 
+function loadInjectedUserMessageHelper() {
+  const source = fs.readFileSync(path.resolve(__dirname, '../src/history-cli.ts'), 'utf8')
+  const prefixes = source.match(/^export const INJECTED_PREFIXES = \[[^]*?^\]/m)
+  const predicate = source.match(/^export function isInjectedUserMessage\([^]*?^\}/m)
+  assert.ok(prefixes, 'missing INJECTED_PREFIXES')
+  assert.ok(predicate, 'missing isInjectedUserMessage')
+  const compiled = esbuild.transformSync([
+    prefixes[0],
+    predicate[0],
+    'module.exports = { INJECTED_PREFIXES, isInjectedUserMessage }',
+  ].join('\n'), { loader: 'ts', format: 'cjs', target: 'node18' })
+  const loaded = { exports: {} }
+  Function('module', 'exports', 'require', compiled.code)(loaded, loaded.exports, require)
+  return loaded.exports
+}
+
 beforeEach(() => {
   fixture = fs.mkdtempSync(path.join(os.tmpdir(), 'session-browser-'))
   env = {
@@ -498,6 +514,41 @@ test('read-session retains a complete final message without a trailing newline',
   assert.equal(meta.lastActiveAt, '2026-07-02T00:00:00.000Z')
   assert.equal(meta.messageCount, 2)
   assert.equal(meta.health, 'ok')
+})
+
+test('injected user predicate covers exact Claude prefixes and metadata flags without false positives', () => {
+  const { INJECTED_PREFIXES, isInjectedUserMessage } = loadInjectedUserMessageHelper()
+  assert.equal(INJECTED_PREFIXES.length, 8)
+  for (const prefix of INJECTED_PREFIXES) {
+    assert.equal(isInjectedUserMessage({ type: 'user', message: { content: `  ${prefix}>payload` } }), true, prefix)
+    assert.equal(isInjectedUserMessage({ type: 'user', message: { content: `${prefix} payload` } }), true, `${prefix} whitespace boundary`)
+    assert.equal(isInjectedUserMessage({ type: 'user', message: { content: `${prefix}-human` } }), false, `${prefix} tag boundary`)
+  }
+  for (const flag of ['isCompactSummary', 'isVisibleInTranscriptOnly', 'isMeta']) {
+    assert.equal(isInjectedUserMessage({ type: 'user', [flag]: true, message: { content: 'payload' } }), true, flag)
+  }
+  assert.equal(isInjectedUserMessage({ type: 'user', message: { content: '<article>real pasted XML</article>' } }), false)
+  assert.equal(isInjectedUserMessage({ type: 'user', message: { content: 'Caveat: this is real prose' } }), false)
+  assert.equal(isInjectedUserMessage({ type: 'user', isMeta: false, message: { content: 'real' } }), false)
+  assert.equal(isInjectedUserMessage({ type: 'user', isMeta: 'true', message: { content: 'real' } }), false)
+  assert.equal(isInjectedUserMessage({ type: 'user', message: { content: ['not', 'a', 'string'] } }), false)
+})
+
+test('read-session explicitly tags Claude user messages while preserving transcript content', () => {
+  const key = '-real-user-tags'
+  writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
+    JSON.stringify({ type: 'user', timestamp: '2026-07-01T00:00:00.000Z', message: { content: '<system-reminder>keep visible</system-reminder>' } }),
+    JSON.stringify({ type: 'user', timestamp: '2026-07-01T00:01:00.000Z', isMeta: true, message: { content: 'metadata remains visible' } }),
+    JSON.stringify({ type: 'user', timestamp: '2026-07-01T00:02:00.000Z', message: { content: '<article>real pasted XML</article>' } }),
+  ])
+
+  const messages = runJson(['read-session', key, IDS.normal])
+  assert.deepEqual(messages.map(message => message.content), [
+    '<system-reminder>keep visible</system-reminder>',
+    'metadata remains visible',
+    '<article>real pasted XML</article>',
+  ])
+  assert.deepEqual(messages.map(message => message.isRealUser), [false, false, true])
 })
 
 test('read-session classifies a missing session separately from a read failure', () => {

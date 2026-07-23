@@ -15,6 +15,16 @@ var ICON_PATHS = {
   "arrow-left": [["path", { d: "m12 19-7-7 7-7" }], ["path", { d: "M19 12H5" }]],
   "arrow-up": [["path", { d: "m18 15-6-6-6 6" }]],
   "arrow-down": [["path", { d: "m6 9 6 6 6-6" }]],
+  "arrow-up-to-line": [
+    ["path", { d: "M5 3h14" }],
+    ["path", { d: "m18 13-6-6-6 6" }],
+    ["path", { d: "M12 7v14" }]
+  ],
+  "arrow-down-to-line": [
+    ["path", { d: "M12 3v14" }],
+    ["path", { d: "m6 11 6 6 6-6" }],
+    ["path", { d: "M5 21h14" }]
+  ],
   "corner-up-right": [["path", { d: "M7 17 17 7" }], ["path", { d: "M7 7h10v10" }]],
   send: [
     ["path", { d: "M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z" }],
@@ -168,6 +178,12 @@ function IconArrowUp(size) {
 }
 function IconArrowDown(size) {
   return renderIcon(ICON_PATHS["arrow-down"], size);
+}
+function IconArrowUpToLine(size) {
+  return renderIcon(ICON_PATHS["arrow-up-to-line"], size);
+}
+function IconArrowDownToLine(size) {
+  return renderIcon(ICON_PATHS["arrow-down-to-line"], size);
 }
 function IconCornerUpRight(size) {
   return renderIcon(ICON_PATHS["corner-up-right"], size);
@@ -369,6 +385,12 @@ var dictionaries = {
     "leave-full-text-results": "Leave full-text results",
     "loading-sessions": "Loading sessions\u2026",
     "loading-transcript": "Loading transcript\u2026",
+    "minimap-label": "Conversation outline",
+    "minimap-tick": "Jump to turn {n}",
+    "minimap-preview-jump": "Jump to this turn",
+    "jump-to-bottom": "Jump to bottom",
+    "back-to-top": "Back to top",
+    "minimap-turn-of": "Turn {n} of {total}",
     "messages": "Messages",
     "message-count-one": "{n} message",
     "message-count-other": "{n} messages",
@@ -644,6 +666,12 @@ var dictionaries = {
     "leave-full-text-results": "\u9000\u51FA\u5168\u6587\u641C\u7D22\u7ED3\u679C",
     "loading-sessions": "\u6B63\u5728\u52A0\u8F7D\u4F1A\u8BDD\u2026",
     "loading-transcript": "\u6B63\u5728\u52A0\u8F7D\u5BF9\u8BDD\u2026",
+    "minimap-label": "\u4F1A\u8BDD\u76EE\u5F55",
+    "minimap-tick": "\u8DF3\u5230\u7B2C {n} \u8F6E",
+    "minimap-preview-jump": "\u8DF3\u5230\u8FD9\u8F6E\u53D1\u8A00",
+    "jump-to-bottom": "\u5230\u5E95\u90E8",
+    "back-to-top": "\u56DE\u9876\u90E8",
+    "minimap-turn-of": "\u7B2C {n}/{total} \u8F6E",
     "messages": "\u6D88\u606F\u6570",
     "message-count-one": "{n} \u6761\u6D88\u606F",
     "message-count-other": "{n} \u6761\u6D88\u606F",
@@ -836,6 +864,8 @@ var MAX_LEFT_WIDTH = 520;
 var TRANSCRIPT_BATCH_SIZE = 50;
 var SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var FONT_SCALE_MULTIPLIERS = { 1: 0.85, 2: 0.93, 3: 1, 4: 1.1, 5: 1.25 };
+var MINIMAP_TAP_SLOP = 8;
+var MINIMAP_RAIL_INSET = 12;
 var PAGE_SIZES = [20, 50, 100];
 var AGENT_AGNOSTIC = /* @__PURE__ */ new Set(["list-dirs", "check-dir", "classify-export-destination", "agents"]);
 var DEFAULT_AGENT = "claude-code";
@@ -934,6 +964,83 @@ function resolveSessionTitle(session) {
 function nextTranscriptBatchEnd(total, rendered, batchSize = TRANSCRIPT_BATCH_SIZE) {
   if (!Number.isFinite(total) || !Number.isFinite(rendered) || !Number.isFinite(batchSize) || batchSize <= 0) return 0;
   return Math.min(Math.max(0, Math.floor(total)), Math.max(0, Math.floor(rendered)) + Math.floor(batchSize));
+}
+function isMinimapTouchTickOpen(tickIndex, focusedTick, previewTick, previewLines, previewMode) {
+  if (previewMode !== "touch") return false;
+  return previewTick === tickIndex || previewLines === 0 && focusedTick === tickIndex;
+}
+function nextMinimapPreviewLines(lines, measuredHeight, availableHeight) {
+  if (measuredHeight <= availableHeight) return lines;
+  return lines === 3 ? 1 : 0;
+}
+function isMinimapPointerTap(start, end) {
+  return Boolean(start && start.pointerId === end.pointerId && !start.exceededTapSlop && Math.hypot(end.clientX - start.startX, end.clientY - start.startY) < MINIMAP_TAP_SLOP);
+}
+function minimapTickPosition(tickIndex, tickCount, railHeight, tickHeight, inset = MINIMAP_RAIL_INSET) {
+  const height = Math.max(0, railHeight);
+  const markerHeight = Math.max(0, Math.min(tickHeight, height));
+  const edgeInset = Math.min(Math.max(0, inset), Math.max(0, (height - markerHeight) / 2));
+  const firstCenter = edgeInset + markerHeight / 2;
+  const trackHeight = Math.max(0, height - edgeInset * 2 - markerHeight);
+  const denominator = Math.max(1, Math.floor(tickCount) - 1);
+  const index = Math.min(denominator, Math.max(0, Math.floor(tickIndex)));
+  return firstCenter + index / denominator * trackHeight;
+}
+function nearestMinimapTickIndex(clientY, railTop, railHeight, tickCount, tickHeight, inset = MINIMAP_RAIL_INSET) {
+  const count = Math.max(0, Math.floor(tickCount));
+  if (!count || railHeight <= 0) return -1;
+  if (count === 1) return 0;
+  const firstCenter = railTop + minimapTickPosition(0, count, railHeight, tickHeight, inset);
+  const lastCenter = railTop + minimapTickPosition(count - 1, count, railHeight, tickHeight, inset);
+  if (lastCenter <= firstCenter) return 0;
+  const ratio = Math.min(1, Math.max(0, (clientY - firstCenter) / (lastCenter - firstCenter)));
+  return Math.round(ratio * (count - 1));
+}
+function sampleMinimapTurnIndices(total, capacity) {
+  const count = Math.max(0, Math.floor(total));
+  const limit = Math.max(0, Math.floor(capacity));
+  if (!count || !limit) return [];
+  if (count <= limit) return Array.from({ length: count }, (_, index) => index);
+  if (limit === 1) return [0];
+  return Array.from({ length: limit }, (_, index) => Math.round(index * (count - 1) / (limit - 1)));
+}
+function findMinimapActiveTurn(anchors, scrollTop, atBottom = false) {
+  if (!anchors.length) return -1;
+  if (atBottom) return anchors.length - 1;
+  let low = 0;
+  let high = anchors.length - 1;
+  let found = 0;
+  while (low <= high) {
+    const middle = low + high >> 1;
+    if (anchors[middle] <= scrollTop) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return found;
+}
+function mapMinimapTurnToTick(sampledTurns, turnIndex) {
+  if (!sampledTurns.length || turnIndex < 0) return -1;
+  let low = 0;
+  let high = sampledTurns.length - 1;
+  let found = 0;
+  while (low <= high) {
+    const middle = low + high >> 1;
+    if (sampledTurns[middle] <= turnIndex) {
+      found = middle;
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return found;
+}
+function nextJumpPillAtBottom(current, distanceFromBottom, clientHeight) {
+  if (distanceFromBottom <= 24) return true;
+  if (distanceFromBottom > Math.max(200, 0.5 * clientHeight)) return false;
+  return current;
 }
 function normalizePath(value) {
   const trimmed = value.trim();
@@ -1541,6 +1648,7 @@ function activate(ctx) {
   const kbAvoid = ctx.ref(false);
   const kbAvoidW = ctx.ref(0);
   const kbAvoidH = ctx.ref(0);
+  const mobileKbOpen = ctx.ref(false);
   const rootRef = ctx.ref(null);
   const transcriptMessages = ctx.ref([]);
   const transcriptLoading = ctx.ref(false);
@@ -1548,6 +1656,28 @@ function activate(ctx) {
   const expandedTools = ctx.ref(/* @__PURE__ */ new Set());
   const copiedSessionId = ctx.ref(false);
   const transcriptScrollRef = ctx.ref(null);
+  const detailPaneRef = ctx.ref(null);
+  const minimapVisible = ctx.ref(false);
+  const minimapTicks = ctx.ref([]);
+  const minimapActiveTick = ctx.ref(-1);
+  const minimapFocusedTick = ctx.ref(-1);
+  const minimapRailTop = ctx.ref(0);
+  const minimapRailHeight = ctx.ref(0);
+  const minimapPitch = ctx.ref(5);
+  const minimapPreviewTick = ctx.ref(-1);
+  const minimapPreviewMode = ctx.ref("mouse");
+  const minimapPreviewLines = ctx.ref(0);
+  const minimapPreviewTop = ctx.ref(0);
+  const jumpPillVisible = ctx.ref(false);
+  const jumpPillAtBottom = ctx.ref(false);
+  const minimapRailRef = ctx.ref(null);
+  const minimapPreviewRef = ctx.ref(null);
+  let minimapTurns = [];
+  let minimapAnchors = [];
+  let minimapSampledTurns = [];
+  let minimapPointerState = null;
+  let minimapCardPointerState = null;
+  let outsidePreviewPointerDown = null;
   const searchInputRef = ctx.ref(null);
   const page = ctx.ref(1);
   const pageSize = ctx.ref(50);
@@ -1846,7 +1976,11 @@ function activate(ctx) {
       pickerValidationSeq: 0,
       allTranscriptMessages: [],
       rootResizeObserver: null,
+      transcriptResizeObserver: null,
+      transcriptScrollFrame: null,
+      minimapRebuildFrame: null,
       localeObserver: null,
+      mobileKbObserverTarget: void 0,
       pinsNoteTimer: null
     };
   }
@@ -1907,6 +2041,7 @@ function activate(ctx) {
     if (activeMount) activeMount.displayGeneration++;
     fontScale.value = Math.min(5, Math.max(1, Math.round(value)));
     updateCompactMode(rootWidth);
+    scheduleMinimapRebuild();
     persist(STORAGE_KEYS.fontScale, fontScale.value);
   }
   function updateKbAvoid() {
@@ -1914,13 +2049,14 @@ function activate(ctx) {
     let active = false;
     let w = 0;
     let h2 = 0;
+    let mobileOpen = false;
     if (root && typeof document !== "undefined") {
+      const rr = root.getBoundingClientRect();
       const btn = document.getElementById("kb-toggle-btn");
       if (btn) {
         const cs = window.getComputedStyle(btn);
         if (cs.display !== "none" && cs.visibility === "visible") {
           const br = btn.getBoundingClientRect();
-          const rr = root.getBoundingClientRect();
           const overlapW = Math.min(rr.right, br.right) - Math.max(rr.left, br.left);
           const overlapH = Math.min(rr.bottom, br.bottom) - Math.max(rr.top, br.top);
           if (br.width > 0 && br.height > 0 && overlapW > 0 && overlapH > 0) {
@@ -1930,11 +2066,25 @@ function activate(ctx) {
           }
         }
       }
+      const mobileKb = document.getElementById("mobile-kb");
+      if (mobileKb) {
+        const cs = window.getComputedStyle(mobileKb);
+        const mr = mobileKb.getBoundingClientRect();
+        const overlapW = Math.min(rr.right, mr.right) - Math.max(rr.left, mr.left);
+        const overlapH = Math.min(rr.bottom, mr.bottom) - Math.max(rr.top, mr.top);
+        if (cs.display !== "none" && cs.visibility === "visible" && mr.width > 0 && mr.height > 0 && overlapW > 0 && overlapH > 0) {
+          active = true;
+          mobileOpen = true;
+          h2 = Math.max(h2, Math.ceil(rr.bottom - mr.top) + 8);
+        }
+      }
     }
-    if (kbAvoid.value === active && kbAvoidW.value === w && kbAvoidH.value === h2) return;
+    if (kbAvoid.value === active && kbAvoidW.value === w && kbAvoidH.value === h2 && mobileKbOpen.value === mobileOpen) return;
     kbAvoid.value = active;
     kbAvoidW.value = w;
     kbAvoidH.value = h2;
+    mobileKbOpen.value = mobileOpen;
+    scheduleMinimapRebuild();
   }
   function updateCompactMode(width) {
     rootWidth = width;
@@ -1957,6 +2107,34 @@ function activate(ctx) {
     mount.rootResizeObserver.observe(element);
     const kbBtn = document.getElementById("kb-toggle-btn");
     if (kbBtn) mount.rootResizeObserver.observe(kbBtn);
+    const mobileKb = document.getElementById("mobile-kb");
+    if (mobileKb) mount.rootResizeObserver.observe(mobileKb);
+  }
+  function attachHostMutationObserver(mount) {
+    const observer = mount.localeObserver;
+    if (!observer || typeof document === "undefined") return;
+    const mobileKb = document.getElementById("mobile-kb");
+    if (mount.mobileKbObserverTarget === mobileKb) return;
+    if (mount.mobileKbObserverTarget !== void 0) observer.disconnect();
+    mount.mobileKbObserverTarget = mobileKb;
+    if (!mobileKb) {
+      observer.observe(document.documentElement, {
+        childList: true,
+        subtree: true,
+        attributes: true,
+        attributeFilter: ["lang"]
+      });
+      return;
+    }
+    observer.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["lang"]
+    });
+    observer.observe(mobileKb, {
+      attributes: true,
+      attributeFilter: ["style", "hidden"]
+    });
+    mount.rootResizeObserver?.observe(mobileKb);
   }
   function setRootElement(element) {
     if (element === rootRef.value) return;
@@ -2291,6 +2469,357 @@ function activate(ctx) {
     if (mount.transcriptFrame !== null) cancelAnimationFrame(mount.transcriptFrame);
     mount.transcriptFrame = null;
   }
+  function clearMinimapState() {
+    closeMinimapPreview();
+    minimapVisible.value = false;
+    minimapTicks.value = [];
+    minimapActiveTick.value = -1;
+    minimapFocusedTick.value = -1;
+    minimapTurns = [];
+    minimapAnchors = [];
+    minimapSampledTurns = [];
+  }
+  function isTranscriptAtBottom(body) {
+    return body.scrollHeight - body.scrollTop - body.clientHeight <= 24;
+  }
+  function updateTranscriptScrollState() {
+    const body = transcriptScrollRef.value;
+    if (!body) return;
+    const distance = body.scrollHeight - body.scrollTop - body.clientHeight;
+    jumpPillVisible.value = body.scrollHeight > body.clientHeight;
+    jumpPillAtBottom.value = nextJumpPillAtBottom(jumpPillAtBottom.value, distance, body.clientHeight);
+    if (!minimapVisible.value || !minimapAnchors.length) return;
+    const turnIndex = findMinimapActiveTurn(minimapAnchors, body.scrollTop, distance <= 24);
+    minimapActiveTick.value = mapMinimapTurnToTick(minimapSampledTurns, turnIndex);
+  }
+  function onTranscriptScroll() {
+    closeMinimapPreview();
+    const mount = activeMount;
+    if (!isActiveMount(mount) || mount.transcriptScrollFrame !== null) return;
+    mount.transcriptScrollFrame = scheduleMountFrame(mount, () => {
+      mount.transcriptScrollFrame = null;
+      updateTranscriptScrollState();
+    });
+  }
+  function removeOutsidePreviewHandler() {
+    if (!outsidePreviewPointerDown || typeof document === "undefined") return;
+    document.removeEventListener("pointerdown", outsidePreviewPointerDown, true);
+    outsidePreviewPointerDown = null;
+  }
+  function closeMinimapPreview() {
+    minimapPreviewTick.value = -1;
+    minimapPreviewLines.value = 0;
+    minimapPreviewRef.value = null;
+    minimapFocusedTick.value = -1;
+    minimapPointerState = null;
+    minimapCardPointerState = null;
+    removeOutsidePreviewHandler();
+  }
+  function degradeMinimapPreview(lines) {
+    minimapPreviewLines.value = lines;
+    if (lines) {
+      schedulePreviewPosition();
+      return;
+    }
+    minimapPreviewTick.value = -1;
+    minimapPreviewRef.value = null;
+    minimapCardPointerState = null;
+    removeOutsidePreviewHandler();
+  }
+  function previewBounds(mode) {
+    const pane = detailPaneRef.value;
+    if (!pane) return null;
+    const paneRect = pane.getBoundingClientRect();
+    const width = Math.max(0, Math.min(mode === "touch" ? 240 : 320, paneRect.width - 48));
+    const railTop = paneRect.top + minimapRailTop.value;
+    let bottom = Math.min(paneRect.bottom - 8, railTop + minimapRailHeight.value);
+    if (typeof document !== "undefined") {
+      const kbBtn = document.getElementById("kb-toggle-btn");
+      if (kbBtn && window.getComputedStyle(kbBtn).display !== "none") {
+        const rect = kbBtn.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) bottom = Math.min(bottom, rect.top - 8);
+      }
+      const mobileKb = document.getElementById("mobile-kb");
+      if (mobileKb && window.getComputedStyle(mobileKb).display !== "none") {
+        const rect = mobileKb.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) bottom = Math.min(bottom, rect.top - 8);
+      }
+      const pill = pane.querySelector(".ccm-jump-pill");
+      if (pill) {
+        const rect = pill.getBoundingClientRect();
+        const cardLeft = paneRect.right - 28 - width;
+        if (rect.right + 8 > cardLeft) bottom = Math.min(bottom, rect.top - 8);
+      }
+    }
+    return { paneRect, top: Math.max(paneRect.top + 8, railTop), bottom, width };
+  }
+  function positionMinimapPreview() {
+    const card = minimapPreviewRef.value;
+    const rail = minimapRailRef.value;
+    const tickIndex = minimapPreviewTick.value;
+    const bounds = previewBounds(minimapPreviewMode.value);
+    if (!card || !rail || !bounds || tickIndex < 0 || bounds.bottom <= bounds.top) return;
+    const railRect = rail.getBoundingClientRect();
+    const denominator = Math.max(1, minimapTicks.value.length - 1);
+    const tickHeight = minimapPitch.value === 2 ? 1 : 2;
+    const tickY = railRect.top + minimapTickPosition(
+      tickIndex,
+      denominator + 1,
+      railRect.height,
+      tickHeight
+    );
+    const cardHeight = card.getBoundingClientRect().height;
+    const availableHeight = Math.max(0, bounds.bottom - bounds.top);
+    const fittedLines = nextMinimapPreviewLines(minimapPreviewLines.value, cardHeight, availableHeight);
+    if (fittedLines !== minimapPreviewLines.value) {
+      degradeMinimapPreview(fittedLines);
+      return;
+    }
+    const top = Math.min(bounds.bottom - cardHeight, Math.max(bounds.top, tickY - cardHeight / 2));
+    if (top < bounds.top || top + cardHeight > bounds.bottom) {
+      degradeMinimapPreview(minimapPreviewLines.value === 3 ? 1 : 0);
+      return;
+    }
+    minimapPreviewTop.value = top - bounds.paneRect.top;
+  }
+  function schedulePreviewPosition() {
+    const mount = activeMount;
+    if (!isActiveMount(mount)) return;
+    scheduleMountFrame(mount, positionMinimapPreview);
+  }
+  function installOutsidePreviewHandler() {
+    removeOutsidePreviewHandler();
+    if (typeof document === "undefined") return;
+    outsidePreviewPointerDown = (event) => {
+      const target = event.target;
+      if (target && (minimapRailRef.value?.contains(target) || minimapPreviewRef.value?.contains(target))) return;
+      closeMinimapPreview();
+    };
+    document.addEventListener("pointerdown", outsidePreviewPointerDown, true);
+  }
+  function showMinimapPreview(tickIndex, mode) {
+    if (tickIndex < 0 || tickIndex >= minimapTicks.value.length) return;
+    minimapFocusedTick.value = tickIndex;
+    const bounds = previewBounds(mode);
+    if (!bounds) return;
+    const lines = bounds.bottom > bounds.top ? 3 : 0;
+    minimapPreviewMode.value = mode;
+    minimapPreviewLines.value = lines;
+    minimapPreviewTick.value = lines ? tickIndex : -1;
+    if (!lines) {
+      removeOutsidePreviewHandler();
+      return;
+    }
+    if (mode !== "mouse") installOutsidePreviewHandler();
+    schedulePreviewPosition();
+  }
+  function minimapTickAt(clientY) {
+    const rail = minimapRailRef.value;
+    if (!rail || !minimapTicks.value.length) return -1;
+    const rect = rail.getBoundingClientRect();
+    if (!rect.height) return -1;
+    const tickHeight = minimapPitch.value === 2 ? 1 : 2;
+    return nearestMinimapTickIndex(
+      clientY,
+      rect.top,
+      rect.height,
+      minimapTicks.value.length,
+      tickHeight
+    );
+  }
+  function isKbExcludedPointer(event) {
+    if (typeof document === "undefined") return false;
+    const btn = document.getElementById("kb-toggle-btn");
+    if (!btn || window.getComputedStyle(btn).display === "none") return false;
+    const rect = btn.getBoundingClientRect();
+    return event.clientX >= rect.left - 8 && event.clientX <= rect.right + 8 && event.clientY >= rect.top - 8 && event.clientY <= rect.bottom + 8;
+  }
+  function selectPointerTick(event, mode) {
+    if (isKbExcludedPointer(event)) return -1;
+    const tickIndex = minimapTickAt(event.clientY);
+    if (tickIndex >= 0) showMinimapPreview(tickIndex, mode);
+    return tickIndex;
+  }
+  function onMinimapPointerDown(event) {
+    if (event.pointerType === "touch" || event.pointerType === "pen") {
+      event.preventDefault();
+      const tickIndex = minimapTickAt(event.clientY);
+      if (tickIndex < 0 || isKbExcludedPointer(event)) return;
+      minimapPointerState = {
+        pointerId: event.pointerId,
+        startX: event.clientX,
+        startY: event.clientY,
+        startTick: tickIndex,
+        openedSameTick: isMinimapTouchTickOpen(
+          tickIndex,
+          minimapFocusedTick.value,
+          minimapPreviewTick.value,
+          minimapPreviewLines.value,
+          minimapPreviewMode.value
+        ),
+        changedTick: false,
+        exceededTapSlop: false
+      };
+      minimapRailRef.value?.setPointerCapture?.(event.pointerId);
+      showMinimapPreview(tickIndex, "touch");
+      return;
+    }
+    selectPointerTick(event, "mouse");
+  }
+  function onMinimapPointerMove(event) {
+    if (event.pointerType === "mouse") {
+      selectPointerTick(event, "mouse");
+      return;
+    }
+    const state = minimapPointerState;
+    if (!state || state.pointerId !== event.pointerId) return;
+    event.preventDefault();
+    if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) >= MINIMAP_TAP_SLOP) {
+      state.exceededTapSlop = true;
+    }
+    const tickIndex = minimapTickAt(event.clientY);
+    if (tickIndex < 0) return;
+    if (tickIndex !== state.startTick) state.changedTick = true;
+    showMinimapPreview(tickIndex, "touch");
+  }
+  function onMinimapPointerUp(event) {
+    if (event.pointerType === "mouse") {
+      const tickIndex2 = minimapTickAt(event.clientY);
+      const tick = minimapTicks.value[tickIndex2];
+      if (tick) jumpToMinimapTick(tick);
+      closeMinimapPreview();
+      return;
+    }
+    const state = minimapPointerState;
+    if (!state || state.pointerId !== event.pointerId) return;
+    const tickIndex = minimapTickAt(event.clientY);
+    const distance = Math.hypot(event.clientX - state.startX, event.clientY - state.startY);
+    minimapRailRef.value?.releasePointerCapture?.(event.pointerId);
+    minimapPointerState = null;
+    if (state.openedSameTick && !state.changedTick && !state.exceededTapSlop && tickIndex === state.startTick && distance < MINIMAP_TAP_SLOP) {
+      const tick = minimapTicks.value[tickIndex];
+      if (tick) jumpToMinimapTick(tick);
+      closeMinimapPreview();
+    }
+  }
+  function onMinimapPointerCancel(event) {
+    if (minimapPointerState?.pointerId !== event.pointerId) return;
+    minimapPointerState = null;
+    closeMinimapPreview();
+  }
+  function onMinimapKeydown(event) {
+    const last = minimapTicks.value.length - 1;
+    if (last < 0) return;
+    let next = minimapFocusedTick.value < 0 ? Math.max(0, minimapActiveTick.value) : minimapFocusedTick.value;
+    if (event.key === "ArrowUp") next = Math.max(0, next - 1);
+    else if (event.key === "ArrowDown") next = Math.min(last, next + 1);
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = last;
+    else if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      const tick = minimapTicks.value[next];
+      if (tick) jumpToMinimapTick(tick);
+      closeMinimapPreview();
+      return;
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closeMinimapPreview();
+      return;
+    } else return;
+    event.preventDefault();
+    showMinimapPreview(next, "keyboard");
+  }
+  function rebuildMinimapStructure() {
+    const body = transcriptScrollRef.value;
+    const pane = detailPaneRef.value;
+    if (!body || !pane) {
+      clearMinimapState();
+      return;
+    }
+    const bodyRect = body.getBoundingClientRect();
+    const paneRect = pane.getBoundingClientRect();
+    let railBottom = bodyRect.bottom;
+    if (kbAvoid.value) {
+      if (mobileKbOpen.value && typeof document !== "undefined") {
+        const mobileRect = document.getElementById("mobile-kb")?.getBoundingClientRect();
+        if (mobileRect) railBottom = Math.min(railBottom, mobileRect.top - 8);
+      } else {
+        railBottom = Math.min(railBottom, bodyRect.bottom - kbAvoidH.value - 28);
+      }
+    }
+    const railHeight = Math.max(0, railBottom - bodyRect.top);
+    minimapRailTop.value = bodyRect.top - paneRect.top;
+    minimapRailHeight.value = railHeight;
+    updateTranscriptScrollState();
+    minimapTurns = transcriptMessages.value.flatMap((message, messageIndex) => {
+      if (message.role !== "user" || message.isRealUser === false) return [];
+      return [{
+        messageIndex,
+        turnIndex: 0,
+        text: cleanFirstPrompt(message.content).slice(0, 60)
+      }];
+    }).map((turn, turnIndex) => ({ ...turn, turnIndex }));
+    const overflowing = body.scrollHeight > body.clientHeight;
+    if (minimapTurns.length < 2 || !overflowing || railHeight < 80) {
+      clearMinimapState();
+      return;
+    }
+    minimapAnchors = minimapTurns.map((turn) => {
+      const article = body.querySelector(`[data-transcript-index="${turn.messageIndex}"]`);
+      return article ? article.getBoundingClientRect().top - bodyRect.top + body.scrollTop : 0;
+    });
+    const tickTrackHeight = Math.max(0, railHeight - MINIMAP_RAIL_INSET * 2);
+    minimapPitch.value = minimapTurns.length * 5 <= tickTrackHeight ? 5 : minimapTurns.length * 3 <= tickTrackHeight ? 3 : 2;
+    const capacity = Math.max(2, Math.floor(tickTrackHeight / 2));
+    minimapSampledTurns = sampleMinimapTurnIndices(minimapTurns.length, capacity);
+    const sampled = minimapSampledTurns.length < minimapTurns.length;
+    minimapTicks.value = minimapSampledTurns.map((turnIndex) => ({ ...minimapTurns[turnIndex], sampled }));
+    minimapVisible.value = true;
+    updateTranscriptScrollState();
+    if (minimapFocusedTick.value >= minimapTicks.value.length) minimapFocusedTick.value = -1;
+    if (minimapPreviewTick.value >= 0) {
+      showMinimapPreview(Math.min(minimapPreviewTick.value, minimapTicks.value.length - 1), minimapPreviewMode.value);
+    }
+  }
+  function scheduleMinimapRebuild() {
+    const mount = activeMount;
+    if (!isActiveMount(mount) || mount.minimapRebuildFrame !== null) return;
+    mount.minimapRebuildFrame = scheduleMountFrame(mount, () => {
+      mount.minimapRebuildFrame = null;
+      rebuildMinimapStructure();
+    });
+  }
+  function setTranscriptScrollElement(element) {
+    const mount = activeMount;
+    const previous = transcriptScrollRef.value;
+    if (element === previous) return;
+    if (previous) previous.removeEventListener("scroll", onTranscriptScroll);
+    mount?.transcriptResizeObserver?.disconnect();
+    transcriptScrollRef.value = element;
+    if (!element || !isActiveMount(mount)) return;
+    element.addEventListener("scroll", onTranscriptScroll, { passive: true });
+    if (typeof ResizeObserver !== "undefined") {
+      mount.transcriptResizeObserver = new ResizeObserver(() => scheduleMinimapRebuild());
+      mount.transcriptResizeObserver.observe(element);
+    }
+    scheduleMinimapRebuild();
+  }
+  function jumpToMinimapTick(tick) {
+    const body = transcriptScrollRef.value;
+    if (!body) return;
+    const article = body.querySelector(`[data-transcript-index="${tick.messageIndex}"]`);
+    if (article) article.scrollIntoView({ block: "start", behavior: "smooth" });
+    else {
+      const maximum = Math.max(0, body.scrollHeight - body.clientHeight);
+      body.scrollTop = minimapTurns.length > 1 ? maximum * tick.turnIndex / (minimapTurns.length - 1) : 0;
+    }
+  }
+  function activateJumpPill() {
+    const body = transcriptScrollRef.value;
+    if (!body) return;
+    if (jumpPillAtBottom.value) body.scrollTo({ top: 0 });
+    else body.scrollTo({ top: Math.max(0, body.scrollHeight - body.clientHeight), behavior: "smooth" });
+  }
   function resetTranscript() {
     const mount = activeMount;
     if (mount) mount.transcriptLoadToken++;
@@ -2304,7 +2833,10 @@ function activate(ctx) {
     transcriptError.value = null;
     expandedTools.value = /* @__PURE__ */ new Set();
     copiedSessionId.value = false;
-    transcriptScrollRef.value = null;
+    jumpPillVisible.value = false;
+    jumpPillAtBottom.value = false;
+    setTranscriptScrollElement(null);
+    clearMinimapState();
   }
   function renderNextTranscriptBatch(mount, token) {
     if (!isActiveMount(mount) || token !== mount.transcriptLoadToken) return;
@@ -2312,16 +2844,25 @@ function activate(ctx) {
     const end = nextTranscriptBatchEnd(mount.allTranscriptMessages.length, start);
     if (end <= start) {
       mount.transcriptFrame = null;
+      scheduleMinimapRebuild();
       return;
     }
     transcriptMessages.value = [...transcriptMessages.value, ...mount.allTranscriptMessages.slice(start, end)];
-    mount.transcriptFrame = end < mount.allTranscriptMessages.length ? scheduleMountFrame(mount, () => renderNextTranscriptBatch(mount, token)) : null;
+    if (end < mount.allTranscriptMessages.length) {
+      mount.transcriptFrame = scheduleMountFrame(mount, () => renderNextTranscriptBatch(mount, token));
+    } else {
+      mount.transcriptFrame = null;
+      scheduleMinimapRebuild();
+    }
   }
   async function openTranscript(session) {
     const mount = activeMount;
     if (!isActiveMount(mount)) return;
     const token = ++mount.transcriptLoadToken;
     cancelTranscriptFrame();
+    clearMinimapState();
+    jumpPillVisible.value = false;
+    jumpPillAtBottom.value = false;
     selectedSession.value = session;
     transcriptMessages.value = [];
     mount.allTranscriptMessages = [];
@@ -2619,6 +3160,7 @@ function activate(ctx) {
     if (next.has(key)) next.delete(key);
     else next.add(key);
     expandedTools.value = next;
+    scheduleMinimapRebuild();
   }
   async function loadIndex(preserveState = false, refresh = false) {
     const mount = activeMount;
@@ -4353,7 +4895,8 @@ function activate(ctx) {
     const messageKey = message.uuid || `${selectedSession.value?.id || "session"}-${index}`;
     return h("article", {
       class: ["ccm-browser-message", isUser ? "ccm-browser-message-user" : "ccm-browser-message-assistant"],
-      key: messageKey
+      key: messageKey,
+      "data-transcript-index": String(index)
     }, [
       h("div", { class: "ccm-browser-message-gutter" }, [
         h("div", { class: ["ccm-browser-avatar", isUser ? "ccm-browser-avatar-user" : "ccm-browser-avatar-assistant"] }, [
@@ -4370,6 +4913,119 @@ function activate(ctx) {
         message.toolUses?.length ? h("div", { class: "ccm-browser-tools-section" }, message.toolUses.map((tool, toolIndex) => renderToolCard(messageKey, tool, toolIndex))) : null
       ])
     ]);
+  }
+  function renderMinimap() {
+    if (!minimapVisible.value) return [];
+    const last = Math.max(1, minimapTicks.value.length - 1);
+    const tickHeight = minimapPitch.value === 2 ? 1 : 2;
+    const focused = minimapFocusedTick.value >= 0 ? minimapFocusedTick.value : minimapActiveTick.value;
+    const rail = h("div", {
+      class: ["ccm-minimap", `ccm-minimap-pitch-${minimapPitch.value}`],
+      ref: (element) => {
+        minimapRailRef.value = element;
+      },
+      style: { top: `${minimapRailTop.value}px`, height: `${minimapRailHeight.value}px` },
+      role: "listbox",
+      tabindex: 0,
+      inputmode: "none",
+      "aria-label": t("minimap-label"),
+      "aria-activedescendant": focused >= 0 ? `ccm-tick-${minimapTicks.value[focused]?.turnIndex}` : void 0,
+      onPointerdown: onMinimapPointerDown,
+      onPointermove: onMinimapPointerMove,
+      onPointerup: onMinimapPointerUp,
+      onPointercancel: onMinimapPointerCancel,
+      onPointerleave: () => {
+        if (minimapPreviewMode.value === "mouse") closeMinimapPreview();
+      },
+      onKeydown: onMinimapKeydown,
+      onTouchend: (event) => event.stopPropagation()
+    }, minimapTicks.value.map((tick2, tickIndex) => h("div", {
+      id: `ccm-tick-${tick2.turnIndex}`,
+      class: [
+        "ccm-minimap-tick",
+        tickIndex === minimapActiveTick.value ? "ccm-minimap-tick-active" : "",
+        tickIndex === minimapFocusedTick.value ? "ccm-minimap-tick-focused" : ""
+      ],
+      role: "option",
+      "aria-selected": tickIndex === focused,
+      "aria-label": t("minimap-tick", { n: tick2.turnIndex + 1 }),
+      style: {
+        top: `${minimapTickPosition(tickIndex, last + 1, minimapRailHeight.value, tickHeight)}px`
+      }
+    }, [])));
+    const tick = minimapTicks.value[minimapPreviewTick.value];
+    const preview = tick && minimapPreviewLines.value ? h("button", {
+      class: [
+        "ccm-minimap-preview",
+        `ccm-minimap-preview-${minimapPreviewMode.value}`,
+        minimapPreviewLines.value === 1 ? "ccm-minimap-preview-one-line" : ""
+      ],
+      ref: (element) => {
+        minimapPreviewRef.value = element;
+        if (element) schedulePreviewPosition();
+      },
+      type: "button",
+      inputmode: "none",
+      tabindex: -1,
+      title: t("minimap-preview-jump"),
+      "aria-label": t("minimap-preview-jump"),
+      style: { top: `${minimapPreviewTop.value}px` },
+      onPointerdown: (event) => {
+        if (event.pointerType !== "touch" && event.pointerType !== "pen") {
+          minimapCardPointerState = null;
+          return;
+        }
+        event.preventDefault();
+        minimapCardPointerState = {
+          pointerId: event.pointerId,
+          startX: event.clientX,
+          startY: event.clientY,
+          exceededTapSlop: false
+        };
+        minimapPreviewRef.value?.setPointerCapture?.(event.pointerId);
+      },
+      onPointermove: (event) => {
+        const state = minimapCardPointerState;
+        if (!state || state.pointerId !== event.pointerId) return;
+        if (Math.hypot(event.clientX - state.startX, event.clientY - state.startY) >= MINIMAP_TAP_SLOP) {
+          state.exceededTapSlop = true;
+        }
+      },
+      onPointerup: (event) => {
+        if (event.pointerType !== "touch" && event.pointerType !== "pen") return;
+        const state = minimapCardPointerState;
+        if (!state || state.pointerId !== event.pointerId) return;
+        minimapPreviewRef.value?.releasePointerCapture?.(event.pointerId);
+        minimapCardPointerState = null;
+        if (!isMinimapPointerTap(state, event)) return;
+        jumpToMinimapTick(tick);
+        closeMinimapPreview();
+      },
+      onPointercancel: (event) => {
+        if (minimapCardPointerState?.pointerId === event.pointerId) minimapCardPointerState = null;
+      },
+      onTouchend: (event) => event.stopPropagation()
+    }, [
+      tick.sampled ? h("span", { class: "ccm-minimap-preview-badge" }, t("minimap-turn-of", {
+        n: tick.turnIndex + 1,
+        total: minimapTurns.length
+      })) : null,
+      h("span", { class: "ccm-minimap-preview-text" }, tick.text || t("no-content"))
+    ]) : null;
+    return [rail, preview];
+  }
+  function renderJumpPill() {
+    if (!jumpPillVisible.value) return null;
+    const label = t(jumpPillAtBottom.value ? "back-to-top" : "jump-to-bottom");
+    return h("button", {
+      class: "ccm-jump-pill",
+      type: "button",
+      inputmode: "none",
+      title: label,
+      "aria-label": label,
+      onClick: activateJumpPill,
+      onTouchend: (event) => event.stopPropagation()
+    }, [jumpPillAtBottom.value ? IconArrowUpToLine(15) : IconArrowDownToLine(15)]);
   }
   function renderMarkdown(content) {
     if (!content) return [h("span", { class: "ccm-browser-muted" }, t("no-content"))];
@@ -4477,7 +5133,12 @@ function activate(ctx) {
     ]);
     const caps = activeCapabilities.value;
     const unhealthy = session.health === "empty" || session.health === "truncated";
-    return h("main", { class: "ccm-browser-pane ccm-browser-detail-pane" }, [
+    return h("main", {
+      class: "ccm-browser-pane ccm-browser-detail-pane",
+      ref: (element) => {
+        detailPaneRef.value = element;
+      }
+    }, [
       h("div", { class: "ccm-browser-pane-header ccm-browser-transcript-header" }, [
         compactMode.value ? h("button", {
           class: "ccm-icon-btn ccm-browser-transcript-back",
@@ -4522,10 +5183,8 @@ function activate(ctx) {
         ])
       ]),
       h("div", {
-        class: "ccm-browser-transcript-body",
-        ref: (element) => {
-          transcriptScrollRef.value = element;
-        }
+        class: ["ccm-browser-transcript-body", minimapVisible.value ? "ccm-browser-transcript-body-minimap" : ""],
+        ref: setTranscriptScrollElement
       }, [
         unhealthy ? h(
           "div",
@@ -4548,7 +5207,9 @@ function activate(ctx) {
           h("span", {}, t("loading-transcript"))
         ]) : null,
         !transcriptLoading.value && !transcriptError.value && transcriptMessages.value.length === 0 ? h("div", { class: "ccm-browser-transcript-empty" }, t("no-transcript-messages")) : transcriptMessages.value.map(renderTranscriptMessage)
-      ])
+      ]),
+      renderMinimap(),
+      renderJumpPill()
     ]);
   }
   return {
@@ -4564,8 +5225,11 @@ function activate(ctx) {
               if (isActiveMount(mount) && localeSetting.value === "auto") {
                 localeRef.value = resolveLocale("auto", document.documentElement.lang);
               }
+              if (!isActiveMount(mount)) return;
+              attachHostMutationObserver(mount);
+              updateKbAvoid();
             });
-            mount.localeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ["lang"] });
+            attachHostMutationObserver(mount);
           }
           if (rootRef.value) observeRootElement(mount, rootRef.value);
           const preserveState = hasMounted;
@@ -4578,6 +5242,8 @@ function activate(ctx) {
           })();
         });
         ctx.onUnmounted(() => {
+          setTranscriptScrollElement(null);
+          detailPaneRef.value = null;
           bulkCancelRequested.value = true;
           bulkRunning.value = false;
           pinsBulkRunning.value = false;
@@ -4594,6 +5260,7 @@ function activate(ctx) {
           mount.pickerRequestSeq++;
           mount.pickerValidationSeq++;
           mount.rootResizeObserver?.disconnect();
+          mount.transcriptResizeObserver?.disconnect();
           mount.localeObserver?.disconnect();
           if (mount.pinsNoteTimer) clearTimeout(mount.pinsNoteTimer);
           for (const dispose of mount.disposers) dispose();
@@ -4602,6 +5269,9 @@ function activate(ctx) {
           mount.copiedTimer = null;
           mount.pinsNoteTimer = null;
           mount.transcriptFrame = null;
+          mount.transcriptScrollFrame = null;
+          mount.minimapRebuildFrame = null;
+          closeMinimapPreview();
           if (activeMount === mount) activeMount = null;
         });
         return {};
@@ -4667,6 +5337,7 @@ function activate(ctx) {
 }
 export {
   DEFAULT_PARTITION_SORT,
+  MINIMAP_RAIL_INSET,
   PAGE_SIZES,
   TRANSCRIPT_BATCH_SIZE,
   activate,
@@ -4679,8 +5350,16 @@ export {
   deriveSessionPathTree,
   filterBranchOptions,
   filterSessions,
+  findMinimapActiveTurn,
+  isMinimapPointerTap,
+  isMinimapTouchTickOpen,
   isSafeTranscriptHref,
   localDateBounds,
+  mapMinimapTurnToTick,
+  minimapTickPosition,
+  nearestMinimapTickIndex,
+  nextJumpPillAtBottom,
+  nextMinimapPreviewLines,
   nextTranscriptBatchEnd,
   normalizeDateRange,
   normalizePartitionSortSettings,
@@ -4691,6 +5370,7 @@ export {
   resolveSessionTitle,
   resolveSessionTitles,
   runBulkSerial,
+  sampleMinimapTurnIndices,
   selectionReducer,
   sessionKey,
   shQuote,

@@ -96,6 +96,7 @@ async function mount(indexedSessions, runOverride, confirmOverride = async () =>
   global.document = {
     documentElement: { lang: 'en-US' },
     body: { classList: { add() {}, remove() {} } },
+    getElementById: id => lifecycle.documentElements?.[id] || null,
     addEventListener() {},
     removeEventListener() {},
   }
@@ -1644,6 +1645,52 @@ test('locale observation is reattached with a fresh observer after remount', asy
     assert.equal(observers.length, 2)
     assert.equal(observers[0].disconnected, 1)
     assert.equal(observers[1].observed, 1)
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('keyboard observation is narrow when mobile-kb exists at mount', async () => {
+  const observed = []
+  class TrackingObserver {
+    constructor() {}
+    observe(target, options) { observed.push({ target, options }) }
+    disconnect() {}
+  }
+  const mobileKb = {}
+  const harness = await mount([], undefined, undefined, {
+    MutationObserver: TrackingObserver,
+    documentElements: { 'mobile-kb': mobileKb },
+  })
+  try {
+    assert.equal(observed.length, 2)
+    assert.deepEqual(observed[0].options, { attributes: true, attributeFilter: ['lang'] })
+    assert.equal(observed[1].target, mobileKb)
+    assert.deepEqual(observed[1].options, { attributes: true, attributeFilter: ['style', 'hidden'] })
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('keyboard observation falls back broadly only until mobile-kb appears', async () => {
+  const observers = []
+  class TrackingObserver {
+    constructor(callback) { this.callback = callback; this.observed = []; this.disconnected = 0; observers.push(this) }
+    observe(target, options) { this.observed.push({ target, options }) }
+    disconnect() { this.disconnected++ }
+  }
+  const documentElements = {}
+  const harness = await mount([], undefined, undefined, { MutationObserver: TrackingObserver, documentElements })
+  try {
+    assert.equal(observers[0].observed.length, 1)
+    assert.equal(observers[0].observed[0].options.subtree, true)
+    const mobileKb = {}
+    documentElements['mobile-kb'] = mobileKb
+    observers[0].callback([])
+    assert.equal(observers[0].observed.length, 3)
+    assert.deepEqual(observers[0].observed[1].options, { attributes: true, attributeFilter: ['lang'] })
+    assert.equal(observers[0].observed[2].target, mobileKb)
+    assert.deepEqual(observers[0].observed[2].options, { attributes: true, attributeFilter: ['style', 'hidden'] })
   } finally {
     harness.cleanup()
   }

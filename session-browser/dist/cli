@@ -38,6 +38,14 @@ var LIVE_DB_PATH = path.join(HOME, ".codex", "state_5.sqlite");
 var LEGACY_DB_PATH = path.join(HOME, ".codex", "sqlite", "state_5.sqlite");
 var SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 var READ_SESSION_MAX_OUTPUT_BYTES = 16 * 1024 * 1024;
+var CODEX_INJECTED_PREFIXES = [
+  "<environment_context",
+  "<user_action",
+  "<turn_aborted",
+  "<subagent_notification",
+  "<codex_internal_context",
+  "<skill"
+];
 var REQUIRED_THREAD_COLUMNS = [
   "id",
   "rollout_path",
@@ -356,6 +364,15 @@ function contentText(content) {
   if (!Array.isArray(content)) return "";
   return content.filter((item) => item && typeof item === "object" && (item.type === "input_text" || item.type === "output_text") && typeof item.text === "string").map((item) => item.text).join("\n");
 }
+function isCodexInjectedUserMessage(content) {
+  if (typeof content !== "string") return false;
+  const trimmed = content.trimStart();
+  return CODEX_INJECTED_PREFIXES.some((prefix) => {
+    if (!trimmed.startsWith(prefix)) return false;
+    const boundary = trimmed.charAt(prefix.length);
+    return boundary === ">" || /\s/.test(boundary);
+  });
+}
 function compactText(value, limit = 160) {
   const text = typeof value === "string" ? value : JSON.stringify(value);
   return (text || "").replace(/\s+/g, " ").trim().slice(0, limit);
@@ -413,11 +430,13 @@ function parseResponseRecord(record, messages, pending) {
   const payload = record.payload;
   if (payload.type === "message") {
     if (payload.role !== "user" && payload.role !== "assistant" && payload.role !== "developer") return;
+    const content = contentText(payload.content);
     messages.push({
       uuid: typeof payload.id === "string" ? payload.id : "",
       role: payload.role,
-      content: contentText(payload.content),
-      timestamp: typeof record.timestamp === "string" ? record.timestamp : ""
+      content,
+      timestamp: typeof record.timestamp === "string" ? record.timestamp : "",
+      ...payload.role === "user" ? { isRealUser: !isCodexInjectedUserMessage(content) } : {}
     });
     return;
   }
@@ -610,6 +629,16 @@ var TAIL_SCAN_BYTES = 1024 * 1024;
 var READ_SESSION_MAX_OUTPUT_BYTES2 = 16 * 1024 * 1024;
 var LIVE_WINDOW_MS = 60 * 1e3;
 var INDEX_CACHE_VERSION = 3;
+var INJECTED_PREFIXES = [
+  "<task-notification",
+  "<command-name",
+  "<command-message",
+  "<local-command-stdout",
+  "<local-command-caveat",
+  "<system-reminder",
+  "<bash-input",
+  "<bash-stdout"
+];
 var EXPORT_TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1e3;
 var EXPORT_TEMP_RE = /^\.export-tmp-\d+-\d+-\d+$/;
 var EXPORT_TEMP_SWEEP_MAX_DEPTH = 2;
@@ -1138,6 +1167,16 @@ function readSessionMeta(filePath, id, attributionKey, partition, stat) {
     customTitle
   };
 }
+function isInjectedUserMessage(obj) {
+  if (obj?.type !== "user" || typeof obj.message?.content !== "string") return false;
+  if (obj.isCompactSummary === true || obj.isVisibleInTranscriptOnly === true || obj.isMeta === true) return true;
+  const content = obj.message.content.trimStart();
+  return INJECTED_PREFIXES.some((prefix) => {
+    if (!content.startsWith(prefix)) return false;
+    const boundary = content.charAt(prefix.length);
+    return boundary === ">" || /\s/.test(boundary);
+  });
+}
 function parseMessage(obj) {
   if (obj.type === "user") {
     if (typeof obj.message?.content !== "string") return null;
@@ -1145,7 +1184,8 @@ function parseMessage(obj) {
       uuid: obj.uuid || "",
       role: "user",
       content: obj.message.content,
-      timestamp: obj.timestamp || ""
+      timestamp: obj.timestamp || "",
+      isRealUser: !isInjectedUserMessage(obj)
     };
   }
   if (obj.type === "assistant") {

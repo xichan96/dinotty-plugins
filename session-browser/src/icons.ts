@@ -21,6 +21,16 @@ const ICON_PATHS: Record<string, [string, Record<string, string>][]> = {
   'arrow-left': [['path', { d: 'm12 19-7-7 7-7' }], ['path', { d: 'M19 12H5' }]],
   'arrow-up': [['path', { d: 'm18 15-6-6-6 6' }]],
   'arrow-down': [['path', { d: 'm6 9 6 6 6-6' }]],
+  'arrow-up-to-line': [
+    ['path', { d: 'M5 3h14' }],
+    ['path', { d: 'm18 13-6-6-6 6' }],
+    ['path', { d: 'M12 7v14' }],
+  ],
+  'arrow-down-to-line': [
+    ['path', { d: 'M12 3v14' }],
+    ['path', { d: 'm6 11 6 6 6-6' }],
+    ['path', { d: 'M5 21h14' }],
+  ],
   'corner-up-right': [['path', { d: 'M7 17 17 7' }], ['path', { d: 'M7 7h10v10' }]],
   send: [
     ['path', { d: 'M14.536 21.686a.5.5 0 0 0 .937-.024l6.5-19a.496.496 0 0 0-.635-.635l-19 6.5a.5.5 0 0 0-.024.937l7.93 3.18a2 2 0 0 1 1.112 1.11z' }],
@@ -167,6 +177,8 @@ export function IconChevronDown(size?: number) { return renderIcon(ICON_PATHS['c
 export function IconArrowLeft(size?: number) { return renderIcon(ICON_PATHS['arrow-left'], size) }
 export function IconArrowUp(size?: number) { return renderIcon(ICON_PATHS['arrow-up'], size) }
 export function IconArrowDown(size?: number) { return renderIcon(ICON_PATHS['arrow-down'], size) }
+export function IconArrowUpToLine(size?: number) { return renderIcon(ICON_PATHS['arrow-up-to-line'], size) }
+export function IconArrowDownToLine(size?: number) { return renderIcon(ICON_PATHS['arrow-down-to-line'], size) }
 export function IconCornerUpRight(size?: number) { return renderIcon(ICON_PATHS['corner-up-right'], size) }
 export function IconSend(size?: number) { return renderIcon(ICON_PATHS.send, size) }
 export function IconMenu(size?: number) { return renderIcon(ICON_PATHS.menu, size) }
