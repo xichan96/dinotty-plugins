@@ -1,0 +1,13 @@
+{
+  "id": "jiahao-globe",
+  "name": "Jiahao Globe",
+  "version": "1.0.0",
+  "description": "eDEX-UI style rotating wireframe globe with IP geolocation",
+  "description_zh": "eDEX-UI 风格旋转线框地球，支持 IP 地理定位",
+  "icon": "globe",
+  "entry": "./main.js",
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "jiahao-globe.open", "title": "Open Jiahao Globe" }
+  ]
+}

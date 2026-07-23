@@ -1,0 +1,13 @@
+{
+  "id": "jiahao-keyboard",
+  "name": "Jiahao Keyboard",
+  "version": "1.0.0",
+  "description": "eDEX-UI style on-screen keyboard with physical key sync and terminal input",
+  "description_zh": "eDEX-UI 风格屏幕键盘，支持物理键盘同步和终端输入",
+  "icon": "keyboard",
+  "entry": "./main.js",
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "jiahao-keyboard.open", "title": "Open Jiahao Keyboard" }
+  ]
+}

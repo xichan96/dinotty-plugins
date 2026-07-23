@@ -1,0 +1,108 @@
+.jt-root {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+  padding: 2vh 1vw;
+  font-family: 'Rajdhani', 'Courier New', monospace;
+  box-sizing: border-box;
+  color: rgba(180, 180, 180, 0.9);
+}
+
+.jt-clock {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  border-top: 1px solid rgba(180, 180, 180, 0.2);
+  padding: 2vh 0;
+  width: 100%;
+  position: relative;
+}
+
+.jt-clock::before {
+  content: '';
+  position: absolute;
+  left: 0; top: -1px;
+  width: 0.8vw; height: 0.8vw;
+  border-left: 1px solid rgba(180, 180, 180, 0.5);
+  border-top: 1px solid rgba(180, 180, 180, 0.5);
+}
+.jt-clock::after {
+  content: '';
+  position: absolute;
+  right: 0; top: -1px;
+  width: 0.8vw; height: 0.8vw;
+  border-right: 1px solid rgba(180, 180, 180, 0.5);
+  border-top: 1px solid rgba(180, 180, 180, 0.5);
+}
+
+.jt-time {
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  font-size: clamp(32px, 8vh, 96px);
+  line-height: 1;
+  user-select: none;
+}
+
+.jt-digit {
+  display: inline-block;
+  text-align: center;
+  width: 1.2em;
+  color: #ff0040;
+  text-shadow: 0 0 12px rgba(255, 0, 64, 0.4), 0 0 30px rgba(255, 0, 64, 0.15);
+}
+
+.jt-colon {
+  display: inline-block;
+  font-style: normal;
+  text-align: center;
+  width: 0.5em;
+  color: #ff0040;
+  text-shadow: 0 0 12px rgba(255, 0, 64, 0.4);
+}
+
+.jt-ampm {
+  display: inline-block;
+  font-size: 0.3em;
+  margin-left: 0.5em;
+  color: rgba(180, 180, 180, 0.6);
+  vertical-align: super;
+}
+
+.jt-date {
+  margin-top: 1.5vh;
+  font-size: clamp(10px, 2.2vh, 24px);
+  color: rgba(180, 180, 180, 0.6);
+  letter-spacing: 0.3vh;
+}
+
+.jt-controls {
+  margin-top: 2vh;
+}
+
+.jt-btn {
+  background: transparent;
+  border: 1px solid rgba(180, 180, 180, 0.2);
+  color: rgba(180, 180, 180, 0.5);
+  padding: 0.4vh 1.2vw;
+  border-radius: 2px;
+  cursor: pointer;
+  font-size: clamp(9px, 1.4vh, 15px);
+  font-family: inherit;
+  transition: all 0.2s;
+}
+
+.jt-btn:hover {
+  border-color: rgba(180, 180, 180, 0.5);
+  color: rgba(180, 180, 180, 0.8);
+}
+
+.jt-btn-active {
+  border-color: #cccccc;
+  color: #cccccc;
+  text-shadow: 0 0 4px rgba(180, 180, 180, 0.3);
+}

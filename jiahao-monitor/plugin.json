@@ -1,0 +1,13 @@
+{
+  "id": "jiahao-monitor",
+  "name": "Jiahao Monitor",
+  "version": "1.0.0",
+  "description": "eDEX-UI style system monitor with CPU, RAM and disk usage charts",
+  "description_zh": "eDEX-UI 风格系统监控，CPU、内存、磁盘使用率实时图表",
+  "icon": "activity",
+  "entry": "./main.js",
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "jiahao-monitor.open", "title": "Open Jiahao Monitor" }
+  ]
+}

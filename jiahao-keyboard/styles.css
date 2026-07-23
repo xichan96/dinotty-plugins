@@ -1,0 +1,116 @@
+.jk-root {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  height: 100%;
+  width: 100%;
+  padding: 1.5vh 1vw;
+  font-family: 'Rajdhani', 'Courier New', monospace;
+  gap: clamp(2px, 0.4vh, 6px);
+  user-select: none;
+  box-sizing: border-box;
+  color: rgba(180, 180, 180, 0.9);
+}
+
+.jk-row {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(2px, 0.3vw, 5px);
+  height: clamp(28px, 5vh, 56px);
+}
+
+.jk-key {
+  height: clamp(24px, 4.5vh, 50px);
+  min-width: clamp(24px, 4.5vh, 50px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  border-radius: 3px;
+  background: rgba(180, 180, 180, 0.0);
+  border: 1px solid rgba(180, 180, 180, 0.1);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.05s, border-color 0.05s, box-shadow 0.05s;
+  padding: 0 clamp(3px, 0.4vw, 8px);
+}
+
+.jk-key:hover {
+  border-color: rgba(180, 180, 180, 0.25);
+  background: rgba(180, 180, 180, 0.03);
+}
+
+.jk-key-active {
+  background: #cccccc !important;
+  border-color: #cccccc !important;
+  box-shadow: 0 0 8px rgba(180, 180, 180, 0.5), inset 0 0 4px rgba(0, 0, 0, 0.2);
+}
+
+.jk-key-active .jk-key-label,
+.jk-key-active .jk-key-sub {
+  color: #000 !important;
+  text-shadow: none !important;
+}
+
+.jk-key-blink {
+  animation: jk-blink 0.15s ease-out;
+}
+
+@keyframes jk-blink {
+  0% { background: rgba(180, 180, 180, 0.8); box-shadow: 0 0 6px rgba(180, 180, 180, 0.4); }
+  100% { background: rgba(180, 180, 180, 0.0); box-shadow: none; }
+}
+
+.jk-key-lit {
+  background: rgba(180, 180, 180, 0.2);
+  border-color: rgba(180, 180, 180, 0.4);
+  box-shadow: 0 0 4px rgba(180, 180, 180, 0.15);
+}
+
+.jk-key-space {
+  min-width: clamp(100px, 22vw, 280px);
+  height: clamp(20px, 3.8vh, 44px);
+}
+
+.jk-key-enter {
+  min-width: clamp(40px, 7vw, 90px);
+}
+
+.jk-key-arrow {
+  min-width: clamp(24px, 4vh, 48px);
+}
+
+.jk-key-label {
+  font-size: clamp(10px, 1.8vh, 22px);
+  color: rgba(180, 180, 180, 0.75);
+  line-height: 1;
+  pointer-events: none;
+  text-shadow: 0 0 4px rgba(180, 180, 180, 0.15);
+}
+
+.jk-key-sub {
+  font-size: clamp(7px, 1.1vh, 12px);
+  color: rgba(180, 180, 180, 0.3);
+  position: absolute;
+  top: clamp(2px, 0.3vh, 4px);
+  left: clamp(2px, 0.4vw, 6px);
+  pointer-events: none;
+}
+
+/* Modifier active states */
+.jk-root[data-modifiers*="ctrl"] {
+  border: 1px solid rgba(180, 180, 180, 0.12);
+  border-radius: 4px;
+}
+
+.jk-root[data-modifiers*="shift"]::after,
+.jk-root[data-modifiers*="alt"]::after {
+  content: '';
+  position: absolute;
+  top: 0; left: 0; right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, rgba(180, 180, 180, 0.3), transparent);
+}

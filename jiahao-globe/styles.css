@@ -1,0 +1,153 @@
+.jg-root {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  height: 100%;
+  width: 100%;
+  padding: 0;
+  font-family: 'Rajdhani', 'Courier New', monospace;
+  position: relative;
+  overflow: hidden;
+  background: #0a0a0a;
+  box-sizing: border-box;
+  color: rgba(180, 180, 180, 0.9);
+}
+
+/* ── Header ── */
+.jg-header {
+  width: 100%;
+  padding: 1.2vh 1.5vw 0.6vh;
+  border-top: 1px solid rgba(180, 180, 180, 0.2);
+  position: relative;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.jg-header::before {
+  content: '';
+  position: absolute;
+  left: 0; top: -1px;
+  width: 0.8vw; height: 0.8vw;
+  border-left: 1px solid rgba(180, 180, 180, 0.5);
+  border-top: 1px solid rgba(180, 180, 180, 0.5);
+}
+.jg-header::after {
+  content: '';
+  position: absolute;
+  right: 0; top: -1px;
+  width: 0.8vw; height: 0.8vw;
+  border-right: 1px solid rgba(180, 180, 180, 0.5);
+  border-top: 1px solid rgba(180, 180, 180, 0.5);
+}
+
+.jg-header-content { width: 100%; }
+
+.jg-title {
+  font-size: clamp(10px, 1.6vh, 18px);
+  margin: 0;
+  color: rgba(200, 200, 200, 0.9);
+  letter-spacing: 0.25vh;
+  font-weight: 600;
+}
+
+.jg-subtitle {
+  font-style: normal;
+  font-size: clamp(8px, 1.1vh, 13px);
+  opacity: 0.35;
+  margin-left: 0.8vw;
+  letter-spacing: 0.15vh;
+  font-weight: 400;
+}
+
+.jg-coord {
+  font-size: clamp(8px, 1.15vh, 14px);
+  margin: 0.3vh 0 0;
+  font-weight: normal;
+  color: rgba(180, 180, 180, 0.45);
+  letter-spacing: 0.1vh;
+}
+
+.jg-coord-val {
+  font-style: normal;
+  color: #cccccc;
+  font-weight: 600;
+}
+.jg-coord-val.jg-off {
+  color: rgba(255, 0, 64, 0.7);
+}
+
+.jg-location {
+  font-size: clamp(7px, 1.05vh, 12px);
+  color: rgba(180, 180, 180, 0.5);
+  margin-top: 0.2vh;
+}
+
+/* ── Canvas (Three.js will replace this) ── */
+.jg-canvas-wrap {
+  flex: 1;
+  width: 100%;
+  min-height: 0;
+  position: relative;
+  overflow: hidden;
+}
+
+.jg-canvas {
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+/* Three.js canvas styling */
+.jg-canvas-wrap canvas {
+  width: 100% !important;
+  height: 100% !important;
+  display: block;
+}
+
+/* ── Footer ── */
+.jg-footer {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(4px, 0.6vw, 10px);
+  padding: 0.5vh 1vw;
+  border-top: 1px solid rgba(180, 180, 180, 0.1);
+  font-size: clamp(8px, 1.1vh, 13px);
+  letter-spacing: 0.1vh;
+  box-sizing: border-box;
+  flex-shrink: 0;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.jg-fl { color: rgba(180, 180, 180, 0.35); font-size: clamp(7px, 1vh, 11px); }
+.jg-fv { color: rgba(180, 180, 180, 0.7); font-weight: 600; min-width: 3.5vw; }
+.jg-fs { width: 1px; height: 1em; background: rgba(180, 180, 180, 0.15); }
+
+.jg-fst {
+  color: rgba(180, 180, 180, 0.6);
+  padding: 0.1vh 0.6vw;
+  border: 1px solid rgba(180, 180, 180, 0.2);
+  border-radius: 2px;
+  font-size: clamp(7px, 1vh, 11px);
+  letter-spacing: 0.15vh;
+}
+.jg-on { color: #cccccc; border-color: rgba(180, 180, 180, 0.4); }
+.jg-off-tag { color: #ff0040; border-color: rgba(255, 0, 64, 0.4); }
+
+/* ── Loading ── */
+.jg-loading {
+  position: absolute;
+  top: 50%; left: 50%;
+  transform: translate(-50%, -50%);
+  font-size: clamp(12px, 1.5vh, 18px);
+  color: rgba(180, 180, 180, 0.4);
+  letter-spacing: 0.3vh;
+  z-index: 10;
+  animation: jg-blink 1.5s infinite;
+}
+@keyframes jg-blink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}

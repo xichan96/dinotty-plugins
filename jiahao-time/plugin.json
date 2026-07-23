@@ -1,0 +1,13 @@
+{
+  "id": "jiahao-time",
+  "name": "Jiahao Time",
+  "version": "1.0.0",
+  "description": "eDEX-UI style clock with red digits and Chinese date display",
+  "description_zh": "eDEX-UI 风格时钟，红色数字显示时间和中文日期",
+  "icon": "clock",
+  "entry": "./main.js",
+  "styles": "./styles.css",
+  "commands": [
+    { "id": "jiahao-time.open", "title": "Open Jiahao Time" }
+  ]
+}

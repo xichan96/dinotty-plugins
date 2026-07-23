@@ -1,0 +1,172 @@
+.jm-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  width: 100%;
+  padding: 1.5vh 1.2vw;
+  font-family: 'Rajdhani', 'Courier New', monospace;
+  overflow-y: auto;
+  gap: 1.5vh;
+  box-sizing: border-box;
+  color: rgba(180, 180, 180, 0.9);
+}
+
+.jm-header {
+  border-bottom: 1px solid rgba(180, 180, 180, 0.15);
+  padding-bottom: 1vh;
+  flex-shrink: 0;
+}
+
+.jm-title {
+  font-size: clamp(10px, 1.6vh, 18px);
+  margin: 0;
+  letter-spacing: 0.25vh;
+  color: rgba(180, 180, 180, 0.9);
+  font-weight: 600;
+  text-shadow: 0 0 8px rgba(180, 180, 180, 0.2);
+}
+
+.jm-subtitle {
+  display: block;
+  font-style: normal;
+  font-size: clamp(8px, 1.2vh, 13px);
+  opacity: 0.4;
+  margin-top: 0.3vh;
+  font-weight: 400;
+}
+
+.jm-section {
+  background: rgba(180, 180, 180, 0.02);
+  border: 1px solid rgba(180, 180, 180, 0.08);
+  border-radius: 3px;
+  padding: clamp(6px, 1vh, 14px) clamp(8px, 1vw, 16px);
+  flex-shrink: 0;
+}
+
+.jm-section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 0.5vh;
+}
+
+.jm-label {
+  font-size: clamp(9px, 1.4vh, 15px);
+  font-weight: 600;
+  letter-spacing: 0.15vh;
+  color: rgba(180, 180, 180, 0.8);
+}
+
+.jm-value {
+  font-size: clamp(12px, 1.8vh, 20px);
+  font-weight: 700;
+  color: #cccccc;
+  text-shadow: 0 0 6px rgba(180, 180, 180, 0.3);
+}
+
+.jm-mem-info {
+  font-size: clamp(7px, 1.1vh, 11px);
+  color: rgba(180, 180, 180, 0.45);
+  margin-bottom: 0.5vh;
+}
+
+.jm-chart {
+  width: 100%;
+  height: clamp(40px, 6vh, 80px);
+  border-top: 1px dashed rgba(180, 180, 180, 0.08);
+  border-bottom: 1px dashed rgba(180, 180, 180, 0.08);
+  display: block;
+}
+
+/* Dot grid */
+.jm-dotgrid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin-top: 0.8vh;
+  justify-content: center;
+}
+
+.jm-dot {
+  width: clamp(3px, 0.4vh, 5px);
+  height: clamp(3px, 0.4vh, 5px);
+  border-radius: 50%;
+}
+
+.jm-dot-active {
+  background: #ff0040;
+  box-shadow: 0 0 3px rgba(255, 0, 64, 0.5);
+}
+
+.jm-dot-free {
+  background: rgba(180, 180, 180, 0.08);
+}
+
+/* Disk */
+.jm-disk-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8vw;
+  margin: 0.4vh 0;
+  font-size: clamp(7px, 1.1vh, 12px);
+}
+
+.jm-disk-mount {
+  width: 30%;
+  color: rgba(180, 180, 180, 0.6);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.jm-disk-bar-wrap {
+  flex: 1;
+  height: clamp(4px, 0.8vh, 8px);
+  background: rgba(180, 180, 180, 0.06);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.jm-disk-bar {
+  height: 100%;
+  background: linear-gradient(90deg, #cccccc, #ff0040);
+  border-radius: 2px;
+  transition: width 0.5s;
+}
+
+.jm-disk-info {
+  width: 25%;
+  text-align: right;
+  color: rgba(180, 180, 180, 0.45);
+  font-size: clamp(6px, 1vh, 11px);
+}
+
+/* Processes */
+.jm-proc-header,
+.jm-proc-row {
+  display: grid;
+  grid-template-columns: 3em 1fr 3.5em 3.5em;
+  gap: 0.5vw;
+  font-size: clamp(7px, 1.1vh, 12px);
+  padding: 0.3vh 0;
+}
+
+.jm-proc-header {
+  color: rgba(180, 180, 180, 0.35);
+  border-bottom: 1px solid rgba(180, 180, 180, 0.08);
+  margin-bottom: 0.3vh;
+}
+
+.jm-proc-row {
+  color: rgba(180, 180, 180, 0.65);
+}
+
+.jm-proc-pid { color: rgba(180, 180, 180, 0.35); }
+.jm-proc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.jm-proc-cpu { color: #cccccc; text-align: right; text-shadow: 0 0 4px rgba(180, 180, 180, 0.2); }
+.jm-proc-mem { color: #ff0040; text-align: right; text-shadow: 0 0 4px rgba(255, 0, 64, 0.2); }
+
+.jm-uptime {
+  font-size: clamp(7px, 1vh, 11px);
+  color: rgba(180, 180, 180, 0.35);
+}
