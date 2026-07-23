@@ -103,6 +103,71 @@
       "subdir": "volc-ark-quota",
       "author": "dinotty",
       "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/volc-ark-quota"
+    },
+    {
+      "id": "jiahao-globe",
+      "name": "Jiahao Globe",
+      "description": "eDEX-UI style rotating wireframe globe with IP geolocation",
+      "description_zh": "eDEX-UI 风格旋转线框地球，支持 IP 地理定位",
+      "version": "1.0.0",
+      "icon": "globe",
+      "repo": "xichan96/dinotty-plugins",
+      "branch": "main",
+      "subdir": "jiahao-globe",
+      "author": "jiahao",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/jiahao-globe"
+    },
+    {
+      "id": "jiahao-monitor",
+      "name": "Jiahao Monitor",
+      "description": "eDEX-UI style system monitor with CPU, RAM and disk usage charts",
+      "description_zh": "eDEX-UI 风格系统监控，CPU、内存、磁盘使用率实时图表",
+      "version": "1.0.0",
+      "icon": "activity",
+      "repo": "xichan96/dinotty-plugins",
+      "branch": "main",
+      "subdir": "jiahao-monitor",
+      "author": "jiahao",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/jiahao-monitor"
+    },
+    {
+      "id": "jiahao-time",
+      "name": "Jiahao Time",
+      "description": "eDEX-UI style clock with red digits and Chinese date display",
+      "description_zh": "eDEX-UI 风格时钟，红色数字显示时间和中文日期",
+      "version": "1.0.0",
+      "icon": "clock",
+      "repo": "xichan96/dinotty-plugins",
+      "branch": "main",
+      "subdir": "jiahao-time",
+      "author": "jiahao",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/jiahao-time"
+    },
+    {
+      "id": "jiahao-keyboard",
+      "name": "Jiahao Keyboard",
+      "description": "eDEX-UI style on-screen keyboard with physical key sync and terminal input",
+      "description_zh": "eDEX-UI 风格屏幕键盘，支持物理键盘同步和终端输入",
+      "version": "1.0.0",
+      "icon": "keyboard",
+      "repo": "xichan96/dinotty-plugins",
+      "branch": "main",
+      "subdir": "jiahao-keyboard",
+      "author": "jiahao",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/jiahao-keyboard"
+    },
+    {
+      "id": "cloudflare-quick-tunnel",
+      "name": "Cloudflare Tunnel",
+      "description": "Create an independently authenticated, temporary Cloudflare Quick Tunnel for Dinotty",
+      "description_zh": "为 Dinotty 创建独立认证的临时 Cloudflare Quick Tunnel",
+      "version": "0.1.0",
+      "icon": "radio-tower",
+      "repo": "xichan96/dinotty-plugins",
+      "branch": "main",
+      "subdir": "cloudflare-quick-tunnel",
+      "author": "dinotty",
+      "homepage": "https://github.com/xichan96/dinotty-plugins/tree/main/cloudflare-quick-tunnel"
     }
   ]
 }
