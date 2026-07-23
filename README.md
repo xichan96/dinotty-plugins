@@ -15,6 +15,12 @@ Plugin collection for [dinotty](https://github.com/xichan96/dinotty) -- a set of
 | [Claude Code](./claude-code) | 1.0.0 | Visual conversation manager for Claude Code | Claude Code 可视化对话管理 — 浏览历史、新建和恢复会话 |
 | [Volcano Ark Quota](./volc-ark-quota) | 0.1.0 | Display Volcano Engine Ark Flow Plan quota (5h / daily / weekly / monthly) in the status bar | 在状态栏展示火山引擎 Ark Flow Plan 配额（5小时 / 日 / 周 / 月） |
 
+### Development-only plugins
+
+| Plugin | Version | Status |
+|--------|---------|--------|
+| [Cloudflare Tunnel](./cloudflare-quick-tunnel) | 0.1.0 | Local development and dev-link only; Marketplace publication is blocked pending native artifact signing support |
+
 ## Installation
 
 Each plugin can be installed independently through the dinotty plugin manager, or by cloning this repository and pointing to the desired plugin subdirectory.
@@ -36,6 +42,7 @@ Some plugins have additional dependencies:
 | Text Diff | None |
 | Claude Code | `claude` CLI (in PATH), 需先安装 [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) |
 | Volcano Ark Quota | `curl` (for API calls) |
+| Cloudflare Tunnel | Rust 1.86+, Node.js 20+, and a Dinotty build with managed native-process support |
 
 ## Plugin Architecture
 
@@ -111,6 +118,7 @@ export default function activate(ctx) {
 ```
 dinotty-plugins/
   registry.json              # Plugin registry manifest
+  cloudflare-quick-tunnel/   # Development-only Cloudflare Quick Tunnel sharing plugin (TypeScript + Rust)
   cc-switch/                 # API provider switcher (TypeScript + Bash)
   command-bookmarks/         # Terminal command bookmarks (JavaScript)
   dinotty-whiteboard/        # Infinite canvas whiteboard (JavaScript, esbuild)
@@ -156,6 +164,21 @@ cd claude-code
 npm install
 npm run build
 ```
+
+**Cloudflare Tunnel (development-only)**
+
+```bash
+cd cloudflare-quick-tunnel
+cargo test --manifest-path native/Cargo.toml --workspace
+npm ci
+npm run check
+npm run build
+```
+
+The native supervisor must also be built and copied into the platform-specific
+`bin/` directory before using dev-link. See the plugin README for the exact
+commands. Do not add this plugin to `registry.json` until the native artifact
+signing and multi-platform packaging requirements are implemented.
 
 Plugins written in plain JavaScript (Command Bookmarks, JSON Formatter, Text Diff) require no build step -- edit `main.js` directly.
 

@@ -1,0 +1,55 @@
+name: cloudflare-quick-tunnel-ci
+
+on:
+  push:
+    paths:
+      - "cloudflare-quick-tunnel/**"
+      - ".github/workflows/cloudflare-quick-tunnel-ci.yml"
+  pull_request:
+    paths:
+      - "cloudflare-quick-tunnel/**"
+      - ".github/workflows/cloudflare-quick-tunnel-ci.yml"
+
+jobs:
+  test-native:
+    defaults:
+      run:
+        working-directory: cloudflare-quick-tunnel
+    strategy:
+      matrix:
+        include:
+          - os: windows-latest
+            target: windows-x86_64
+          - os: ubuntu-latest
+            target: linux-x86_64
+          - os: ubuntu-24.04-arm
+            target: linux-aarch64
+          - os: macos-13
+            target: macos-x86_64
+          - os: macos-14
+            target: macos-aarch64
+    runs-on: ${{ matrix.os }}
+    name: native-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo fmt --manifest-path native/Cargo.toml --all -- --check
+      - run: cargo test --manifest-path native/Cargo.toml --workspace
+      - run: cargo clippy --manifest-path native/Cargo.toml --workspace --all-targets -- -D warnings
+      - run: cargo build --manifest-path native/Cargo.toml --workspace --release
+
+  test-ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cloudflare-quick-tunnel
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: cloudflare-quick-tunnel/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build

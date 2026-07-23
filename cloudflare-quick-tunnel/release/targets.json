@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "pluginId": "cloudflare-quick-tunnel",
+  "targets": {
+    "windows-x86_64": {
+      "rustTarget": "x86_64-pc-windows-msvc",
+      "entry": "bin/windows-x86_64/dinotty-quick-tunnel-supervisor-0.1.0-p3.exe"
+    },
+    "linux-x86_64": {
+      "rustTarget": "x86_64-unknown-linux-musl",
+      "entry": "bin/linux-x86_64/dinotty-quick-tunnel-supervisor"
+    },
+    "linux-aarch64": {
+      "rustTarget": "aarch64-unknown-linux-musl",
+      "entry": "bin/linux-aarch64/dinotty-quick-tunnel-supervisor"
+    },
+    "macos-x86_64": {
+      "rustTarget": "x86_64-apple-darwin",
+      "entry": "bin/macos-x86_64/dinotty-quick-tunnel-supervisor"
+    },
+    "macos-aarch64": {
+      "rustTarget": "aarch64-apple-darwin",
+      "entry": "bin/macos-aarch64/dinotty-quick-tunnel-supervisor"
+    }
+  }
+}
