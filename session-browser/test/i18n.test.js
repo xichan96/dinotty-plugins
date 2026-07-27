@@ -144,12 +144,17 @@ test('zh locale renders the session list and localizes an archive confirmation',
 
   try {
     const plugin = activate(ctx)
-    plugin.component.setup()
+    const render = plugin.component.setup({
+      paneId: 'pane-a',
+      workspaceId: 'ws-a',
+      isVisible: true,
+      isFocused: true,
+    })
     for (const callback of mounted) callback()
     await new Promise(resolve => setImmediate(resolve))
     await new Promise(resolve => setImmediate(resolve))
 
-    const tree = plugin.component.render()
+    const tree = render()
     const nodes = flatten(tree)
     const texts = nodes.filter(node => typeof node === 'string')
     assert.ok(texts.includes('活跃'))

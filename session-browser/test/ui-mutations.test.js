@@ -60,17 +60,17 @@ async function flush() {
 }
 
 async function triggerSingleExport(harness) {
-  const nodes = flatten(harness.plugin.component.render())
+  const nodes = flatten(harness.render())
   nodes.find(node => node?.tag === 'button' && node.props?.title === 'Export session').props.onClick({ stopPropagation() {} })
   await flush()
 }
 
 async function triggerBulkExport(harness) {
-  let nodes = flatten(harness.plugin.component.render())
+  let nodes = flatten(harness.render())
   nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-  nodes = flatten(harness.plugin.component.render())
+  nodes = flatten(harness.render())
   nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox').props.onClick({ stopPropagation() {}, shiftKey: false })
-  nodes = flatten(harness.plugin.component.render())
+  nodes = flatten(harness.render())
   nodes.find(node => node?.tag === 'button' && textOf(node) === 'Export 1').props.onClick()
   await flush()
 }
@@ -150,26 +150,29 @@ async function mount(indexedSessions, runOverride, confirmOverride = async () =>
   }
 
   const plugin = activate(ctx)
-  let currentUnmount = null
+  const props = { paneId: 'pane-a', workspaceId: 'ws-a', isVisible: true, isFocused: true }
+  let currentRender = null
+  let currentUnmount = []
   let isMounted = false
   function mountComponent() {
     const mountedIndex = mounted.length
     const unmountedIndex = unmounted.length
-    plugin.component.setup()
-    currentUnmount = unmounted[unmountedIndex]
+    currentRender = plugin.component.setup(props)
+    currentUnmount = unmounted.slice(unmountedIndex)
     isMounted = true
-    mounted[mountedIndex]()
+    for (const callback of mounted.slice(mountedIndex)) callback()
   }
   function unmountComponent() {
     if (!isMounted) return
     isMounted = false
-    currentUnmount()
+    for (const callback of currentUnmount) callback()
   }
   mountComponent()
   await flush()
 
   return {
     plugin,
+    render: () => currentRender(),
     calls,
     confirmations,
     notifications,
@@ -202,7 +205,7 @@ test('single export uses the saved root with the agent and single-files folders'
     storageGet: (key, fallback) => key === 'exportDestination' ? '/exports' : fallback(),
   })
   try {
-    const nodes = flatten(harness.plugin.component.render())
+    const nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Export session').props.onClick({ stopPropagation() {} })
     await flush()
 
@@ -230,7 +233,7 @@ test('normal in-home single export confirms the actual directory in configured p
     storageGet: (key, fallback) => key === 'exportDestination' ? '~/My Exports' : fallback(),
   })
   try {
-    const nodes = flatten(harness.plugin.component.render())
+    const nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Export session').props.onClick({ stopPropagation() {} })
     await flush()
 
@@ -246,7 +249,7 @@ test('declining the single-export destination confirmation returns without expor
   const active = session('21202020-2020-2020-2020-202020202020')
   const harness = await mount([active], undefined, async () => false)
   try {
-    const nodes = flatten(harness.plugin.component.render())
+    const nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Export session').props.onClick({ stopPropagation() {} })
     await flush()
 
@@ -254,7 +257,7 @@ test('declining the single-export destination confirmation returns without expor
     assert.equal(harness.confirmations[0], 'Export this session to ~/Downloads/claude_exp/single files?')
     assert.equal(harness.calls.some(args => args[0] === 'export-session'), false)
     assert.deepEqual(harness.notifications, [])
-    assert.equal(flatten(harness.plugin.component.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
+    assert.equal(flatten(harness.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
   } finally {
     harness.cleanup()
   }
@@ -274,14 +277,14 @@ test('single export completes without notifying or writing to the clipboard', as
     value: { clipboard: { writeText: async () => { clipboardWrites++ } } },
   })
   try {
-    const nodes = flatten(harness.plugin.component.render())
+    const nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Export session').props.onClick({ stopPropagation() {} })
     await flush()
 
     assert.equal(harness.calls.filter(args => args[0] === 'export-session').length, 1)
     assert.equal(clipboardWrites, 0)
     assert.deepEqual(harness.notifications, [])
-    assert.equal(flatten(harness.plugin.component.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
+    assert.equal(flatten(harness.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
   } finally {
     harness.cleanup()
   }
@@ -295,11 +298,11 @@ test('single export reports an invalid response for non-JSON stdout', async () =
     }
   })
   try {
-    const nodes = flatten(harness.plugin.component.render())
+    const nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Export session').props.onClick({ stopPropagation() {} })
     await flush()
 
-    const errorBanner = flatten(harness.plugin.component.render()).find(node => node?.props?.class === 'ccm-browser-error')
+    const errorBanner = flatten(harness.render()).find(node => node?.props?.class === 'ccm-browser-error')
     assert.equal(textOf(errorBanner), 'Command failed: Export command returned an invalid response.')
   } finally {
     harness.cleanup()
@@ -324,7 +327,7 @@ test('declining the outside-home confirmation returns without notifying or retry
     storageGet: (key, fallback) => key === 'exportDestination' ? '/outside' : fallback(),
   })
   try {
-    const nodes = flatten(harness.plugin.component.render())
+    const nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Export session').props.onClick({ stopPropagation() {} })
     await flush()
 
@@ -332,7 +335,7 @@ test('declining the outside-home confirmation returns without notifying or retry
     assert.equal(harness.confirmations.length, 2)
     assert.ok(harness.confirmations.every(message => message.includes('/outside')))
     assert.deepEqual(harness.notifications, [])
-    assert.equal(flatten(harness.plugin.component.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
+    assert.equal(flatten(harness.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
   } finally {
     harness.cleanup()
   }
@@ -357,7 +360,7 @@ test('single export outside home retries once with explicit permission when conf
     storageGet: (key, fallback) => key === 'exportDestination' ? '/outside' : fallback(),
   })
   try {
-    const nodes = flatten(harness.plugin.component.render())
+    const nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Export session').props.onClick({ stopPropagation() {} })
     await flush()
 
@@ -397,7 +400,7 @@ test('declining either single-export confirmation releases the mutation mutex', 
     })
     try {
       await triggerSingleExport(harness)
-      const nodes = flatten(harness.plugin.component.render())
+      const nodes = flatten(harness.render())
       nodes.find(node => node?.tag === 'button' && node.props?.title === 'Resume session').props.onClick({ stopPropagation() {} })
       await flush()
 
@@ -436,7 +439,7 @@ test('outside-home retry is bounded to exactly one retry when that retry succeed
     assert.equal(exportCalls.length, 2)
     assert.equal(exportCalls[0].includes('--allow-outside-home'), false)
     assert.equal(exportCalls[1].filter(arg => arg === '--allow-outside-home').length, 1)
-    assert.equal(flatten(harness.plugin.component.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
+    assert.equal(flatten(harness.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
   } finally {
     harness.cleanup()
   }
@@ -468,7 +471,7 @@ test('all export CLI error codes use their localized taxonomy in single and bulk
     })
     try {
       await triggerSingleExport(single)
-      const rendered = textOf(single.plugin.component.render())
+      const rendered = textOf(single.render())
       assert.doesNotMatch(rendered, /RAW CLI|\/raw\/noise\/path/)
       assert.doesNotMatch(rendered, /unexpected error/i)
       assert.doesNotMatch(rendered, /export-error-[a-z-]+/)
@@ -483,7 +486,7 @@ test('all export CLI error codes use their localized taxonomy in single and bulk
     })
     try {
       await triggerBulkExport(bulk)
-      const rendered = textOf(bulk.plugin.component.render())
+      const rendered = textOf(bulk.render())
       assert.doesNotMatch(rendered, /RAW CLI|\/raw\/noise\/path/)
       assert.doesNotMatch(rendered, /unexpected error/i)
       assert.doesNotMatch(rendered, /export-error-[a-z-]+/)
@@ -503,7 +506,7 @@ test('an unrecognized export code uses the generic localization without raw CLI 
   const single = await mount([active], run)
   try {
     await triggerSingleExport(single)
-    const rendered = textOf(single.plugin.component.render())
+    const rendered = textOf(single.render())
     assert.match(rendered, /The session could not be exported because of an unexpected error\./)
     assert.doesNotMatch(rendered, /RAW FUTURE CLI MESSAGE/)
   } finally {
@@ -513,7 +516,7 @@ test('an unrecognized export code uses the generic localization without raw CLI 
   const bulk = await mount([active], run)
   try {
     await triggerBulkExport(bulk)
-    const rendered = textOf(bulk.plugin.component.render())
+    const rendered = textOf(bulk.render())
     assert.match(rendered, /The session could not be exported because of an unexpected error\./)
     assert.doesNotMatch(rendered, /RAW FUTURE CLI MESSAGE/)
   } finally {
@@ -528,7 +531,7 @@ test('bulk failure rows expose readable layout hooks backed by stylesheet rules'
     : undefined)
   try {
     await triggerBulkExport(harness)
-    const nodes = flatten(harness.plugin.component.render())
+    const nodes = flatten(harness.render())
     const row = nodes.find(node => node?.props?.class === 'ccm-browser-bulk-result-item')
     assert.ok(row)
     assert.equal(flatten(row).find(node => node?.tag === 'strong').props.class, 'ccm-browser-bulk-result-title')
@@ -565,11 +568,11 @@ test('bulk export confirms outside home once up front and permits every item', a
     storageGet: (key, fallback) => key === 'exportDestination' ? '/outside' : fallback(),
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox').props.onClick({ stopPropagation() {}, shiftKey: false })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Export 1').props.onClick()
     await flush()
 
@@ -579,7 +582,7 @@ test('bulk export confirms outside home once up front and permits every item', a
     assert.equal(exportCalls[0].filter(arg => arg === '--allow-outside-home').length, 1)
     assert.equal(harness.confirmations.length, 2)
     assert.equal(harness.confirmations.filter(message => message.includes('outside your home directory')).length, 1)
-    assert.match(textOf(harness.plugin.component.render()), /Done 1 · Failed 0 · Skipped 0/)
+    assert.match(textOf(harness.render()), /Done 1 · Failed 0 · Skipped 0/)
   } finally {
     harness.cleanup()
   }
@@ -625,7 +628,7 @@ test('bulk export surfaces classifier failures and does not start the run', asyn
     try {
       const buildCountBefore = harness.calls.filter(args => args[0] === 'build-index').length
       await triggerBulkExport(harness)
-      const rendered = textOf(harness.plugin.component.render())
+      const rendered = textOf(harness.render())
       assert.match(rendered, /Could not verify whether the export destination is inside your home directory\. The export was not started\./, failure.name)
       assert.equal(harness.confirmations.length, 1, failure.name)
       assert.equal(harness.calls.filter(args => args[0] === 'build-index').length, buildCountBefore, failure.name)
@@ -656,7 +659,7 @@ test('stale single export completion after remount does not touch UI state or su
   const pendingExport = deferred()
   const harness = await mount([active], async args => args[0] === 'export-session' ? pendingExport.promise : undefined)
   try {
-    const before = textOf(harness.plugin.component.render())
+    const before = textOf(harness.render())
     const running = triggerSingleExport(harness)
     await flush()
     await harness.remount()
@@ -664,9 +667,9 @@ test('stale single export completion after remount does not touch UI state or su
     await running
     await flush()
 
-    assert.equal(textOf(harness.plugin.component.render()), before)
+    assert.equal(textOf(harness.render()), before)
     assert.deepEqual(harness.notifications, [])
-    assert.equal(flatten(harness.plugin.component.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
+    assert.equal(flatten(harness.render()).some(node => node?.props?.class === 'ccm-browser-error'), false)
   } finally {
     harness.cleanup()
   }
@@ -677,13 +680,13 @@ test('card keyboard activation handles Enter and Space in normal and select mode
   const second = session('card-keyboard-space')
   const harness = await mount([first, second])
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     let cards = nodes.filter(node => node?.tag === 'article')
     const enterNormal = { key: 'Enter', prevented: false, preventDefault() { this.prevented = true } }
     cards[0].props.onKeydown(enterNormal)
     await flush()
     const spaceNormal = { key: ' ', prevented: false, preventDefault() { this.prevented = true } }
-    cards = flatten(harness.plugin.component.render()).filter(node => node?.tag === 'article')
+    cards = flatten(harness.render()).filter(node => node?.tag === 'article')
     cards[1].props.onKeydown(spaceNormal)
     await flush()
 
@@ -691,9 +694,9 @@ test('card keyboard activation handles Enter and Space in normal and select mode
     assert.equal(spaceNormal.prevented, true)
     assert.equal(harness.calls.filter(args => args[0] === 'read-session').length, 2)
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    cards = flatten(harness.plugin.component.render()).filter(node => node?.tag === 'article')
+    cards = flatten(harness.render()).filter(node => node?.tag === 'article')
     const enterSelect = { key: 'Enter', prevented: false, preventDefault() { this.prevented = true } }
     cards[0].props.onKeydown(enterSelect)
     const spaceSelect = { key: ' ', prevented: false, preventDefault() { this.prevented = true } }
@@ -701,7 +704,7 @@ test('card keyboard activation handles Enter and Space in normal and select mode
 
     assert.equal(enterSelect.prevented, true)
     assert.equal(spaceSelect.prevented, true)
-    assert.match(textOf(harness.plugin.component.render()), /2 selected/)
+    assert.match(textOf(harness.render()), /2 selected/)
     assert.equal(harness.calls.filter(args => args[0] === 'read-session').length, 2)
   } finally {
     harness.cleanup()
@@ -712,7 +715,7 @@ test('checkbox and action-button clicks stop propagation from session cards', as
   const active = session('card-nested-control-propagation')
   const harness = await mount([active], undefined, async () => false)
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     const actionEvent = { stopped: false, stopPropagation() { this.stopped = true } }
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Export session').props.onClick(actionEvent)
     await flush()
@@ -720,14 +723,14 @@ test('checkbox and action-button clicks stop propagation from session cards', as
     assert.equal(actionEvent.stopped, true)
     assert.equal(harness.calls.filter(args => args[0] === 'read-session').length, 0)
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     const checkboxEvent = { shiftKey: false, stopped: false, stopPropagation() { this.stopped = true } }
     nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox').props.onClick(checkboxEvent)
 
     assert.equal(checkboxEvent.stopped, true)
-    assert.match(textOf(harness.plugin.component.render()), /1 selected/)
+    assert.match(textOf(harness.render()), /1 selected/)
   } finally {
     harness.cleanup()
   }
@@ -741,15 +744,15 @@ test('bulk export reports an invalid response for non-JSON stdout', async () => 
     }
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox').props.onClick({ stopPropagation() {}, shiftKey: false })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Export 1').props.onClick()
     await flush()
 
-    const renderedText = textOf(harness.plugin.component.render())
+    const renderedText = textOf(harness.render())
     assert.match(renderedText, /Export command returned an invalid response\./)
     assert.doesNotMatch(renderedText, /Unexpected token|JSON/)
   } finally {
@@ -885,11 +888,11 @@ test('bulk export disambiguates different roots with the same sanitized project 
     storageGet: (key, fallback) => key === 'exportDestination' ? '/exports' : fallback(),
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Select all 2 filtered').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Export 2').props.onClick()
     await flush()
 
@@ -1009,16 +1012,16 @@ test('bulk export aborts after 5 consecutive failures and surfaces skipped sessi
     if (args[0] === 'export-session') return { code: 1, stdout: '', stderr: `failure ${args[2]}` }
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Select all 7 filtered').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Export 7').props.onClick()
     await flush()
 
     assert.equal(harness.calls.filter(args => args[0] === 'export-session').length, 5)
-    const renderedText = textOf(harness.plugin.component.render())
+    const renderedText = textOf(harness.render())
     assert.match(renderedText, /Done 0 · Failed 5 · Skipped 2/)
     assert.match(renderedText, /Export stopped after 5 consecutive failures; remaining sessions were skipped\./)
   } finally {
@@ -1129,19 +1132,19 @@ test('destination input invalidates an in-flight storage load while typing', asy
     storageGet: (key, fallback) => key === 'exportDestination' ? savedDestination.promise : fallback(),
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Settings').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     let input = nodes.find(node => node?.tag === 'input' && node.props?.type === 'text')
     input.props.onInput({ target: { value: '/typed/export' } })
     savedDestination.resolve('/stored/export')
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     input = nodes.find(node => node?.tag === 'input' && node.props?.type === 'text')
     assert.equal(input.props.value, '/typed/export')
     input.props.onInput({ target: { value: '   ' } })
-    assert.equal(flatten(harness.plugin.component.render()).find(node => node?.tag === 'input' && node.props?.type === 'text').props.value, '~/Downloads')
+    assert.equal(flatten(harness.render()).find(node => node?.tag === 'input' && node.props?.type === 'text').props.value, '~/Downloads')
   } finally {
     savedDestination.resolve('/stored/export')
     harness.cleanup()
@@ -1151,29 +1154,29 @@ test('destination input invalidates an in-flight storage load while typing', asy
 test('the shared picker routes tree-root and export-destination commits independently', async () => {
   const harness = await mount([session('picker-target-routing')])
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.ok(nodes.some(node => node?.props?.class === 'ccm-picker-title' && textOf(node) === 'Select tree root directory'))
     nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input').props.onInput({ target: { value: '/picked/root' } })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root').props.onClick()
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.equal(textOf(nodes.find(node => node?.props?.class === 'ccm-browser-root-path')), '/picked/root')
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Settings').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.equal(nodes.find(node => node?.tag === 'input' && node.props?.['aria-label'] === 'Export destination').props.value, '~/Downloads')
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Browse for export destination').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.ok(nodes.some(node => node?.props?.class === 'ccm-picker-title' && textOf(node) === 'Select export destination'))
     nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input').props.onInput({ target: { value: '/picked/export' } })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the export destination').props.onClick()
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.equal(textOf(nodes.find(node => node?.props?.class === 'ccm-browser-root-path')), '/picked/root')
     assert.equal(nodes.find(node => node?.tag === 'input' && node.props?.['aria-label'] === 'Export destination').props.value, '/picked/export')
     assert.equal(nodes.some(node => node?.props?.class === 'ccm-picker-overlay'), false)
@@ -1188,24 +1191,24 @@ test('stale picker validation cannot commit after switching target modes', async
     args[0] === 'check-dir' && args[1] === '/stale/root' ? staleValidation.promise : undefined
   ))
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input').props.onInput({ target: { value: '/stale/root' } })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root').props.onClick()
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Settings').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Browse for export destination').props.onClick()
-    assert.match(textOf(harness.plugin.component.render()), /Select export destination/)
+    assert.match(textOf(harness.render()), /Select export destination/)
 
     staleValidation.resolve({ code: 0, stdout: JSON.stringify({ exists: true, dir: true }), stderr: '' })
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.equal(textOf(nodes.find(node => node?.props?.class === 'ccm-browser-root-path')), '/work')
     assert.equal(nodes.find(node => node?.tag === 'input' && node.props?.['aria-label'] === 'Export destination').props.value, '~/Downloads')
     assert.match(textOf(nodes.find(node => node?.props?.class === 'ccm-picker-title')), /Select export destination/)
@@ -1224,15 +1227,15 @@ test('picker check-dir failures use the localized export fallback instead of raw
       }
     : undefined)
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input').props.onInput({ target: { value: '/picked/error' } })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root').props.onClick()
     await flush()
 
-    const rendered = textOf(harness.plugin.component.render())
+    const rendered = textOf(harness.render())
     assert.match(rendered, /The session could not be exported because of an unexpected error\./)
     assert.doesNotMatch(rendered, /RAW PICKER CHECK FAILURE/)
   } finally {
@@ -1266,14 +1269,14 @@ test('sessions pane renders an undated exclusion hint with a created-from filter
   const undated = session('22222222-2222-2222-2222-222222222222', 'active', { createdAt: '' })
   const harness = await mount([dated, undated])
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Date-range filters').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     const dateInputs = nodes.filter(node => node?.tag === 'input' && node.props?.type === 'date')
     dateInputs[0].props.onChange({ target: { value: '2026-07-01' } })
 
     let rendered
-    assert.doesNotThrow(() => { rendered = harness.plugin.component.render() })
+    assert.doesNotThrow(() => { rendered = harness.render() })
     assert.ok(flatten(rendered).includes('+1 undated excluded'))
   } finally {
     harness.cleanup()
@@ -1286,16 +1289,16 @@ test('deleting an archived duplicate leaves the active composite-key copy untouc
   const archived = session(id, 'archive')
   const harness = await mount([active, archived])
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.role === 'tab' && textOf(node) === 'Archive').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Delete archived session').props.onClick({ stopPropagation() {} })
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.equal(nodes.some(node => node?.tag === 'article' && node.props?.key === sessionKey(archived)), false)
     nodes.find(node => node?.tag === 'button' && node.props?.role === 'tab' && textOf(node) === 'Active').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.equal(nodes.some(node => node?.tag === 'article' && node.props?.key === sessionKey(active)), true)
   } finally {
     harness.cleanup()
@@ -1320,14 +1323,14 @@ test('a partial single restore forces a refreshed index rebuild before reporting
     }
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.role === 'tab' && textOf(node) === 'Archive').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Restore session').props.onClick({ stopPropagation() {} })
     await flush()
 
     assert.ok(harness.calls.some(args => args[0] === 'build-index' && args[1] === '--refresh'))
-    assert.match(textOf(harness.plugin.component.render()), /touch failed/)
+    assert.match(textOf(harness.render()), /touch failed/)
   } finally {
     harness.cleanup()
   }
@@ -1344,18 +1347,18 @@ test('bulk archive drops successful selection and retags the open detail session
     if (args[0] === 'build-index') return { code: 0, stdout: JSON.stringify(index), stderr: '' }
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'article').props.onClick()
     await flush()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox' && node.props?.['aria-label']?.startsWith('Select ')).props.onClick({ stopPropagation() {}, shiftKey: false })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Archive 1').props.onClick()
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.ok(nodes.includes('0 selected'))
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Resume session').props.onClick()
     await flush()
@@ -1372,15 +1375,15 @@ test('bulk archive applies successes locally and warns when the final refresh fa
     if (args[0] === 'build-index' && ++buildCount > 1) return { code: 1, stdout: '', stderr: 'refresh unavailable' }
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox').props.onClick({ stopPropagation() {}, shiftKey: false })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Archive 1').props.onClick()
     await flush()
 
-    const rendered = harness.plugin.component.render()
+    const rendered = harness.render()
     nodes = flatten(rendered)
     assert.equal(nodes.some(node => node?.tag === 'article' && node.props?.key === sessionKey(active)), false)
     assert.match(textOf(rendered), /Refresh failed, view may be stale/)
@@ -1395,12 +1398,12 @@ test('archived resume checks the workspace before offering or performing restore
     if (args[0] === 'check-dir') return { code: 0, stdout: JSON.stringify({ exists: false, dir: false }), stderr: '' }
   }, async () => false)
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.role === 'tab' && textOf(node) === 'Archive').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'article').props.onClick()
     await flush()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Resume session').props.onClick()
     await flush()
 
@@ -1416,7 +1419,7 @@ test('resuming a live session requires confirmation before opening another copy'
   const live = session('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'active', { live: true })
   const harness = await mount([live], undefined, async message => !message.includes('already live'))
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Resume session').props.onClick({ stopPropagation() {} })
     await flush()
 
@@ -1430,12 +1433,12 @@ test('terminal resume rejects an invalid session id before directory or terminal
   const invalid = session('not-a-session-id', 'active')
   const harness = await mount([invalid])
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Resume session').props.onClick({ stopPropagation() {} })
     await flush()
 
     assert.equal(harness.calls.some(args => args[0] === 'check-dir'), false)
-    assert.match(textOf(harness.plugin.component.render()), /Invalid session id/)
+    assert.match(textOf(harness.render()), /Invalid session id/)
   } finally {
     harness.cleanup()
   }
@@ -1456,15 +1459,15 @@ test('single archive re-checks bulk state after its confirmation resolves', asyn
     return true
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Archive session').props.onClick({ stopPropagation() {} })
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox').props.onClick({ stopPropagation() {}, shiftKey: false })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Archive 1').props.onClick()
     await flush()
 
@@ -1494,17 +1497,17 @@ test('single delete re-checks bulk state after its confirmation resolves', async
     return true
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.role === 'tab' && textOf(node) === 'Archive').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Delete archived session').props.onClick({ stopPropagation() {} })
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox').props.onClick({ stopPropagation() {}, shiftKey: false })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Delete 1').props.onClick()
     await flush()
 
@@ -1535,7 +1538,7 @@ test('a stale index response from an unmounted generation cannot overwrite the r
     firstBuild.resolve({ code: 0, stdout: JSON.stringify([stale]), stderr: '' })
     await flush()
 
-    const nodes = flatten(harness.plugin.component.render())
+    const nodes = flatten(harness.render())
     assert.equal(nodes.some(node => node?.tag === 'article' && node.props?.key === sessionKey(current)), true)
     assert.equal(nodes.some(node => node?.tag === 'article' && node.props?.key === sessionKey(stale)), false)
   } finally {
@@ -1550,18 +1553,18 @@ test('a full-text response is dropped when its request-time scope changes', asyn
     if (args[0] === 'search') return search.promise
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
-    const input = nodes.find(node => node?.tag === 'input' && node.props?.id === 'session-browser-search-input')
+    let nodes = flatten(harness.render())
+    const input = nodes.find(node => node?.tag === 'input' && node.props?.id?.startsWith('session-browser-search-input'))
     input.props.onInput({ target: { value: 'needle' } })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Run full-text search').props.onClick()
     await flush()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Full-text search uses selected tree scope').props.onClick()
     search.resolve({ code: 0, stdout: JSON.stringify([{ session: active, match: 'stale match' }]), stderr: '' })
     await flush()
 
-    assert.doesNotMatch(textOf(harness.plugin.component.render()), /stale match/)
+    assert.doesNotMatch(textOf(harness.render()), /stale match/)
   } finally {
     harness.cleanup()
   }
@@ -1574,10 +1577,10 @@ test('the mutation coordinator rejects a concurrent single operation', async () 
     message.startsWith('Archive session') ? confirmation.promise : true
   ))
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Archive session').props.onClick({ stopPropagation() {} })
     await flush()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Resume session').props.onClick({ stopPropagation() {} })
     await flush()
 
@@ -1610,11 +1613,11 @@ test('unmount cancels registered focus timers and transcript animation frames', 
   global.setTimeout = callback => { timers.push(callback); return timers.length }
   global.clearTimeout = handle => { clearedTimers.push(handle) }
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Close directory picker').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'article').props.onClick()
     await flush()
 
@@ -1700,11 +1703,11 @@ test('the selected session remains open after an unmount and remount', async () 
   const active = session('dddddddd-dddd-dddd-dddd-dddddddddddd')
   const harness = await mount([active])
   try {
-    flatten(harness.plugin.component.render()).find(node => node?.tag === 'article').props.onClick()
+    flatten(harness.render()).find(node => node?.tag === 'article').props.onClick()
     await flush()
-    assert.ok(flatten(harness.plugin.component.render()).some(node => node?.tag === 'button' && node.props?.title === 'Copy session id'))
+    assert.ok(flatten(harness.render()).some(node => node?.tag === 'button' && node.props?.title === 'Copy session id'))
     await harness.remount()
-    assert.ok(flatten(harness.plugin.component.render()).some(node => node?.tag === 'button' && node.props?.title === 'Copy session id'))
+    assert.ok(flatten(harness.render()).some(node => node?.tag === 'button' && node.props?.title === 'Copy session id'))
   } finally {
     harness.cleanup()
   }
@@ -1715,16 +1718,16 @@ test('the mutation mutex and bulk continuation stay bound to the originating mou
   const bulkConfirm = deferred()
   const harness = await mount([active], undefined, () => bulkConfirm.promise)
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Select mode').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.type === 'checkbox').props.onClick({ stopPropagation() {}, shiftKey: false })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Archive 1').props.onClick()
     await flush()
 
     await harness.remount()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Resume session').props.onClick({ stopPropagation() {} })
     await flush()
     assert.equal(harness.calls.some(args => args[0] === 'check-dir'), false)
@@ -1749,19 +1752,19 @@ test('unmount resets transcript, search, and picker loading flags before remount
     if (args[0] === 'list-dirs') return picker.promise
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'article').props.onClick()
-    nodes.find(node => node?.tag === 'input' && node.props?.id === 'session-browser-search-input').props.onInput({ target: { value: 'needle' } })
-    nodes = flatten(harness.plugin.component.render())
+    nodes.find(node => node?.tag === 'input' && node.props?.id?.startsWith('session-browser-search-input')).props.onInput({ target: { value: 'needle' } })
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Run full-text search').props.onClick()
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
     await flush()
-    assert.match(textOf(harness.plugin.component.render()), /Loading transcript/)
-    assert.match(textOf(harness.plugin.component.render()), /Searching session text/)
-    assert.match(textOf(harness.plugin.component.render()), /Loading directories/)
+    assert.match(textOf(harness.render()), /Loading transcript/)
+    assert.match(textOf(harness.render()), /Searching session text/)
+    assert.match(textOf(harness.render()), /Loading directories/)
 
     await harness.remount()
-    const rendered = textOf(harness.plugin.component.render())
+    const rendered = textOf(harness.render())
     assert.doesNotMatch(rendered, /Loading transcript/)
     assert.doesNotMatch(rendered, /Searching session text/)
     assert.doesNotMatch(rendered, /Loading directories/)
@@ -1784,18 +1787,18 @@ test('a tree root change during build-index is not overwritten by that request',
     storageGet: (key, fallback) => key === 'treeRoot:claude-code' ? '/stored' : fallback(),
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     const input = nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input')
     input.props.onInput({ target: { value: '/chosen' } })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root').props.onClick()
     await flush()
 
     build.resolve({ code: 0, stdout: JSON.stringify([indexed]), stderr: '' })
     await flush()
-    const root = flatten(harness.plugin.component.render()).find(node => node?.props?.class === 'ccm-browser-root-path')
+    const root = flatten(harness.render()).find(node => node?.props?.class === 'ccm-browser-root-path')
     assert.equal(textOf(root), '/chosen')
   } finally {
     harness.cleanup()
@@ -1809,17 +1812,17 @@ test('tree invalidation during stored-root loading clears the index loading flag
     storageGet: (key, fallback) => key === 'treeRoot:claude-code' ? storedRoot.promise : fallback(),
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input').props.onInput({ target: { value: '/chosen' } })
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root').props.onClick()
     await flush()
 
     storedRoot.resolve('/stored')
     await flush()
-    const rendered = harness.plugin.component.render()
+    const rendered = harness.render()
     assert.doesNotMatch(textOf(rendered), /Loading sessions/)
     assert.equal(textOf(flatten(rendered).find(node => node?.props?.class === 'ccm-browser-root-path')), '/chosen')
   } finally {
@@ -1835,11 +1838,11 @@ test('an older root validation cannot overwrite a newer accepted picker root', a
     if (args[0] === 'check-dir' && args[1] === '/newer') return newer.promise
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     const input = nodes.find(node => node?.tag === 'input' && node.props?.class === 'ccm-picker-input')
-    const usePath = () => flatten(harness.plugin.component.render()).find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root')
+    const usePath = () => flatten(harness.render()).find(node => node?.tag === 'button' && textOf(node) === 'Use the entered path as the tree root')
     input.props.onInput({ target: { value: '/older' } })
     usePath().props.onClick()
     input.props.onInput({ target: { value: '/newer' } })
@@ -1850,7 +1853,7 @@ test('an older root validation cannot overwrite a newer accepted picker root', a
     await flush()
     older.resolve({ code: 0, stdout: JSON.stringify({ exists: true, dir: true }), stderr: '' })
     await flush()
-    const root = flatten(harness.plugin.component.render()).find(node => node?.props?.class === 'ccm-browser-root-path')
+    const root = flatten(harness.render()).find(node => node?.props?.class === 'ccm-browser-root-path')
     assert.equal(textOf(root), '/newer')
   } finally {
     harness.cleanup()
@@ -1888,13 +1891,13 @@ test('a stored tree root for one agent does not leak into another agent', async 
     storageGet: (key, fallback) => key === 'treeRoot:claude-code' ? '/claude-stored' : fallback(),
   })
   try {
-    let nodes = flatten(harness.plugin.component.render())
+    let nodes = flatten(harness.render())
     assert.equal(textOf(nodes.find(node => node?.props?.class === 'ccm-browser-root-path')), '/claude-stored')
 
     nodes.find(node => node?.tag === 'select' && node.props?.value === 'claude-code').props.onChange({ target: { value: 'codex' } })
     await flush()
 
-    nodes = flatten(harness.plugin.component.render())
+    nodes = flatten(harness.render())
     assert.equal(textOf(nodes.find(node => node?.props?.class === 'ccm-browser-root-path')), '/codex-indexed')
   } finally {
     harness.cleanup()

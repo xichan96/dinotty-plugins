@@ -1596,29 +1596,598 @@ function collectTreePaths(node, paths = /* @__PURE__ */ new Set()) {
 function isSafeTranscriptHref(href) {
   return /^(?:https?:|mailto:)/i.test(href);
 }
+var mountGeneration = 0;
+function createPaneRegistry() {
+  const runtimes = /* @__PURE__ */ new Map();
+  const runtimesByHandle = /* @__PURE__ */ new Map();
+  const syntheticKeys = /* @__PURE__ */ new WeakMap();
+  let syntheticKey = 0;
+  const keyFor = (props) => {
+    if (typeof props?.paneId === "string" && props.paneId) return props.paneId;
+    const existing = syntheticKeys.get(props);
+    if (existing) return existing;
+    const key = `runtime-${++syntheticKey}`;
+    syntheticKeys.set(props, key);
+    return key;
+  };
+  return {
+    keyFor,
+    register(runtime) {
+      const key = keyFor(runtime.props);
+      const replaced = runtimes.get(key);
+      if (replaced) runtimesByHandle.delete(replaced.handle);
+      runtimes.set(key, runtime);
+      runtimesByHandle.set(runtime.handle, runtime);
+    },
+    unregister(runtime) {
+      const key = keyFor(runtime.props);
+      if (runtimes.get(key) === runtime) runtimes.delete(key);
+      if (runtimesByHandle.get(runtime.handle) === runtime) runtimesByHandle.delete(runtime.handle);
+    },
+    visibleFocused() {
+      const registered = [...runtimes.values()];
+      const target = registered.find((runtime) => runtime.props?.isVisible && runtime.props?.isFocused);
+      if (target) return target;
+      if (registered.some((runtime) => typeof runtime.props?.isVisible === "boolean")) return void 0;
+      return registered[registered.length - 1];
+    },
+    resolve(handle) {
+      return runtimesByHandle.get(handle);
+    },
+    forEach(callback) {
+      for (const runtime of [...runtimes.values()]) callback(runtime);
+    },
+    async broadcast(callback) {
+      await Promise.all([...runtimes.values()].map((runtime) => callback(runtime)));
+    },
+    clear() {
+      runtimes.clear();
+      runtimesByHandle.clear();
+    }
+  };
+}
 function activate(ctx) {
-  const h = ctx.h;
-  initIcons(h);
   const documentLanguage = typeof document === "undefined" ? "" : document.documentElement.lang;
   const localeSetting = ctx.ref("auto");
   const localeRef = ctx.ref(resolveLocale("auto", documentLanguage));
-  const { t, locale } = initI18n(localeRef);
   const fontScale = ctx.ref(3);
   const activeAgent = ctx.ref(DEFAULT_AGENT);
   const agents = ctx.ref([]);
   const themeFollowHost = ctx.ref(true);
-  const settingsOpen = ctx.ref(false);
   const sessions = ctx.ref([]);
+  const exportDestination = ctx.ref(DEFAULT_EXPORT_DESTINATION);
+  const activeDescriptor = ctx.computed(() => agents.value.find((agent) => agent.id === activeAgent.value) || null);
+  const activeCapabilities = ctx.computed(() => activeDescriptor.value?.capabilities || UNAVAILABLE_CAPABILITIES);
+  const activeResumeArgv = ctx.computed(() => activeDescriptor.value?.resume.argv || DEFAULT_RESUME_ARGV_BY_AGENT.get(activeAgent.value));
+  const registry = createPaneRegistry();
+  const paneStates = /* @__PURE__ */ new Map();
+  const handoff = typeof window === "undefined" ? { outstanding: 0, dirty: false, onSettled: null } : window.__sessionBrowserHandoff ||= { outstanding: 0, dirty: false, onSettled: null };
+  const { t } = initI18n(localeRef);
+  const indexFetches = /* @__PURE__ */ new Map();
+  let agentEpoch = 0;
+  let publicationSequence = 0;
+  let publishedSequence = 0;
+  let publishedIndex = null;
+  let displaySettingsPromise = null;
+  let displaySettingsGeneration = 0;
+  let initializationPromise = null;
+  let forceFirstIndexRefresh = false;
+  let firstIndexFetch = true;
+  let resolveInitialFetch = null;
+  let installedOnSettled = null;
+  let localOutstanding = 0;
+  let initialFetchGate = null;
+  if (handoff.outstanding > 0) {
+    initialFetchGate = new Promise((resolve) => {
+      resolveInitialFetch = resolve;
+    });
+    installedOnSettled = () => {
+      if (handoff.onSettled === installedOnSettled) handoff.onSettled = null;
+      forceFirstIndexRefresh = handoff.dirty;
+      handoff.dirty = false;
+      resolveInitialFetch?.();
+      resolveInitialFetch = null;
+      installedOnSettled = null;
+    };
+    handoff.onSettled = installedOnSettled;
+  } else if (handoff.dirty) {
+    handoff.dirty = false;
+    forceFirstIndexRefresh = true;
+  }
+  async function prepareIndexFetch(refresh) {
+    if (initialFetchGate) await initialFetchGate;
+    if (!firstIndexFetch) return refresh;
+    firstIndexFetch = false;
+    if (!forceFirstIndexRefresh) return refresh;
+    forceFirstIndexRefresh = false;
+    return true;
+  }
+  function persistShared(key, value) {
+    ctx.storage.set(key, value).catch((caught) => {
+      console.warn("[session-browser] could not persist plugin setting", caught);
+    });
+  }
+  function agentLabel(agent) {
+    return t(`agent-${agent.id}`);
+  }
+  function parseAgentDescriptors(stdout) {
+    const parsed = JSON.parse(stdout);
+    if (!Array.isArray(parsed)) throw new Error(t("agent-discovery-invalid"));
+    return parsed.map((value) => {
+      const caps = value?.capabilities;
+      const resumeArgv = value?.resume?.argv;
+      const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id);
+      const validCapabilities = caps && ["archive", "rename", "delete", "deleteRequiresArchived", "nativeIndex", "tokenStats", "originFilter"].every((key) => typeof caps[key] === "boolean");
+      if (!value || typeof value.id !== "string" || typeof value.available !== "boolean" || !validCapabilities) {
+        throw new Error(t("agent-discovery-invalid"));
+      }
+      const validResumeArgv = Array.isArray(resumeArgv) && resumeArgv.length > 0 && resumeArgv.every((arg) => typeof arg === "string" && RESUME_ARG_TOKEN_RE.test(arg));
+      if (!validResumeArgv && !defaultResumeArgv) throw new Error(t("agent-discovery-invalid"));
+      return {
+        id: value.id,
+        available: value.available,
+        degraded: value.degraded === true,
+        unavailableReason: typeof value.unavailableReason === "string" ? value.unavailableReason : void 0,
+        degradedReason: typeof value.degradedReason === "string" ? value.degradedReason : void 0,
+        capabilities: caps,
+        resume: { argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv] }
+      };
+    });
+  }
+  function legacyAgentDescriptor() {
+    return {
+      id: DEFAULT_AGENT,
+      available: true,
+      degraded: false,
+      capabilities: LEGACY_CAPABILITIES,
+      resume: { argv: [...LEGACY_RESUME.argv] }
+    };
+  }
+  function notifyDegradedAgent(agent) {
+    if (shared.retired || !agent.degraded) return;
+    ctx.ui.notify(
+      t("agent-degraded-notice", { agent: agentLabel(agent), reason: agent.degradedReason || t("agent-degraded-tooltip") }),
+      "warn",
+      t("agent-degraded-title")
+    );
+  }
+  function resetSharedForAgent(nextAgent, persistAgent = false) {
+    if (shared.retired) return;
+    agentEpoch++;
+    activeAgent.value = nextAgent;
+    if (persistAgent) persistShared(STORAGE_KEYS.activeAgent, nextAgent);
+    registry.forEach((runtime) => runtime.resetForAgentSwitch());
+    sessions.value = [];
+    publishedIndex = null;
+  }
+  function setSessions(nextSessions) {
+    sessions.value = nextSessions;
+    if (publishedIndex && publishedIndex.agent === activeAgent.value && publishedIndex.epoch === agentEpoch) {
+      publishedIndex.sessions = nextSessions;
+    }
+  }
+  async function fetchIndex(agent, refresh) {
+    refresh = await prepareIndexFetch(refresh);
+    if (shared.retired) return null;
+    const epoch = agentEpoch;
+    const refreshStrength = refresh ? 1 : 0;
+    const key = `${epoch}:${agent}:${refreshStrength}`;
+    const exact = indexFetches.get(key);
+    if (exact) return exact;
+    if (!refresh) {
+      const stronger = indexFetches.get(`${epoch}:${agent}:1`);
+      if (stronger) return stronger;
+    }
+    const sequence = ++publicationSequence;
+    const requestMountGeneration = mountGeneration;
+    const request = (async () => {
+      const descriptor = agents.value.find((candidate) => candidate.id === agent);
+      const caps = descriptor?.capabilities || UNAVAILABLE_CAPABILITIES;
+      const args = refresh && !caps.nativeIndex ? ["build-index", "--refresh"] : ["build-index"];
+      const result = await ctx.exec.run([...args, "--agent", agent], { timeout: 3e4 });
+      if (result.code !== 0) throw new Error(result.stderr || "build-index failed");
+      const parsed = JSON.parse(result.stdout);
+      if (!Array.isArray(parsed)) throw new Error("build-index returned invalid JSON");
+      if (shared.retired) return null;
+      if (epoch !== agentEpoch || agent !== activeAgent.value) return null;
+      if (sequence < publishedSequence) {
+        return publishedIndex?.epoch === epoch && publishedIndex.agent === agent ? publishedIndex : null;
+      }
+      const snapshot = {
+        agent,
+        epoch,
+        sequence,
+        requestMountGeneration,
+        sessions: parsed
+      };
+      publishedSequence = sequence;
+      publishedIndex = snapshot;
+      if (!shared.retired) await registry.broadcast((runtime) => runtime.applyIndex(snapshot, "preserve"));
+      return snapshot;
+    })();
+    indexFetches.set(key, request);
+    const cleanup = () => {
+      if (!shared.retired && indexFetches.get(key) === request) indexFetches.delete(key);
+    };
+    request.then(cleanup, cleanup);
+    return request;
+  }
+  function broadcastError(message) {
+    if (shared.retired) return;
+    registry.forEach((runtime) => {
+      runtime.setLoading(false);
+      runtime.showError(message);
+    });
+  }
+  async function discoverAgents() {
+    try {
+      const [result, storedAgent] = await Promise.all([
+        ctx.exec.run(["agents"], { timeout: 1e4 }),
+        ctx.storage.get(STORAGE_KEYS.activeAgent).catch(() => null)
+      ]);
+      if (shared.retired) return { snapshot: null, error: null };
+      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t("agent-discovery-failed")).message);
+      let discovered;
+      try {
+        discovered = parseAgentDescriptors(result.stdout);
+      } catch (caught) {
+        let legacyResponse = false;
+        try {
+          const parsed = JSON.parse(result.stdout);
+          legacyResponse = Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed) && "outcome" in parsed);
+        } catch {
+        }
+        if (!legacyResponse) throw caught;
+        discovered = [];
+      }
+      if (discovered.length === 0) discovered = [legacyAgentDescriptor()];
+      if (shared.retired) return { snapshot: null, error: null };
+      agents.value = discovered;
+      const requestedId = typeof storedAgent === "string" ? storedAgent : DEFAULT_AGENT;
+      const requested = discovered.find((agent) => agent.id === requestedId);
+      const available = discovered.filter((agent) => agent.available);
+      if (available.length === 0) {
+        const unavailableAgent = requested?.id || discovered[0].id;
+        if (unavailableAgent !== activeAgent.value) resetSharedForAgent(unavailableAgent);
+        const message = t("agent-none-available");
+        broadcastError(message);
+        return { snapshot: null, error: message };
+      }
+      const candidates = requested?.available ? [requested, ...available.filter((agent) => agent.id !== requested.id)] : available;
+      let chosen = null;
+      let requestedLoaded = false;
+      let lastError = null;
+      for (const candidate of candidates) {
+        if (candidate.id !== activeAgent.value) resetSharedForAgent(candidate.id);
+        let snapshot = null;
+        try {
+          snapshot = await fetchIndex(candidate.id, false);
+          lastError = null;
+        } catch (caught) {
+          lastError = t("cli-error", { msg: caught?.message || String(caught) });
+          broadcastError(lastError);
+        }
+        if (shared.retired) return { snapshot: null, error: null };
+        const loaded = snapshot !== null;
+        if (candidate.id === requestedId) requestedLoaded = loaded;
+        if (loaded && snapshot.sessions.length > 0) {
+          chosen = candidate;
+          break;
+        }
+      }
+      if (!chosen) {
+        const emptyAgent = candidates[0];
+        if (activeAgent.value !== emptyAgent.id) {
+          resetSharedForAgent(emptyAgent.id);
+          try {
+            await fetchIndex(emptyAgent.id, false);
+            lastError = null;
+          } catch (caught) {
+            lastError = t("cli-error", { msg: caught?.message || String(caught) });
+            broadcastError(lastError);
+          }
+        }
+        if (shared.retired) return { snapshot: null, error: null };
+        if (emptyAgent.id !== requestedId) persistShared(STORAGE_KEYS.activeAgent, emptyAgent.id);
+        ctx.ui.notify(t("agent-no-sessions"), "warn", t("agent-empty-title"));
+        notifyDegradedAgent(emptyAgent);
+        return { snapshot: publishedIndex, error: lastError };
+      }
+      if (chosen.id !== requestedId) {
+        persistShared(STORAGE_KEYS.activeAgent, chosen.id);
+        const requestedName = requested ? agentLabel(requested) : String(requestedId);
+        const reason = !requested ? t("agent-not-registered") : !requested.available ? requested.unavailableReason || t("agent-unavailable-tooltip") : requestedLoaded ? t("agent-no-sessions-short") : t("agent-load-failed-short");
+        ctx.ui.notify(
+          t("agent-fallback-notice", { agent: requestedName, fallback: agentLabel(chosen), reason }),
+          "warn",
+          t("agent-fallback-title")
+        );
+      }
+      notifyDegradedAgent(chosen);
+      return { snapshot: publishedIndex, error: null };
+    } catch (caught) {
+      if (shared.retired) return { snapshot: null, error: null };
+      const message = t("cli-error", { msg: caught?.message || t("agent-discovery-failed") });
+      broadcastError(message);
+      return { snapshot: null, error: message };
+    }
+  }
+  function initializeAgents() {
+    if (shared.retired) return Promise.resolve({ snapshot: null, error: null });
+    if (!initializationPromise) {
+      const attempt = discoverAgents().then(
+        (result) => {
+          if (result.error && initializationPromise === attempt) initializationPromise = null;
+          return result;
+        },
+        (caught) => {
+          if (initializationPromise === attempt) initializationPromise = null;
+          throw caught;
+        }
+      );
+      initializationPromise = attempt;
+    }
+    return initializationPromise;
+  }
+  function initializeDisplaySettings() {
+    if (shared.retired) return Promise.resolve();
+    if (!displaySettingsPromise) {
+      const generation = displaySettingsGeneration;
+      displaySettingsPromise = (async () => {
+        try {
+          const [savedLocale, savedFontScale, savedThemeFollowHost, savedExportDestination] = await Promise.all([
+            ctx.storage.get(STORAGE_KEYS.locale),
+            ctx.storage.get(STORAGE_KEYS.fontScale),
+            ctx.storage.get(STORAGE_KEYS.themeFollowHost),
+            ctx.storage.get(STORAGE_KEYS.exportDestination)
+          ]);
+          if (shared.retired || generation !== displaySettingsGeneration) return;
+          localeSetting.value = normalizeLocaleSetting(savedLocale);
+          localeRef.value = resolveLocale(localeSetting.value, documentLanguage);
+          fontScale.value = typeof savedFontScale === "number" && Number.isInteger(savedFontScale) && savedFontScale >= 1 && savedFontScale <= 5 ? savedFontScale : 3;
+          themeFollowHost.value = typeof savedThemeFollowHost === "boolean" ? savedThemeFollowHost : true;
+          exportDestination.value = typeof savedExportDestination === "string" && savedExportDestination.trim() ? savedExportDestination.trim() : DEFAULT_EXPORT_DESTINATION;
+        } catch {
+        }
+      })();
+    }
+    return displaySettingsPromise;
+  }
+  function invalidateDisplaySettings() {
+    displaySettingsGeneration++;
+  }
+  let laneInFlight = false;
+  let sessionMutationInFlight = false;
+  const pinMutationQueue = [];
+  function startCoordinatorTask() {
+    localOutstanding++;
+    handoff.outstanding++;
+  }
+  function notifyHandoffSettled() {
+    if (handoff.outstanding !== 0 || !handoff.onSettled) return;
+    const onSettled = handoff.onSettled;
+    handoff.onSettled = null;
+    onSettled();
+  }
+  function settleCoordinatorTask() {
+    if (localOutstanding === 0) {
+      if (shared.retired) handoff.dirty = true;
+      return;
+    }
+    localOutstanding--;
+    handoff.outstanding = Math.max(0, handoff.outstanding - 1);
+    if (shared.retired) handoff.dirty = true;
+    notifyHandoffSettled();
+  }
+  async function drainPinMutationQueue() {
+    if (laneInFlight || shared.retired) return;
+    laneInFlight = true;
+    try {
+      while (pinMutationQueue.length > 0 && !shared.retired) {
+        const task = pinMutationQueue.shift();
+        startCoordinatorTask();
+        let owner;
+        let executed = false;
+        try {
+          if (shared.retired) continue;
+          owner = registry.resolve(task.owner);
+          if (!owner) continue;
+          if (!owner.isPinMutationCurrent(task)) {
+            owner.setPinsBulkRunning(false);
+            continue;
+          }
+          owner.setPinsBulkRunning(true);
+          executed = true;
+          await owner.executePinMutation(task);
+          if (shared.retired) continue;
+          if (registry.resolve(task.owner) === owner) owner.setPinsBulkRunning(false);
+          if (!shared.retired) {
+            await registry.broadcast((runtime) => runtime.handle === task.owner ? void 0 : runtime.loadPins());
+          }
+        } finally {
+          if (!shared.retired && executed && owner && registry.resolve(task.owner) === owner) {
+            owner.setPinsBulkRunning(false);
+          }
+          settleCoordinatorTask();
+        }
+      }
+    } finally {
+      laneInFlight = false;
+      if (!shared.retired && pinMutationQueue.length > 0) void drainPinMutationQueue();
+    }
+  }
+  const coordinator = {
+    async coordinate(fallback, owner, isCurrent, operation) {
+      if (shared.retired || !registry.resolve(owner) || laneInFlight || pinMutationQueue.length > 0) {
+        ctx.ui.notify(t("notify-mutation-in-progress"), "warn");
+        return fallback;
+      }
+      laneInFlight = true;
+      sessionMutationInFlight = true;
+      startCoordinatorTask();
+      const coordinatorIsCurrent = () => !shared.retired && isCurrent();
+      try {
+        return await operation(coordinatorIsCurrent);
+      } finally {
+        try {
+          const snapshot = publishedIndex;
+          if (!shared.retired && snapshot) {
+            await registry.broadcast((runtime) => runtime.applyIndex(snapshot, "preserve"));
+          }
+        } catch (caught) {
+          if (!shared.retired) broadcastError(t("cli-error", { msg: caught?.message || String(caught) }));
+        } finally {
+          sessionMutationInFlight = false;
+          laneInFlight = false;
+          settleCoordinatorTask();
+          if (!shared.retired && pinMutationQueue.length > 0) void drainPinMutationQueue();
+        }
+      }
+    },
+    enqueuePin(task) {
+      if (shared.retired) return false;
+      pinMutationQueue.push(task);
+      void drainPinMutationQueue();
+      return true;
+    },
+    isBusy() {
+      return laneInFlight || pinMutationQueue.length > 0;
+    },
+    isSessionMutationBusy() {
+      return sessionMutationInFlight;
+    },
+    dispose() {
+      pinMutationQueue.length = 0;
+    }
+  };
+  async function switchAgent(nextAgent) {
+    if (shared.retired) return;
+    const descriptor = agents.value.find((agent) => agent.id === nextAgent);
+    if (!descriptor?.available || nextAgent === activeAgent.value) return;
+    if (indexFetches.size > 0 || coordinator.isSessionMutationBusy()) {
+      ctx.ui.notify(t("notify-mutation-in-progress"), "warn");
+      return;
+    }
+    resetSharedForAgent(nextAgent, true);
+    registry.forEach((runtime) => {
+      runtime.setLoading(true);
+      runtime.clearError();
+    });
+    let snapshot = null;
+    try {
+      const [loadedSnapshot] = await Promise.all([
+        fetchIndex(nextAgent, false),
+        registry.broadcast((runtime) => runtime.loadPins())
+      ]);
+      snapshot = loadedSnapshot;
+    } catch (caught) {
+      broadcastError(t("cli-error", { msg: caught?.message || String(caught) }));
+      return;
+    }
+    if (shared.retired) return;
+    if (!snapshot) return;
+    await registry.broadcast((runtime) => runtime.applyIndex(snapshot, "reset"));
+    if (snapshot.sessions.length === 0) {
+      ctx.ui.notify(t("agent-empty-notice", { agent: agentLabel(descriptor) }), "warn", t("agent-empty-title"));
+    }
+    notifyDegradedAgent(descriptor);
+  }
+  const shared = {
+    localeSetting,
+    localeRef,
+    fontScale,
+    activeAgent,
+    agents,
+    themeFollowHost,
+    sessions,
+    exportDestination,
+    activeDescriptor,
+    activeCapabilities,
+    activeResumeArgv,
+    registry,
+    coordinator,
+    paneStates,
+    retired: false,
+    fetchIndex,
+    currentIndex: () => publishedIndex,
+    setSessions,
+    initializeDisplaySettings,
+    invalidateDisplaySettings,
+    initializeAgents,
+    switchAgent
+  };
+  ctx.commands.register("session-browser.open", () => {
+    ctx.open();
+  });
+  ctx.commands.register("session-browser.search", () => {
+    ctx.open();
+    shared.registry.visibleFocused()?.openSearch();
+  });
+  return {
+    component: {
+      props: ["paneId", "workspaceId", "isVisible", "isFocused"],
+      setup(props) {
+        const runtime = createPaneRuntime(ctx, props || {}, shared);
+        shared.registry.register(runtime);
+        ctx.onUnmounted(() => {
+          shared.registry.unregister(runtime);
+        });
+        return runtime.render;
+      }
+    },
+    dispose() {
+      if (shared.retired) return;
+      shared.retired = true;
+      if (localOutstanding > 0) {
+        handoff.dirty = true;
+        handoff.outstanding = Math.max(0, handoff.outstanding - localOutstanding);
+        localOutstanding = 0;
+      }
+      if (handoff.onSettled === installedOnSettled) handoff.onSettled = null;
+      installedOnSettled = null;
+      resolveInitialFetch?.();
+      resolveInitialFetch = null;
+      notifyHandoffSettled();
+      coordinator.dispose();
+      indexFetches.clear();
+      registry.clear();
+      paneStates.clear();
+    }
+  };
+}
+function createPaneRuntime(ctx, props, shared) {
+  const {
+    localeSetting,
+    localeRef,
+    fontScale,
+    activeAgent,
+    agents,
+    themeFollowHost,
+    sessions,
+    exportDestination,
+    activeDescriptor,
+    activeCapabilities,
+    activeResumeArgv
+  } = shared;
+  const runtimeHandle = /* @__PURE__ */ Symbol("session-browser-runtime");
+  const paneKey = shared.registry.keyFor(props).replace(/[^A-Za-z0-9_-]/g, "_");
+  const carriedState = shared.paneStates.get(paneKey);
+  const inheritedIndexSequence = shared.currentIndex()?.sequence ?? null;
+  const h = ctx.h;
+  initIcons(h);
+  const { t, locale } = initI18n(localeRef);
+  const settingsOpen = ctx.ref(false);
   const loading = ctx.ref(true);
   const error = ctx.ref(null);
   const errorAction = ctx.ref(null);
-  const visibleRoot = ctx.ref("/");
-  const committedSelection = ctx.ref({ path: "/", mode: "subtree", sessionId: null });
+  const visibleRoot = ctx.ref(carriedState?.visibleRoot || "/");
+  const committedSelection = ctx.ref(
+    carriedState ? { ...carriedState.committedSelection } : { path: "/", mode: "subtree", sessionId: null }
+  );
   const searchOverlay = ctx.ref(null);
   const transientHighlightPath = ctx.ref(null);
   const expandedPaths = ctx.ref(/* @__PURE__ */ new Set());
   const hideScriptedSessions = ctx.ref(false);
-  const exportDestination = ctx.ref(DEFAULT_EXPORT_DESTINATION);
   const showRootPicker = ctx.ref(false);
   const pickerCurrentDir = ctx.ref("/");
   const pickerEntries = ctx.ref([]);
@@ -1642,7 +2211,7 @@ function activate(ctx) {
   const searchQuery = ctx.ref("");
   const globalSearch = ctx.ref(false);
   const searching = ctx.ref(false);
-  const selectedSession = ctx.ref(null);
+  const selectedSession = ctx.ref(carriedState?.selectedSession || null);
   const compactMode = ctx.ref(false);
   const compactView = ctx.ref("list");
   const kbAvoid = ctx.ref(false);
@@ -1656,6 +2225,8 @@ function activate(ctx) {
   const expandedTools = ctx.ref(/* @__PURE__ */ new Set());
   const copiedSessionId = ctx.ref(false);
   const transcriptScrollRef = ctx.ref(null);
+  let transcriptScrollDisposer = null;
+  let programmaticScrollSequence = 0;
   const detailPaneRef = ctx.ref(null);
   const minimapVisible = ctx.ref(false);
   const minimapTicks = ctx.ref([]);
@@ -1706,30 +2277,20 @@ function activate(ctx) {
   let resizeActive = false;
   const COMPACT_BASE_WIDTH = 900;
   let rootWidth = 0;
-  let mountGeneration = 0;
+  let rootWidthMeasured = false;
   let activeMount = null;
-  let mutationInFlight = false;
-  let hasMounted = false;
+  let hasMounted = Boolean(carriedState);
   let warnedPersistFailure = false;
-  const pinMutationQueue = [];
-  let pinMutationInFlight = false;
   function runAgent(args, opts) {
     if (AGENT_AGNOSTIC.has(args[0])) return ctx.exec.run(args, opts);
     return ctx.exec.run([...args, "--agent", activeAgent.value], opts);
   }
-  ctx.commands.register("session-browser.open", () => {
-    ctx.open();
-  });
-  ctx.commands.register("session-browser.search", () => {
-    ctx.open();
+  function openSearch() {
     if (compactMode.value) compactView.value = "list";
     settingsOpen.value = false;
     filtersOpen.value = false;
     scheduleMountTimeout(() => searchInputRef.value?.focus(), 0);
-  });
-  const activeDescriptor = ctx.computed(() => agents.value.find((agent) => agent.id === activeAgent.value) || null);
-  const activeCapabilities = ctx.computed(() => activeDescriptor.value?.capabilities || UNAVAILABLE_CAPABILITIES);
-  const activeResumeArgv = ctx.computed(() => activeDescriptor.value?.resume.argv || DEFAULT_RESUME_ARGV_BY_AGENT.get(activeAgent.value));
+  }
   const originFilteredSessions = ctx.computed(() => sessions.value.filter((session) => isSessionVisibleByOrigin(session)));
   const tree = ctx.computed(() => deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value));
   function persist(key, value) {
@@ -1799,20 +2360,20 @@ function activate(ctx) {
   function samePinOrder(left, right) {
     return left.length === right.length && left.every((pinPath, index) => pinPath === right[index]);
   }
-  function showPinConflict(mount) {
+  function showPinConflict(mount2) {
     updatePinsState({ conflictNote: true });
-    if (mount.pinsNoteTimer) clearTimeout(mount.pinsNoteTimer);
-    mount.pinsNoteTimer = scheduleMountTimeout(() => {
-      if (isActiveMount(mount)) updatePinsState({ conflictNote: false });
-      mount.pinsNoteTimer = null;
+    if (mount2.pinsNoteTimer) clearTimeout(mount2.pinsNoteTimer);
+    mount2.pinsNoteTimer = scheduleMountTimeout(() => {
+      if (!shared.retired && isActiveMount(mount2)) updatePinsState({ conflictNote: false });
+      mount2.pinsNoteTimer = null;
     }, 4e3);
   }
   async function loadPins(requestGeneration, expectedPaths) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return false;
-    const generation = requestGeneration ?? ++mount.pinsGeneration;
+    const mount2 = activeMount;
+    if (shared.retired || !isActiveMount(mount2)) return false;
+    const generation = requestGeneration ?? ++mount2.pinsGeneration;
     const requestAgent = activeAgent.value;
-    const isCurrent = () => isActiveMount(mount) && generation === mount.pinsGeneration && requestAgent === activeAgent.value;
+    const isCurrent = () => !shared.retired && isActiveMount(mount2) && generation === mount2.pinsGeneration && requestAgent === activeAgent.value;
     if (isCurrent()) updatePinsState({ loading: true, error: null });
     try {
       const result = await ctx.exec.run(["list-pins", requestAgent], { timeout: 1e4 });
@@ -1829,7 +2390,7 @@ function activate(ctx) {
         activePath: nextActivePath
       });
       reducePinsSelection({ type: "intersect", keys: loaded.pins.map((pin) => pin.path) });
-      if (expectedPaths && !samePinOrder(expectedPaths, loaded.pins.map((pin) => pin.path))) showPinConflict(mount);
+      if (expectedPaths && !samePinOrder(expectedPaths, loaded.pins.map((pin) => pin.path))) showPinConflict(mount2);
       return true;
     } catch (caught) {
       console.warn("[session-browser]", caught);
@@ -1863,13 +2424,18 @@ function activate(ctx) {
     return [...promoted, ...paths.filter((pinPath) => !selected.has(pinPath))];
   }
   async function reconcilePinsAfterStaleMutation() {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
-    await loadPins(mount.pinsGeneration);
+    const mount2 = activeMount;
+    if (shared.retired || !isActiveMount(mount2)) return;
+    await loadPins(mount2.pinsGeneration);
+  }
+  function isPinMutationCurrent(task) {
+    const mount2 = activeMount;
+    return Boolean(!shared.retired && isActiveMount(mount2) && task.generation === mount2.pinsGeneration && task.agent === activeAgent.value);
   }
   async function executePinMutation(task) {
-    const { mount, agent, generation, intent } = task;
-    const isCurrent = () => isActiveMount(mount) && generation === mount.pinsGeneration && agent === activeAgent.value;
+    const { agent, generation, intent } = task;
+    const mount2 = activeMount;
+    const isCurrent = () => !shared.retired && isActiveMount(mount2) && generation === mount2.pinsGeneration && agent === activeAgent.value;
     if (!isCurrent()) return;
     const before = pinPaths();
     let args;
@@ -1920,32 +2486,16 @@ function activate(ctx) {
       }
     }
   }
-  async function drainPinMutationQueue() {
-    if (pinMutationInFlight) return;
-    pinMutationInFlight = true;
-    try {
-      while (pinMutationQueue.length > 0) {
-        const task = pinMutationQueue.shift();
-        const current = isActiveMount(task.mount) && task.generation === task.mount.pinsGeneration && task.agent === activeAgent.value;
-        if (!current) continue;
-        pinsBulkRunning.value = true;
-        await executePinMutation(task);
-        if (current && task.generation === task.mount.pinsGeneration && task.agent === activeAgent.value) {
-          pinsBulkRunning.value = false;
-        }
-      }
-    } finally {
-      pinMutationInFlight = false;
-      const mount = activeMount;
-      if (isActiveMount(mount) && pinMutationQueue.length === 0) pinsBulkRunning.value = false;
-    }
-  }
   function enqueuePinMutation(intent) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
-    pinMutationQueue.push({ mount, agent: activeAgent.value, generation: mount.pinsGeneration, intent });
-    pinsBulkRunning.value = true;
-    void drainPinMutationQueue();
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
+    const queued = shared.coordinator.enqueuePin({
+      owner: runtimeHandle,
+      agent: activeAgent.value,
+      generation: mount2.pinsGeneration,
+      intent
+    });
+    if (queued) pinsBulkRunning.value = true;
   }
   async function persistPinsCollapsed(collapsed) {
     try {
@@ -1979,38 +2529,44 @@ function activate(ctx) {
       transcriptResizeObserver: null,
       transcriptScrollFrame: null,
       minimapRebuildFrame: null,
+      stickToBottom: false,
+      scrollAnchorId: null,
+      scrollAnchorOffset: 0,
+      pendingScrollRestore: false,
+      restoreGeneration: 0,
+      programmaticScroll: false,
       localeObserver: null,
       mobileKbObserverTarget: void 0,
       pinsNoteTimer: null
     };
   }
-  function isActiveMount(mount) {
-    return Boolean(mount?.active && activeMount?.generation === mount.generation);
+  function isActiveMount(mount2) {
+    return Boolean(mount2?.active && activeMount?.generation === mount2.generation);
   }
-  function addMountDisposer(mount, dispose) {
-    mount.disposers.add(dispose);
+  function addMountDisposer(mount2, dispose) {
+    mount2.disposers.add(dispose);
   }
   function scheduleMountTimeout(callback, delay) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return null;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return null;
     let handle;
     const dispose = () => clearTimeout(handle);
     handle = setTimeout(() => {
-      mount.disposers.delete(dispose);
-      if (isActiveMount(mount)) callback();
+      mount2.disposers.delete(dispose);
+      if (isActiveMount(mount2)) callback();
     }, delay);
-    addMountDisposer(mount, dispose);
+    addMountDisposer(mount2, dispose);
     return handle;
   }
-  function scheduleMountFrame(mount, callback) {
-    if (!isActiveMount(mount)) return null;
+  function scheduleMountFrame(mount2, callback) {
+    if (!isActiveMount(mount2)) return null;
     let handle;
     const dispose = () => cancelAnimationFrame(handle);
     handle = requestAnimationFrame(() => {
-      mount.disposers.delete(dispose);
-      if (isActiveMount(mount)) callback();
+      mount2.disposers.delete(dispose);
+      if (isActiveMount(mount2)) callback();
     });
-    addMountDisposer(mount, dispose);
+    addMountDisposer(mount2, dispose);
     return handle;
   }
   function persistExpandedPaths() {
@@ -2028,21 +2584,27 @@ function activate(ctx) {
   }
   function setExportDestination(value) {
     if (activeMount) activeMount.displayGeneration++;
+    shared.invalidateDisplaySettings();
     exportDestination.value = value.trim() || DEFAULT_EXPORT_DESTINATION;
     persist(STORAGE_KEYS.exportDestination, exportDestination.value);
   }
   function setLocaleSetting(value) {
     if (activeMount) activeMount.displayGeneration++;
+    shared.invalidateDisplaySettings();
     localeSetting.value = normalizeLocaleSetting(value);
     localeRef.value = resolveLocale(localeSetting.value, typeof document === "undefined" ? "" : document.documentElement.lang);
     persist(STORAGE_KEYS.locale, localeSetting.value);
   }
   function setFontScale(value) {
     if (activeMount) activeMount.displayGeneration++;
+    shared.invalidateDisplaySettings();
     fontScale.value = Math.min(5, Math.max(1, Math.round(value)));
+    shared.registry.forEach((runtime) => runtime.applyFontScale());
+    persist(STORAGE_KEYS.fontScale, fontScale.value);
+  }
+  function applyFontScale() {
     updateCompactMode(rootWidth);
     scheduleMinimapRebuild();
-    persist(STORAGE_KEYS.fontScale, fontScale.value);
   }
   function updateKbAvoid() {
     const root = rootRef.value;
@@ -2087,6 +2649,7 @@ function activate(ctx) {
     scheduleMinimapRebuild();
   }
   function updateCompactMode(width) {
+    if (width === 0 && props.isVisible === false) return;
     rootWidth = width;
     const multiplier = FONT_SCALE_MULTIPLIERS[fontScale.value] || 1;
     const nextCompact = width < COMPACT_BASE_WIDTH * multiplier;
@@ -2099,24 +2662,33 @@ function activate(ctx) {
     }
     updateKbAvoid();
   }
-  function observeRootElement(mount, element) {
+  function observeRootElement(mount2, element) {
     updateCompactMode(element.getBoundingClientRect().width);
+    rootWidthMeasured = true;
     if (typeof ResizeObserver === "undefined") return;
-    mount.rootResizeObserver?.disconnect();
-    mount.rootResizeObserver = new ResizeObserver(() => updateCompactMode(element.getBoundingClientRect().width));
-    mount.rootResizeObserver.observe(element);
+    mount2.rootResizeObserver?.disconnect();
+    mount2.rootResizeObserver = new ResizeObserver(() => {
+      const previousWidth = rootWidth;
+      const width = element.getBoundingClientRect().width;
+      updateCompactMode(width);
+      if (typeof props.isVisible !== "boolean" && rootWidthMeasured && previousWidth === 0 && width > 0) {
+        triggerTranscriptScrollRestore(mount2);
+      }
+      rootWidthMeasured = true;
+    });
+    mount2.rootResizeObserver.observe(element);
     const kbBtn = document.getElementById("kb-toggle-btn");
-    if (kbBtn) mount.rootResizeObserver.observe(kbBtn);
+    if (kbBtn) mount2.rootResizeObserver.observe(kbBtn);
     const mobileKb = document.getElementById("mobile-kb");
-    if (mobileKb) mount.rootResizeObserver.observe(mobileKb);
+    if (mobileKb) mount2.rootResizeObserver.observe(mobileKb);
   }
-  function attachHostMutationObserver(mount) {
-    const observer = mount.localeObserver;
+  function attachHostMutationObserver(mount2) {
+    const observer = mount2.localeObserver;
     if (!observer || typeof document === "undefined") return;
     const mobileKb = document.getElementById("mobile-kb");
-    if (mount.mobileKbObserverTarget === mobileKb) return;
-    if (mount.mobileKbObserverTarget !== void 0) observer.disconnect();
-    mount.mobileKbObserverTarget = mobileKb;
+    if (mount2.mobileKbObserverTarget === mobileKb) return;
+    if (mount2.mobileKbObserverTarget !== void 0) observer.disconnect();
+    mount2.mobileKbObserverTarget = mobileKb;
     if (!mobileKb) {
       observer.observe(document.documentElement, {
         childList: true,
@@ -2134,21 +2706,23 @@ function activate(ctx) {
       attributes: true,
       attributeFilter: ["style", "hidden"]
     });
-    mount.rootResizeObserver?.observe(mobileKb);
+    mount2.rootResizeObserver?.observe(mobileKb);
   }
   function setRootElement(element) {
     if (element === rootRef.value) return;
     rootRef.value = element;
     if (!element) {
+      rootWidthMeasured = false;
       activeMount?.rootResizeObserver?.disconnect();
       if (activeMount) activeMount.rootResizeObserver = null;
       return;
     }
-    const mount = activeMount;
-    if (isActiveMount(mount)) observeRootElement(mount, element);
+    const mount2 = activeMount;
+    if (isActiveMount(mount2)) observeRootElement(mount2, element);
   }
   function setThemeFollowHost(value) {
     if (activeMount) activeMount.displayGeneration++;
+    shared.invalidateDisplaySettings();
     themeFollowHost.value = value;
     persist(STORAGE_KEYS.themeFollowHost, value);
   }
@@ -2180,53 +2754,10 @@ function activate(ctx) {
   function agentLabel(agent) {
     return t(`agent-${agent.id}`);
   }
-  function parseAgentDescriptors(stdout) {
-    const parsed = JSON.parse(stdout);
-    if (!Array.isArray(parsed)) throw new Error(t("agent-discovery-invalid"));
-    return parsed.map((value) => {
-      const caps = value?.capabilities;
-      const resumeArgv = value?.resume?.argv;
-      const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id);
-      const validCapabilities = caps && ["archive", "rename", "delete", "deleteRequiresArchived", "nativeIndex", "tokenStats", "originFilter"].every((key) => typeof caps[key] === "boolean");
-      if (!value || typeof value.id !== "string" || typeof value.available !== "boolean" || !validCapabilities) {
-        throw new Error(t("agent-discovery-invalid"));
-      }
-      const validResumeArgv = Array.isArray(resumeArgv) && resumeArgv.length > 0 && resumeArgv.every((arg) => typeof arg === "string" && RESUME_ARG_TOKEN_RE.test(arg));
-      if (!validResumeArgv && !defaultResumeArgv) throw new Error(t("agent-discovery-invalid"));
-      return {
-        id: value.id,
-        available: value.available,
-        degraded: value.degraded === true,
-        unavailableReason: typeof value.unavailableReason === "string" ? value.unavailableReason : void 0,
-        degradedReason: typeof value.degradedReason === "string" ? value.degradedReason : void 0,
-        capabilities: caps,
-        resume: {
-          argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv]
-        }
-      };
-    });
-  }
-  function legacyAgentDescriptor() {
-    return {
-      id: DEFAULT_AGENT,
-      available: true,
-      degraded: false,
-      capabilities: LEGACY_CAPABILITIES,
-      resume: { argv: [...LEGACY_RESUME.argv] }
-    };
-  }
   function agentTooltip(agent) {
     if (!agent.available) return agent.unavailableReason || t("agent-unavailable-tooltip");
     if (agent.degraded) return agent.degradedReason || t("agent-degraded-tooltip");
     return t("agent-switcher");
-  }
-  function notifyDegradedAgent(agent) {
-    if (!agent.degraded) return;
-    ctx.ui.notify(
-      t("agent-degraded-notice", { agent: agentLabel(agent), reason: agent.degradedReason || t("agent-degraded-tooltip") }),
-      "warn",
-      t("agent-degraded-title")
-    );
   }
   function resetForAgentSwitch() {
     if (activeMount) {
@@ -2241,7 +2772,6 @@ function activate(ctx) {
     }
     clearSearchOverlay(true);
     resetTranscript();
-    sessions.value = [];
     committedSelection.value = { path: "/", mode: "subtree", sessionId: null };
     activePartition.value = "active";
     page.value = 1;
@@ -2275,104 +2805,34 @@ function activate(ctx) {
     bulkRefreshFailed.value = false;
     compactView.value = "list";
   }
-  async function switchAgent(nextAgent) {
-    const descriptor = agents.value.find((agent) => agent.id === nextAgent);
-    if (!descriptor?.available || nextAgent === activeAgent.value || loading.value || bulkRunning.value || mutationInFlight) return;
-    activeAgent.value = nextAgent;
-    persist(STORAGE_KEYS.activeAgent, nextAgent);
-    resetForAgentSwitch();
-    const [loaded] = await Promise.all([loadIndex(), loadPins()]);
-    if (!loaded) return;
-    if (sessions.value.length === 0) {
-      ctx.ui.notify(t("agent-empty-notice", { agent: agentLabel(descriptor) }), "warn", t("agent-empty-title"));
-    }
-    notifyDegradedAgent(descriptor);
-  }
   async function initializeAgents(preserveState) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
+    const mount2 = activeMount;
+    if (shared.retired || !isActiveMount(mount2)) return;
+    const indexGeneration = ++mount2.indexGeneration;
+    const treeGeneration = ++mount2.treeGeneration;
+    const isCurrent = () => !shared.retired && isActiveMount(mount2) && indexGeneration === mount2.indexGeneration;
     loading.value = true;
     clearError();
     try {
-      const [result, storedAgent] = await Promise.all([
-        runAgent(["agents"], { timeout: 1e4 }),
-        ctx.storage.get(STORAGE_KEYS.activeAgent).catch(() => null)
-      ]);
-      if (!isActiveMount(mount)) return;
-      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t("agent-discovery-failed")).message);
-      let discovered;
-      try {
-        discovered = parseAgentDescriptors(result.stdout);
-      } catch (caught) {
-        let legacyResponse = false;
-        try {
-          const parsed = JSON.parse(result.stdout);
-          legacyResponse = Boolean(parsed && typeof parsed === "object" && !Array.isArray(parsed) && "outcome" in parsed);
-        } catch {
-        }
-        if (!legacyResponse) throw caught;
-        discovered = [];
-      }
-      if (discovered.length === 0) discovered = [legacyAgentDescriptor()];
-      agents.value = discovered;
-      const requestedId = typeof storedAgent === "string" ? storedAgent : DEFAULT_AGENT;
-      const requested = discovered.find((agent) => agent.id === requestedId);
-      const available = discovered.filter((agent) => agent.available);
-      if (available.length === 0) {
-        activeAgent.value = requested?.id || discovered[0].id;
+      const result = await shared.initializeAgents();
+      if (!isCurrent()) return;
+      const snapshot = shared.currentIndex();
+      if (result.error || !snapshot) {
         loading.value = false;
-        showError(t("agent-none-available"));
+        if (result.error) showError(result.error);
         return;
       }
-      const candidates = requested?.available ? [requested, ...available.filter((agent) => agent.id !== requested.id)] : available;
-      const previousAgent = activeAgent.value;
-      let chosen = null;
-      let requestedLoaded = false;
-      for (const candidate of candidates) {
-        const switchedAgent = candidate.id !== activeAgent.value;
-        if (switchedAgent) resetForAgentSwitch();
-        activeAgent.value = candidate.id;
-        const preserveCandidateState = preserveState && !switchedAgent && candidate.id === previousAgent && candidate.id === requestedId;
-        const [loaded] = await Promise.all([loadIndex(preserveCandidateState), loadPins()]);
-        if (!isActiveMount(mount)) return;
-        if (candidate.id === requestedId) requestedLoaded = loaded;
-        if (loaded && sessions.value.length > 0) {
-          chosen = candidate;
-          break;
-        }
+      const applied = await applyIndex(
+        snapshot,
+        preserveState ? "preserve" : "reset",
+        { indexGeneration, treeGeneration }
+      );
+      if (!applied && isCurrent() && snapshot.requestMountGeneration < mount2.generation && snapshot.sequence !== inheritedIndexSequence) {
+        await loadIndex(preserveState);
       }
-      if (!chosen) {
-        const emptyAgent = candidates[0];
-        if (activeAgent.value !== emptyAgent.id) {
-          resetForAgentSwitch();
-          activeAgent.value = emptyAgent.id;
-          await Promise.all([loadIndex(), loadPins()]);
-          if (!isActiveMount(mount)) return;
-        } else if (requestedLoaded && sessions.value.length === 0) {
-          clearSearchOverlay(true);
-          resetTranscript();
-          page.value = 1;
-          selection.value = selectionReducer(selection.value, { type: "clear-partition" });
-          selectMode.value = false;
-        }
-        if (emptyAgent.id !== requestedId) persist(STORAGE_KEYS.activeAgent, emptyAgent.id);
-        ctx.ui.notify(t("agent-no-sessions"), "warn", t("agent-empty-title"));
-        notifyDegradedAgent(emptyAgent);
-        return;
-      }
-      if (chosen.id !== requestedId) {
-        persist(STORAGE_KEYS.activeAgent, chosen.id);
-        const requestedName = requested ? agentLabel(requested) : String(requestedId);
-        const reason = !requested ? t("agent-not-registered") : !requested.available ? requested.unavailableReason || t("agent-unavailable-tooltip") : requestedLoaded ? t("agent-no-sessions-short") : t("agent-load-failed-short");
-        ctx.ui.notify(
-          t("agent-fallback-notice", { agent: requestedName, fallback: agentLabel(chosen), reason }),
-          "warn",
-          t("agent-fallback-title")
-        );
-      }
-      notifyDegradedAgent(chosen);
+      await loadPins();
     } catch (caught) {
-      if (isActiveMount(mount)) {
+      if (!shared.retired && isActiveMount(mount2)) {
         loading.value = false;
         showError(cliError(caught?.message || t("agent-discovery-failed")));
       }
@@ -2412,7 +2872,7 @@ function activate(ctx) {
   function retagSession(session, partition) {
     const oldKey = sessionKey(session);
     const updated = { ...session, partition };
-    sessions.value = sessions.value.map((candidate) => sameSession(candidate, session) ? updated : candidate);
+    shared.setSessions(sessions.value.map((candidate) => sameSession(candidate, session) ? updated : candidate));
     if (selectedSession.value && sameSession(selectedSession.value, session)) selectedSession.value = updated;
     if (committedSelection.value.sessionId === oldKey) {
       committedSelection.value = { ...committedSelection.value, sessionId: sessionKey(updated) };
@@ -2439,7 +2899,7 @@ function activate(ctx) {
   }
   function removeSession(session) {
     const removedKey = sessionKey(session);
-    sessions.value = sessions.value.filter((candidate) => !sameSession(candidate, session));
+    shared.setSessions(sessions.value.filter((candidate) => !sameSession(candidate, session)));
     if (committedSelection.value.sessionId === removedKey) {
       committedSelection.value = { ...committedSelection.value, sessionId: null };
     }
@@ -2464,10 +2924,10 @@ function activate(ctx) {
     }), "info", t("notify-files-updated"));
   }
   function cancelTranscriptFrame() {
-    const mount = activeMount;
-    if (!mount) return;
-    if (mount.transcriptFrame !== null) cancelAnimationFrame(mount.transcriptFrame);
-    mount.transcriptFrame = null;
+    const mount2 = activeMount;
+    if (!mount2) return;
+    if (mount2.transcriptFrame !== null) cancelAnimationFrame(mount2.transcriptFrame);
+    mount2.transcriptFrame = null;
   }
   function clearMinimapState() {
     closeMinimapPreview();
@@ -2482,6 +2942,108 @@ function activate(ctx) {
   function isTranscriptAtBottom(body) {
     return body.scrollHeight - body.scrollTop - body.clientHeight <= 24;
   }
+  function captureTranscriptScrollPosition(mount2, body) {
+    mount2.stickToBottom = isTranscriptAtBottom(body);
+    if (mount2.stickToBottom) return;
+    const bodyRect = body.getBoundingClientRect();
+    const anchors = Array.from(body.querySelectorAll("[data-transcript-id]"));
+    const anchor = anchors.find((element) => {
+      const rect = element.getBoundingClientRect();
+      return rect.bottom > bodyRect.top && rect.top < bodyRect.bottom;
+    });
+    const anchorId = anchor?.getAttribute("data-transcript-id");
+    if (!anchor || anchorId === null) return;
+    mount2.scrollAnchorId = anchorId;
+    mount2.scrollAnchorOffset = anchor.getBoundingClientRect().top - bodyRect.top;
+  }
+  function resetTranscriptScrollState(mount2) {
+    if (!mount2) return;
+    mount2.stickToBottom = false;
+    mount2.scrollAnchorId = null;
+    mount2.scrollAnchorOffset = 0;
+    mount2.pendingScrollRestore = false;
+    mount2.programmaticScroll = false;
+    mount2.restoreGeneration++;
+    programmaticScrollSequence++;
+  }
+  function scheduleProgrammaticScrollRelease(mount2, body, sequence, previousPosition, stableFrames, captureOnSettle) {
+    scheduleMountFrame(mount2, () => {
+      if (!mount2.programmaticScroll || sequence !== programmaticScrollSequence) return;
+      const position = body.scrollTop;
+      const nextStableFrames = position === previousPosition ? stableFrames + 1 : 0;
+      if (nextStableFrames >= 2) {
+        mount2.programmaticScroll = false;
+        if (captureOnSettle && isActiveMount(mount2) && transcriptScrollRef.value === body) {
+          captureTranscriptScrollPosition(mount2, body);
+        }
+        return;
+      }
+      scheduleProgrammaticScrollRelease(mount2, body, sequence, position, nextStableFrames, captureOnSettle);
+    });
+  }
+  function performProgrammaticTranscriptScroll(mount2, body, write, captureOnSettle = false) {
+    mount2.programmaticScroll = true;
+    const sequence = ++programmaticScrollSequence;
+    write();
+    scheduleProgrammaticScrollRelease(mount2, body, sequence, body.scrollTop, 0, captureOnSettle);
+  }
+  function transcriptAnchorSelector(id) {
+    const escaped = typeof CSS !== "undefined" && typeof CSS.escape === "function" ? CSS.escape(id) : id.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return `[data-transcript-id="${escaped}"]`;
+  }
+  function applySavedTranscriptScrollPosition(mount2) {
+    const body = transcriptScrollRef.value;
+    if (!body) return false;
+    if (mount2.stickToBottom) {
+      performProgrammaticTranscriptScroll(mount2, body, () => {
+        body.scrollTop = Math.max(0, body.scrollHeight - body.clientHeight);
+      });
+      return true;
+    }
+    if (!mount2.scrollAnchorId) return false;
+    const anchor = body.querySelector(transcriptAnchorSelector(mount2.scrollAnchorId));
+    if (!anchor) return false;
+    const bodyTop = body.getBoundingClientRect().top;
+    const anchorOffset = anchor.getBoundingClientRect().top - bodyTop;
+    performProgrammaticTranscriptScroll(mount2, body, () => {
+      body.scrollTop += anchorOffset - mount2.scrollAnchorOffset;
+    });
+    return true;
+  }
+  function scheduleTranscriptScrollRestore(mount2, generation, finalFrame = false) {
+    scheduleMountFrame(mount2, () => {
+      if (generation !== mount2.restoreGeneration || !mount2.pendingScrollRestore) return;
+      if (mount2.transcriptFrame !== null || mount2.minimapRebuildFrame !== null) {
+        scheduleTranscriptScrollRestore(mount2, generation);
+        return;
+      }
+      if (!finalFrame) {
+        scheduleTranscriptScrollRestore(mount2, generation, true);
+        return;
+      }
+      applySavedTranscriptScrollPosition(mount2);
+      mount2.pendingScrollRestore = false;
+    });
+  }
+  function triggerTranscriptScrollRestore(mount2) {
+    if (!isActiveMount(mount2)) return;
+    const generation = ++mount2.restoreGeneration;
+    mount2.pendingScrollRestore = true;
+    applySavedTranscriptScrollPosition(mount2);
+    scheduleTranscriptScrollRestore(mount2, generation);
+  }
+  function cancelTranscriptScrollRestore() {
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
+    mount2.pendingScrollRestore = false;
+    mount2.programmaticScroll = false;
+    mount2.restoreGeneration++;
+    programmaticScrollSequence++;
+  }
+  function onTranscriptUserKeydown(event) {
+    if (!["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight", "PageUp", "PageDown", "Home", "End", " ", "Spacebar"].includes(event.key)) return;
+    cancelTranscriptScrollRestore();
+  }
   function updateTranscriptScrollState() {
     const body = transcriptScrollRef.value;
     if (!body) return;
@@ -2494,10 +3056,14 @@ function activate(ctx) {
   }
   function onTranscriptScroll() {
     closeMinimapPreview();
-    const mount = activeMount;
-    if (!isActiveMount(mount) || mount.transcriptScrollFrame !== null) return;
-    mount.transcriptScrollFrame = scheduleMountFrame(mount, () => {
-      mount.transcriptScrollFrame = null;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2) || mount2.transcriptScrollFrame !== null) return;
+    mount2.transcriptScrollFrame = scheduleMountFrame(mount2, () => {
+      mount2.transcriptScrollFrame = null;
+      if (!mount2.programmaticScroll) {
+        const body = transcriptScrollRef.value;
+        if (body) captureTranscriptScrollPosition(mount2, body);
+      }
       updateTranscriptScrollState();
     });
   }
@@ -2583,9 +3149,9 @@ function activate(ctx) {
     minimapPreviewTop.value = top - bounds.paneRect.top;
   }
   function schedulePreviewPosition() {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
-    scheduleMountFrame(mount, positionMinimapPreview);
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
+    scheduleMountFrame(mount2, positionMinimapPreview);
   }
   function installOutsidePreviewHandler() {
     removeOutsidePreviewHandler();
@@ -2782,53 +3348,79 @@ function activate(ctx) {
     }
   }
   function scheduleMinimapRebuild() {
-    const mount = activeMount;
-    if (!isActiveMount(mount) || mount.minimapRebuildFrame !== null) return;
-    mount.minimapRebuildFrame = scheduleMountFrame(mount, () => {
-      mount.minimapRebuildFrame = null;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2) || mount2.minimapRebuildFrame !== null) return;
+    mount2.minimapRebuildFrame = scheduleMountFrame(mount2, () => {
+      mount2.minimapRebuildFrame = null;
       rebuildMinimapStructure();
     });
   }
   function setTranscriptScrollElement(element) {
-    const mount = activeMount;
+    const mount2 = activeMount;
     const previous = transcriptScrollRef.value;
     if (element === previous) return;
-    if (previous) previous.removeEventListener("scroll", onTranscriptScroll);
-    mount?.transcriptResizeObserver?.disconnect();
+    if (transcriptScrollDisposer) {
+      transcriptScrollDisposer();
+      if (mount2) mount2.disposers.delete(transcriptScrollDisposer);
+      transcriptScrollDisposer = null;
+    }
+    mount2?.transcriptResizeObserver?.disconnect();
     transcriptScrollRef.value = element;
-    if (!element || !isActiveMount(mount)) return;
+    if (!element || !isActiveMount(mount2)) return;
     element.addEventListener("scroll", onTranscriptScroll, { passive: true });
+    element.addEventListener("wheel", cancelTranscriptScrollRestore, { passive: true });
+    element.addEventListener("touchstart", cancelTranscriptScrollRestore, { passive: true });
+    element.addEventListener("keydown", onTranscriptUserKeydown);
+    element.addEventListener("pointerdown", cancelTranscriptScrollRestore, { passive: true });
+    transcriptScrollDisposer = () => {
+      element.removeEventListener("scroll", onTranscriptScroll);
+      element.removeEventListener("wheel", cancelTranscriptScrollRestore);
+      element.removeEventListener("touchstart", cancelTranscriptScrollRestore);
+      element.removeEventListener("keydown", onTranscriptUserKeydown);
+      element.removeEventListener("pointerdown", cancelTranscriptScrollRestore);
+    };
+    addMountDisposer(mount2, transcriptScrollDisposer);
     if (typeof ResizeObserver !== "undefined") {
-      mount.transcriptResizeObserver = new ResizeObserver(() => scheduleMinimapRebuild());
-      mount.transcriptResizeObserver.observe(element);
+      mount2.transcriptResizeObserver = new ResizeObserver(() => scheduleMinimapRebuild());
+      mount2.transcriptResizeObserver.observe(element);
     }
     scheduleMinimapRebuild();
   }
   function jumpToMinimapTick(tick) {
     const body = transcriptScrollRef.value;
-    if (!body) return;
+    const mount2 = activeMount;
+    if (!body || !isActiveMount(mount2)) return;
     const article = body.querySelector(`[data-transcript-index="${tick.messageIndex}"]`);
-    if (article) article.scrollIntoView({ block: "start", behavior: "smooth" });
-    else {
-      const maximum = Math.max(0, body.scrollHeight - body.clientHeight);
-      body.scrollTop = minimapTurns.length > 1 ? maximum * tick.turnIndex / (minimapTurns.length - 1) : 0;
-    }
+    performProgrammaticTranscriptScroll(mount2, body, () => {
+      if (article) article.scrollIntoView({ block: "start", behavior: "smooth" });
+      else {
+        const maximum = Math.max(0, body.scrollHeight - body.clientHeight);
+        body.scrollTop = minimapTurns.length > 1 ? maximum * tick.turnIndex / (minimapTurns.length - 1) : 0;
+      }
+    }, true);
   }
   function activateJumpPill() {
     const body = transcriptScrollRef.value;
-    if (!body) return;
-    if (jumpPillAtBottom.value) body.scrollTo({ top: 0 });
-    else body.scrollTo({ top: Math.max(0, body.scrollHeight - body.clientHeight), behavior: "smooth" });
+    const mount2 = activeMount;
+    if (!body || !isActiveMount(mount2)) return;
+    mount2.stickToBottom = !jumpPillAtBottom.value;
+    mount2.scrollAnchorId = null;
+    mount2.scrollAnchorOffset = 0;
+    performProgrammaticTranscriptScroll(mount2, body, () => {
+      if (jumpPillAtBottom.value) body.scrollTo({ top: 0 });
+      else body.scrollTo({ top: Math.max(0, body.scrollHeight - body.clientHeight), behavior: "smooth" });
+    }, true);
   }
   function resetTranscript() {
-    const mount = activeMount;
-    if (mount) mount.transcriptLoadToken++;
+    const mount2 = activeMount;
+    if (mount2) mount2.transcriptLoadToken++;
+    resetTranscriptScrollState(mount2);
     cancelTranscriptFrame();
-    if (mount?.copiedTimer) clearTimeout(mount.copiedTimer);
-    if (mount) mount.copiedTimer = null;
+    if (mount2?.copiedTimer) clearTimeout(mount2.copiedTimer);
+    if (mount2) mount2.copiedTimer = null;
     selectedSession.value = null;
     transcriptMessages.value = [];
-    if (mount) mount.allTranscriptMessages = [];
+    if (mount2) mount2.allTranscriptMessages = [];
     transcriptLoading.value = false;
     transcriptError.value = null;
     expandedTools.value = /* @__PURE__ */ new Set();
@@ -2838,53 +3430,59 @@ function activate(ctx) {
     setTranscriptScrollElement(null);
     clearMinimapState();
   }
-  function renderNextTranscriptBatch(mount, token) {
-    if (!isActiveMount(mount) || token !== mount.transcriptLoadToken) return;
+  function renderNextTranscriptBatch(mount2, token) {
+    if (!isActiveMount(mount2) || token !== mount2.transcriptLoadToken) return;
     const start = transcriptMessages.value.length;
-    const end = nextTranscriptBatchEnd(mount.allTranscriptMessages.length, start);
+    const end = nextTranscriptBatchEnd(mount2.allTranscriptMessages.length, start);
     if (end <= start) {
-      mount.transcriptFrame = null;
+      mount2.transcriptFrame = null;
       scheduleMinimapRebuild();
       return;
     }
-    transcriptMessages.value = [...transcriptMessages.value, ...mount.allTranscriptMessages.slice(start, end)];
-    if (end < mount.allTranscriptMessages.length) {
-      mount.transcriptFrame = scheduleMountFrame(mount, () => renderNextTranscriptBatch(mount, token));
+    transcriptMessages.value = [...transcriptMessages.value, ...mount2.allTranscriptMessages.slice(start, end)];
+    if (end < mount2.allTranscriptMessages.length) {
+      mount2.transcriptFrame = scheduleMountFrame(mount2, () => renderNextTranscriptBatch(mount2, token));
     } else {
-      mount.transcriptFrame = null;
+      mount2.transcriptFrame = null;
       scheduleMinimapRebuild();
     }
   }
   async function openTranscript(session) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
-    const token = ++mount.transcriptLoadToken;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
+    const token = ++mount2.transcriptLoadToken;
+    resetTranscriptScrollState(mount2);
     cancelTranscriptFrame();
     clearMinimapState();
     jumpPillVisible.value = false;
     jumpPillAtBottom.value = false;
     selectedSession.value = session;
     transcriptMessages.value = [];
-    mount.allTranscriptMessages = [];
+    mount2.allTranscriptMessages = [];
     transcriptLoading.value = true;
     transcriptError.value = null;
     expandedTools.value = /* @__PURE__ */ new Set();
     copiedSessionId.value = false;
     try {
       const result = await runAgent(["read-session", session.attributionKey, session.id], { timeout: 3e4 });
-      if (!isActiveMount(mount) || token !== mount.transcriptLoadToken) return;
+      if (!isActiveMount(mount2) || token !== mount2.transcriptLoadToken) return;
       if (result.code !== 0) throw new Error(result.stderr || "read-session failed");
       const parsed = JSON.parse(result.stdout);
       if (!Array.isArray(parsed)) throw new Error("read-session returned invalid JSON");
-      mount.allTranscriptMessages = parsed;
-      renderNextTranscriptBatch(mount, token);
-      scheduleMountFrame(mount, () => {
-        if (token === mount.transcriptLoadToken && transcriptScrollRef.value) transcriptScrollRef.value.scrollTop = 0;
+      mount2.allTranscriptMessages = parsed;
+      renderNextTranscriptBatch(mount2, token);
+      scheduleMountFrame(mount2, () => {
+        const body = transcriptScrollRef.value;
+        if (token === mount2.transcriptLoadToken && body) {
+          performProgrammaticTranscriptScroll(mount2, body, () => {
+            body.scrollTop = 0;
+          }, true);
+        }
       });
     } catch (caught) {
-      if (isActiveMount(mount) && token === mount.transcriptLoadToken) transcriptError.value = cliError(caught?.message || String(caught));
+      if (isActiveMount(mount2) && token === mount2.transcriptLoadToken) transcriptError.value = cliError(caught?.message || String(caught));
     } finally {
-      if (isActiveMount(mount) && token === mount.transcriptLoadToken) transcriptLoading.value = false;
+      if (isActiveMount(mount2) && token === mount2.transcriptLoadToken) transcriptLoading.value = false;
     }
   }
   function selectSession(session, fromSearch = false) {
@@ -2903,12 +3501,12 @@ function activate(ctx) {
     try {
       await navigator.clipboard.writeText(session.id);
       copiedSessionId.value = true;
-      const mount = activeMount;
-      if (!isActiveMount(mount)) return;
-      if (mount.copiedTimer) clearTimeout(mount.copiedTimer);
-      mount.copiedTimer = scheduleMountTimeout(() => {
+      const mount2 = activeMount;
+      if (!isActiveMount(mount2)) return;
+      if (mount2.copiedTimer) clearTimeout(mount2.copiedTimer);
+      mount2.copiedTimer = scheduleMountTimeout(() => {
         copiedSessionId.value = false;
-        mount.copiedTimer = null;
+        mount2.copiedTimer = null;
       }, 1500);
     } catch {
       transcriptError.value = t("error-copy-session-id");
@@ -2931,18 +3529,9 @@ function activate(ctx) {
     }
   }
   async function coordinateMutation(fallback, operation) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return fallback;
-    if (mutationInFlight) {
-      ctx.ui.notify(t("notify-mutation-in-progress"), "warn");
-      return fallback;
-    }
-    mutationInFlight = true;
-    try {
-      return await operation(() => isActiveMount(mount));
-    } finally {
-      mutationInFlight = false;
-    }
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return fallback;
+    return shared.coordinator.coordinate(fallback, runtimeHandle, () => isActiveMount(mount2), operation);
   }
   async function restoreSessionCore(session, isCurrent) {
     const caps = activeCapabilities.value;
@@ -3162,24 +3751,20 @@ function activate(ctx) {
     expandedTools.value = next;
     scheduleMinimapRebuild();
   }
-  async function loadIndex(preserveState = false, refresh = false) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return false;
-    const requestGeneration = ++mount.indexGeneration;
-    const isCurrent = () => isActiveMount(mount) && requestGeneration === mount.indexGeneration;
-    const treeGeneration = ++mount.treeGeneration;
-    const isCurrentTree = () => isCurrent() && treeGeneration === mount.treeGeneration;
+  async function applyIndex(snapshot, mode, guard) {
+    const mount2 = activeMount;
+    if (shared.retired || !isActiveMount(mount2)) return false;
+    if (snapshot.requestMountGeneration < mount2.generation && snapshot.sequence !== inheritedIndexSequence) return false;
+    const isCurrent = () => !shared.retired && isActiveMount(mount2) && (!guard || guard.indexGeneration === mount2.indexGeneration);
+    const treeGeneration = guard?.treeGeneration ?? mount2.treeGeneration;
+    const isCurrentTree = () => isCurrent() && treeGeneration === mount2.treeGeneration;
     loading.value = true;
-    clearError();
+    if (mode === "reset") clearError();
     try {
-      const caps = activeCapabilities.value;
-      const result = await runAgent(refresh && !caps.nativeIndex ? ["build-index", "--refresh"] : ["build-index"], { timeout: 3e4 });
       if (!isCurrent()) return false;
-      if (result.code !== 0) throw new Error(result.stderr || "build-index failed");
-      const parsed = JSON.parse(result.stdout);
-      if (!Array.isArray(parsed)) throw new Error("build-index returned invalid JSON");
-      sessions.value = parsed;
-      const requestAgent = activeAgent.value;
+      shared.setSessions(snapshot.sessions);
+      const caps = agents.value.find((agent) => agent.id === snapshot.agent)?.capabilities || UNAVAILABLE_CAPABILITIES;
+      const requestAgent = snapshot.agent;
       if (caps.originFilter) {
         try {
           hideScriptedSessions.value = await ctx.storage.get(
@@ -3194,7 +3779,7 @@ function activate(ctx) {
       if (!isCurrent()) return false;
       const presentKeys = sessionsForList(activePartition.value).map(sessionKey);
       selection.value = selectionReducer(selection.value, { type: "intersect", keys: presentKeys });
-      if (preserveState) {
+      if (mode === "preserve") {
         page.value = clampPage(page.value, sessionsForList(activePartition.value).length, pageSize.value);
         if (selectedSession.value) {
           selectedSession.value = sessions.value.find((item) => sessionKey(item) === sessionKey(selectedSession.value)) || selectedSession.value;
@@ -3210,7 +3795,6 @@ function activate(ctx) {
       }
       if (!isCurrentTree()) return false;
       visibleRoot.value = savedRoot || deepestCommonAncestor(originFilteredSessions.value.map((session) => session.rootPath));
-      persist(perAgentStorageKey(STORAGE_KEYS.treeRoot, requestAgent), visibleRoot.value);
       committedSelection.value = { path: visibleRoot.value, mode: "subtree", sessionId: null };
       let savedExpanded = null;
       try {
@@ -3224,10 +3808,8 @@ function activate(ctx) {
         expandedPaths.value = savedExpanded;
       } else {
         expandedPaths.value = collectTreePaths(deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value));
-        persistExpandedPaths();
       }
       expandedPaths.value.add(visibleRoot.value);
-      persistExpandedPaths();
       return true;
     } catch (caught) {
       if (isCurrent()) showError(cliError(caught?.message || String(caught)));
@@ -3236,13 +3818,35 @@ function activate(ctx) {
       if (isCurrent()) loading.value = false;
     }
   }
+  async function loadIndex(preserveState = false, refresh = false) {
+    const mount2 = activeMount;
+    if (shared.retired || !isActiveMount(mount2)) return false;
+    const indexGeneration = ++mount2.indexGeneration;
+    const treeGeneration = ++mount2.treeGeneration;
+    const requestAgent = activeAgent.value;
+    const isCurrent = () => !shared.retired && isActiveMount(mount2) && indexGeneration === mount2.indexGeneration && requestAgent === activeAgent.value;
+    loading.value = true;
+    clearError();
+    try {
+      const snapshot = await shared.fetchIndex(requestAgent, refresh);
+      if (!isCurrent() || !snapshot) return false;
+      return applyIndex(snapshot, preserveState ? "preserve" : "reset", { indexGeneration, treeGeneration });
+    } catch (caught) {
+      if (isCurrent()) {
+        showError(cliError(caught?.message || String(caught)));
+      }
+      return false;
+    } finally {
+      if (isCurrent() && loading.value) loading.value = false;
+    }
+  }
   async function loadPaneWidths() {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
-    const generation = ++mount.paneGeneration;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
+    const generation = ++mount2.paneGeneration;
     try {
       const saved = await ctx.storage.get(STORAGE_KEYS.paneWidths);
-      if (!isActiveMount(mount) || generation !== mount.paneGeneration) return;
+      if (!isActiveMount(mount2) || generation !== mount2.paneGeneration) return;
       if (saved && Number.isFinite(saved.left)) {
         paneWidths.value = {
           left: Math.min(MAX_LEFT_WIDTH, Math.max(MIN_LEFT_WIDTH, Number(saved.left))),
@@ -3253,37 +3857,29 @@ function activate(ctx) {
     }
   }
   async function loadSortSettings() {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
-    const generation = ++mount.sortGeneration;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
+    const generation = ++mount2.sortGeneration;
     try {
       const saved = await ctx.storage.get(STORAGE_KEYS.sessionListSort);
-      if (!isActiveMount(mount) || generation !== mount.sortGeneration) return;
+      if (!isActiveMount(mount2) || generation !== mount2.sortGeneration) return;
       sortSettings.value = normalizePartitionSortSettings(saved);
     } catch {
     }
   }
   async function loadDisplaySettings() {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
-    const generation = ++mount.displayGeneration;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
+    const generation = ++mount2.displayGeneration;
     try {
-      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize, savedExportDestination, savedPinsCollapsed] = await Promise.all([
-        ctx.storage.get(STORAGE_KEYS.locale),
-        ctx.storage.get(STORAGE_KEYS.fontScale),
-        ctx.storage.get(STORAGE_KEYS.themeFollowHost),
+      await shared.initializeDisplaySettings();
+      const [savedPageSize, savedPinsCollapsed] = await Promise.all([
         ctx.storage.get(STORAGE_KEYS.pageSize),
-        ctx.storage.get(STORAGE_KEYS.exportDestination),
         ctx.storage.get(STORAGE_KEYS.pinsCollapsed)
       ]);
-      if (!isActiveMount(mount) || generation !== mount.displayGeneration) return;
-      localeSetting.value = normalizeLocaleSetting(savedLocale);
-      localeRef.value = resolveLocale(localeSetting.value, typeof document === "undefined" ? "" : document.documentElement.lang);
-      fontScale.value = typeof savedFontScale === "number" && Number.isInteger(savedFontScale) && savedFontScale >= 1 && savedFontScale <= 5 ? savedFontScale : 3;
+      if (!isActiveMount(mount2) || generation !== mount2.displayGeneration) return;
       updateCompactMode(rootWidth);
-      themeFollowHost.value = typeof savedThemeFollowHost === "boolean" ? savedThemeFollowHost : true;
       pageSize.value = PAGE_SIZES.includes(savedPageSize) ? savedPageSize : 50;
-      exportDestination.value = typeof savedExportDestination === "string" && savedExportDestination.trim() ? savedExportDestination.trim() : DEFAULT_EXPORT_DESTINATION;
       updatePinsState({ collapsed: savedPinsCollapsed === true });
     } catch {
     }
@@ -3302,15 +3898,15 @@ function activate(ctx) {
     persistExpandedPaths();
   }
   async function loadPickerDirs(dir) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
-    const requestSeq = ++mount.pickerRequestSeq;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
+    const requestSeq = ++mount2.pickerRequestSeq;
     pickerLoading.value = true;
     pickerError.value = null;
     let rawOutput;
     try {
       const result = await runAgent(["list-dirs", dir], { timeout: 1e4 });
-      if (!isActiveMount(mount) || requestSeq !== mount.pickerRequestSeq) return;
+      if (!isActiveMount(mount2) || requestSeq !== mount2.pickerRequestSeq) return;
       rawOutput = result.stdout;
       if (result.code !== 0) {
         console.warn(parseCliFailure(result.stderr, t("picker-list-error")));
@@ -3331,12 +3927,12 @@ function activate(ctx) {
         pickerError.value = t("picker-list-error");
       }
     } catch (caught) {
-      if (!isActiveMount(mount) || requestSeq !== mount.pickerRequestSeq) return;
+      if (!isActiveMount(mount2) || requestSeq !== mount2.pickerRequestSeq) return;
       console.warn(caught, rawOutput);
       pickerEntries.value = [];
       pickerError.value = t("picker-list-error");
     } finally {
-      if (isActiveMount(mount) && requestSeq === mount.pickerRequestSeq) pickerLoading.value = false;
+      if (isActiveMount(mount2) && requestSeq === mount2.pickerRequestSeq) pickerLoading.value = false;
     }
   }
   async function navigatePickerDir(dir) {
@@ -3368,11 +3964,11 @@ function activate(ctx) {
     scheduleMountTimeout(() => pickerInputRef.value?.focus(), 0);
   }
   async function validateAndCommitRoot(candidate) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
     const target = pickerTarget.value;
-    const requestSeq = ++mount.pickerValidationSeq;
-    const isCurrent = () => isActiveMount(mount) && showRootPicker.value && target === pickerTarget.value && requestSeq === mount.pickerValidationSeq;
+    const requestSeq = ++mount2.pickerValidationSeq;
+    const isCurrent = () => isActiveMount(mount2) && showRootPicker.value && target === pickerTarget.value && requestSeq === mount2.pickerValidationSeq;
     const nextRoot = candidate.trim();
     if (!nextRoot.startsWith("/")) {
       if (isCurrent()) pickerError.value = t("tree-root-absolute-error");
@@ -3533,25 +4129,25 @@ function activate(ctx) {
     resetPageAndAnchor();
   }
   function flashTreePath(rootPath) {
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
     transientHighlightPath.value = normalizePath(rootPath);
-    if (mount.highlightTimer) clearTimeout(mount.highlightTimer);
-    mount.highlightTimer = scheduleMountTimeout(() => {
+    if (mount2.highlightTimer) clearTimeout(mount2.highlightTimer);
+    mount2.highlightTimer = scheduleMountTimeout(() => {
       transientHighlightPath.value = null;
-      mount.highlightTimer = null;
+      mount2.highlightTimer = null;
     }, 2e3);
   }
   async function runFullTextSearch() {
     const query = searchQuery.value.trim();
     if (!query || activePartition.value !== "active" || searching.value || bulkRunning.value) return;
-    const mount = activeMount;
-    if (!isActiveMount(mount)) return;
-    const requestGeneration = ++mount.searchGeneration;
+    const mount2 = activeMount;
+    if (!isActiveMount(mount2)) return;
+    const requestGeneration = ++mount2.searchGeneration;
     const global = globalSearch.value;
     const scopePath = committedSelection.value.path;
     const requestPartition = activePartition.value;
-    const isCurrent = () => isActiveMount(mount) && requestGeneration === mount.searchGeneration && activePartition.value === requestPartition && globalSearch.value === global && committedSelection.value.path === scopePath;
+    const isCurrent = () => isActiveMount(mount2) && requestGeneration === mount2.searchGeneration && activePartition.value === requestPartition && globalSearch.value === global && committedSelection.value.path === scopePath;
     searching.value = true;
     clearError();
     try {
@@ -4406,10 +5002,10 @@ function activate(ctx) {
       IconTerminal(13),
       h("select", {
         value: activeAgent.value,
-        disabled: loading.value || bulkRunning.value || mutationInFlight || agents.value.length === 0,
+        disabled: loading.value || bulkRunning.value || shared.coordinator.isSessionMutationBusy() || agents.value.length === 0,
         "aria-label": t("agent-switcher"),
         onChange: (event) => {
-          void switchAgent(event.target.value);
+          void shared.switchAgent(event.target.value);
         }
       }, agents.value.map((agent) => h("option", {
         value: agent.id,
@@ -4519,7 +5115,7 @@ function activate(ctx) {
         h("label", { class: "ccm-browser-search-box", title: partition === "archive" ? archiveSearchTooltip : t("type-filter-search") }, [
           IconSearch(14),
           h("input", {
-            id: "session-browser-search-input",
+            id: `session-browser-search-input-${paneKey}`,
             ref: (element) => {
               searchInputRef.value = element;
             },
@@ -4896,7 +5492,8 @@ function activate(ctx) {
     return h("article", {
       class: ["ccm-browser-message", isUser ? "ccm-browser-message-user" : "ccm-browser-message-assistant"],
       key: messageKey,
-      "data-transcript-index": String(index)
+      "data-transcript-index": String(index),
+      "data-transcript-id": messageKey
     }, [
       h("div", { class: "ccm-browser-message-gutter" }, [
         h("div", { class: ["ccm-browser-avatar", isUser ? "ccm-browser-avatar-user" : "ccm-browser-avatar-assistant"] }, [
@@ -4929,7 +5526,7 @@ function activate(ctx) {
       tabindex: 0,
       inputmode: "none",
       "aria-label": t("minimap-label"),
-      "aria-activedescendant": focused >= 0 ? `ccm-tick-${minimapTicks.value[focused]?.turnIndex}` : void 0,
+      "aria-activedescendant": focused >= 0 ? `ccm-tick-${paneKey}-${minimapTicks.value[focused]?.turnIndex}` : void 0,
       onPointerdown: onMinimapPointerDown,
       onPointermove: onMinimapPointerMove,
       onPointerup: onMinimapPointerUp,
@@ -4940,7 +5537,7 @@ function activate(ctx) {
       onKeydown: onMinimapKeydown,
       onTouchend: (event) => event.stopPropagation()
     }, minimapTicks.value.map((tick2, tickIndex) => h("div", {
-      id: `ccm-tick-${tick2.turnIndex}`,
+      id: `ccm-tick-${paneKey}-${tick2.turnIndex}`,
       class: [
         "ccm-minimap-tick",
         tickIndex === minimapActiveTick.value ? "ccm-minimap-tick-active" : "",
@@ -5212,127 +5809,152 @@ function activate(ctx) {
       renderJumpPill()
     ]);
   }
-  return {
-    component: {
-      setup() {
-        const mount = createMountContext();
-        activeMount = mount;
-        ctx.onMounted(() => {
-          mount.active = true;
-          activeMount = mount;
-          if (typeof MutationObserver !== "undefined" && typeof document !== "undefined") {
-            mount.localeObserver = new MutationObserver(() => {
-              if (isActiveMount(mount) && localeSetting.value === "auto") {
-                localeRef.value = resolveLocale("auto", document.documentElement.lang);
-              }
-              if (!isActiveMount(mount)) return;
-              attachHostMutationObserver(mount);
-              updateKbAvoid();
-            });
-            attachHostMutationObserver(mount);
-          }
-          if (rootRef.value) observeRootElement(mount, rootRef.value);
-          const preserveState = hasMounted;
-          hasMounted = true;
-          void loadPaneWidths();
-          void loadSortSettings();
-          void (async () => {
-            await loadDisplaySettings();
-            if (isActiveMount(mount)) await initializeAgents(preserveState);
-          })();
-        });
-        ctx.onUnmounted(() => {
-          setTranscriptScrollElement(null);
-          detailPaneRef.value = null;
-          bulkCancelRequested.value = true;
-          bulkRunning.value = false;
-          pinsBulkRunning.value = false;
-          loading.value = false;
-          transcriptLoading.value = false;
-          searching.value = false;
-          pickerLoading.value = false;
-          stopResize();
-          mount.active = false;
-          mount.indexGeneration++;
-          mount.searchGeneration++;
-          mount.pinsGeneration++;
-          mount.transcriptLoadToken++;
-          mount.pickerRequestSeq++;
-          mount.pickerValidationSeq++;
-          mount.rootResizeObserver?.disconnect();
-          mount.transcriptResizeObserver?.disconnect();
-          mount.localeObserver?.disconnect();
-          if (mount.pinsNoteTimer) clearTimeout(mount.pinsNoteTimer);
-          for (const dispose of mount.disposers) dispose();
-          mount.disposers.clear();
-          mount.highlightTimer = null;
-          mount.copiedTimer = null;
-          mount.pinsNoteTimer = null;
-          mount.transcriptFrame = null;
-          mount.transcriptScrollFrame = null;
-          mount.minimapRebuildFrame = null;
-          closeMinimapPreview();
-          if (activeMount === mount) activeMount = null;
-        });
-        return {};
-      },
-      render() {
-        return h("div", {
-          class: [
-            "ccm-root ccm-browser-root",
-            themeFollowHost.value ? "ccm-theme-host" : "ccm-theme-builtin",
-            compactMode.value ? "ccm-browser-compact" : "",
-            compactMode.value ? `ccm-browser-view-${compactView.value}` : "",
-            kbAvoid.value ? "ccm-browser-kb-avoid" : ""
-          ],
-          ref: setRootElement,
-          style: {
-            "--ccm-fs": String(FONT_SCALE_MULTIPLIERS[fontScale.value] || 1),
-            ...kbAvoid.value ? { "--ccm-kb-w": `${kbAvoidW.value}px`, "--ccm-kb-h": `${kbAvoidH.value}px` } : {}
-          }
-        }, [
-          settingsOpen.value || filtersOpen.value || branchPickerOpen.value ? h("div", {
-            class: "ccm-browser-settings-scrim",
-            "aria-hidden": "true",
-            onClick: () => {
-              settingsOpen.value = false;
-              filtersOpen.value = false;
-              branchPickerOpen.value = false;
-            }
-          }) : null,
-          error.value ? h("div", { class: "ccm-browser-error", role: "alert" }, [
-            h("span", {}, error.value),
-            errorAction.value ? h("button", {
-              class: "ccm-primary-btn ccm-primary-btn-sm",
-              onClick: () => {
-                const action = errorAction.value;
-                clearError();
-                action?.run();
-              }
-            }, errorAction.value.label) : null,
-            h("button", {
-              class: "ccm-icon-btn",
-              title: t("dismiss-error"),
-              "aria-label": t("dismiss-error"),
-              onClick: clearError
-            }, [IconX(14)])
-          ]) : null,
-          h("div", { class: "ccm-browser-layout" }, [
-            renderTreePane(),
-            compactMode.value ? null : h("div", {
-              class: "ccm-browser-resize-handle",
-              role: "separator",
-              "aria-label": t("resize-workspace-tree"),
-              "aria-orientation": "vertical",
-              onPointerdown: startResize
-            }),
-            renderSessionList(),
-            renderDetailPane()
-          ]),
-          renderRootPicker()
-        ]);
-      }
+  const mount = createMountContext();
+  activeMount = mount;
+  const stopVisibilityWatch = ctx.watch(
+    () => props.isVisible,
+    (visible, previous) => {
+      if (previous === false && visible === true) triggerTranscriptScrollRestore(mount);
     }
+  );
+  if (typeof stopVisibilityWatch === "function") addMountDisposer(mount, stopVisibilityWatch);
+  ctx.onMounted(() => {
+    mount.active = true;
+    activeMount = mount;
+    if (typeof MutationObserver !== "undefined" && typeof document !== "undefined") {
+      mount.localeObserver = new MutationObserver(() => {
+        if (isActiveMount(mount) && localeSetting.value === "auto") {
+          localeRef.value = resolveLocale("auto", document.documentElement.lang);
+        }
+        if (!isActiveMount(mount)) return;
+        attachHostMutationObserver(mount);
+        updateKbAvoid();
+      });
+      attachHostMutationObserver(mount);
+    }
+    if (rootRef.value) observeRootElement(mount, rootRef.value);
+    const preserveState = hasMounted;
+    hasMounted = true;
+    void loadPaneWidths();
+    void loadSortSettings();
+    void (async () => {
+      await loadDisplaySettings();
+      if (isActiveMount(mount)) await initializeAgents(preserveState);
+    })();
+  });
+  ctx.onUnmounted(() => {
+    shared.paneStates.set(paneKey, {
+      committedSelection: { ...committedSelection.value },
+      selectedSession: selectedSession.value,
+      visibleRoot: visibleRoot.value
+    });
+    setTranscriptScrollElement(null);
+    detailPaneRef.value = null;
+    bulkCancelRequested.value = true;
+    bulkRunning.value = false;
+    pinsBulkRunning.value = false;
+    loading.value = false;
+    transcriptLoading.value = false;
+    searching.value = false;
+    pickerLoading.value = false;
+    stopResize();
+    mount.active = false;
+    mount.indexGeneration++;
+    mount.searchGeneration++;
+    mount.pinsGeneration++;
+    mount.transcriptLoadToken++;
+    mount.pickerRequestSeq++;
+    mount.pickerValidationSeq++;
+    mount.rootResizeObserver?.disconnect();
+    mount.transcriptResizeObserver?.disconnect();
+    mount.localeObserver?.disconnect();
+    if (mount.pinsNoteTimer) clearTimeout(mount.pinsNoteTimer);
+    for (const dispose of mount.disposers) dispose();
+    mount.disposers.clear();
+    mount.highlightTimer = null;
+    mount.copiedTimer = null;
+    mount.pinsNoteTimer = null;
+    mount.transcriptFrame = null;
+    mount.transcriptScrollFrame = null;
+    mount.minimapRebuildFrame = null;
+    closeMinimapPreview();
+    if (activeMount === mount) activeMount = null;
+  });
+  function render() {
+    return h("div", {
+      class: [
+        "ccm-root ccm-browser-root",
+        themeFollowHost.value ? "ccm-theme-host" : "ccm-theme-builtin",
+        compactMode.value ? "ccm-browser-compact" : "",
+        compactMode.value ? `ccm-browser-view-${compactView.value}` : "",
+        kbAvoid.value ? "ccm-browser-kb-avoid" : ""
+      ],
+      ref: setRootElement,
+      style: {
+        "--ccm-fs": String(FONT_SCALE_MULTIPLIERS[fontScale.value] || 1),
+        ...kbAvoid.value ? { "--ccm-kb-w": `${kbAvoidW.value}px`, "--ccm-kb-h": `${kbAvoidH.value}px` } : {}
+      }
+    }, [
+      settingsOpen.value || filtersOpen.value || branchPickerOpen.value ? h("div", {
+        class: "ccm-browser-settings-scrim",
+        "aria-hidden": "true",
+        onClick: () => {
+          settingsOpen.value = false;
+          filtersOpen.value = false;
+          branchPickerOpen.value = false;
+        }
+      }) : null,
+      error.value ? h("div", { class: "ccm-browser-error", role: "alert" }, [
+        h("span", {}, error.value),
+        errorAction.value ? h("button", {
+          class: "ccm-primary-btn ccm-primary-btn-sm",
+          onClick: () => {
+            const action = errorAction.value;
+            clearError();
+            action?.run();
+          }
+        }, errorAction.value.label) : null,
+        h("button", {
+          class: "ccm-icon-btn",
+          title: t("dismiss-error"),
+          "aria-label": t("dismiss-error"),
+          onClick: clearError
+        }, [IconX(14)])
+      ]) : null,
+      h("div", { class: "ccm-browser-layout" }, [
+        renderTreePane(),
+        compactMode.value ? null : h("div", {
+          class: "ccm-browser-resize-handle",
+          role: "separator",
+          "aria-label": t("resize-workspace-tree"),
+          "aria-orientation": "vertical",
+          onPointerdown: startResize
+        }),
+        renderSessionList(),
+        renderDetailPane()
+      ]),
+      renderRootPicker()
+    ]);
+  }
+  return {
+    handle: runtimeHandle,
+    render,
+    openSearch,
+    applyIndex,
+    applyFontScale,
+    resetForAgentSwitch,
+    loadPins: () => loadPins(),
+    executePinMutation,
+    isPinMutationCurrent,
+    setPinsBulkRunning: (value) => {
+      pinsBulkRunning.value = value;
+    },
+    setLoading: (value) => {
+      loading.value = value;
+    },
+    clearError,
+    showError,
+    props
   };
 }
 export {

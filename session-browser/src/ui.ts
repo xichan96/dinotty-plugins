@@ -216,7 +216,7 @@ type PinMutationIntent =
   | { type: 'reset-corrupt' }
 
 interface QueuedPinMutation {
-  mount: MountContext
+  owner: PaneRuntimeHandle
   agent: AgentId
   generation: number
   intent: PinMutationIntent
@@ -294,6 +294,12 @@ interface MountContext {
   transcriptResizeObserver: ResizeObserver | null
   transcriptScrollFrame: number | null
   minimapRebuildFrame: number | null
+  stickToBottom: boolean
+  scrollAnchorId: string | null
+  scrollAnchorOffset: number
+  pendingScrollRestore: boolean
+  restoreGeneration: number
+  programmaticScroll: boolean
   localeObserver: MutationObserver | null
   mobileKbObserverTarget: HTMLElement | null | undefined
   pinsNoteTimer: ReturnType<typeof setTimeout> | null
@@ -1229,30 +1235,724 @@ export function isSafeTranscriptHref(href: string): boolean {
   return /^(?:https?:|mailto:)/i.test(href)
 }
 
-export function activate(ctx: PluginContext): PluginExports {
-  const h = ctx.h
-  initIcons(h)
+interface SharedValue<T> {
+  value: T
+}
 
+type IndexApplyMode = 'preserve' | 'reset'
+
+interface IndexSnapshot {
+  agent: AgentId
+  epoch: number
+  sequence: number
+  requestMountGeneration: number
+  sessions: IndexedSession[]
+}
+
+interface PaneStateCarrier {
+  committedSelection: CommittedSelection
+  selectedSession: IndexedSession | null
+  visibleRoot: string
+}
+
+interface SharedInitializationResult {
+  snapshot: IndexSnapshot | null
+  error: string | null
+}
+
+interface PaneRuntime {
+  handle: PaneRuntimeHandle
+  render: () => any
+  openSearch: () => void
+  applyIndex: (snapshot: IndexSnapshot, mode: IndexApplyMode) => Promise<boolean>
+  applyFontScale: () => void
+  resetForAgentSwitch: () => void
+  loadPins: () => Promise<boolean>
+  executePinMutation: (task: QueuedPinMutation) => Promise<void>
+  isPinMutationCurrent: (task: QueuedPinMutation) => boolean
+  setPinsBulkRunning: (value: boolean) => void
+  setLoading: (value: boolean) => void
+  clearError: () => void
+  showError: (message: string) => void
+  props: any
+}
+
+type PaneRuntimeHandle = symbol
+
+interface ReloadHandoff {
+  outstanding: number
+  dirty: boolean
+  onSettled: (() => void) | null
+}
+
+interface MutationCoordinator {
+  coordinate<T>(
+    fallback: T,
+    owner: PaneRuntimeHandle,
+    isCurrent: () => boolean,
+    operation: (isCurrent: () => boolean) => Promise<T>,
+  ): Promise<T>
+  enqueuePin(task: QueuedPinMutation): boolean
+  isBusy(): boolean
+  isSessionMutationBusy(): boolean
+  dispose(): void
+}
+
+interface PaneRegistry {
+  keyFor(props: any): string
+  register(runtime: PaneRuntime): void
+  unregister(runtime: PaneRuntime): void
+  visibleFocused(): PaneRuntime | undefined
+  resolve(handle: PaneRuntimeHandle): PaneRuntime | undefined
+  forEach(callback: (runtime: PaneRuntime) => void): void
+  broadcast(callback: (runtime: PaneRuntime) => unknown | Promise<unknown>): Promise<void>
+  clear(): void
+}
+
+interface SharedServices {
+  localeSetting: SharedValue<LocaleSetting>
+  localeRef: SharedValue<PluginLocale>
+  fontScale: SharedValue<number>
+  activeAgent: SharedValue<AgentId>
+  agents: SharedValue<AgentDescriptor[]>
+  themeFollowHost: SharedValue<boolean>
+  sessions: SharedValue<IndexedSession[]>
+  exportDestination: SharedValue<string>
+  activeDescriptor: SharedValue<AgentDescriptor | null>
+  activeCapabilities: SharedValue<ConnectorCapabilities>
+  activeResumeArgv: SharedValue<string[]>
+  registry: PaneRegistry
+  coordinator: MutationCoordinator
+  paneStates: Map<string, PaneStateCarrier>
+  retired: boolean
+  fetchIndex(agent: AgentId, refresh: boolean): Promise<IndexSnapshot | null>
+  currentIndex(): IndexSnapshot | null
+  setSessions(sessions: IndexedSession[]): void
+  initializeDisplaySettings(): Promise<void>
+  invalidateDisplaySettings(): void
+  initializeAgents(): Promise<SharedInitializationResult>
+  switchAgent(agent: AgentId): Promise<void>
+}
+
+let mountGeneration = 0
+
+function createPaneRegistry(): PaneRegistry {
+  const runtimes = new Map<string, PaneRuntime>()
+  const runtimesByHandle = new Map<PaneRuntimeHandle, PaneRuntime>()
+  const syntheticKeys = new WeakMap<object, string>()
+  let syntheticKey = 0
+  const keyFor = (props: any): string => {
+    if (typeof props?.paneId === 'string' && props.paneId) return props.paneId
+    const existing = syntheticKeys.get(props)
+    if (existing) return existing
+    const key = `runtime-${++syntheticKey}`
+    syntheticKeys.set(props, key)
+    return key
+  }
+  return {
+    keyFor,
+    register(runtime) {
+      const key = keyFor(runtime.props)
+      const replaced = runtimes.get(key)
+      if (replaced) runtimesByHandle.delete(replaced.handle)
+      runtimes.set(key, runtime)
+      runtimesByHandle.set(runtime.handle, runtime)
+    },
+    unregister(runtime) {
+      const key = keyFor(runtime.props)
+      if (runtimes.get(key) === runtime) runtimes.delete(key)
+      if (runtimesByHandle.get(runtime.handle) === runtime) runtimesByHandle.delete(runtime.handle)
+    },
+    visibleFocused() {
+      const registered = [...runtimes.values()]
+      const target = registered.find(runtime => runtime.props?.isVisible && runtime.props?.isFocused)
+      if (target) return target
+      if (registered.some(runtime => typeof runtime.props?.isVisible === 'boolean')) return undefined
+      return registered[registered.length - 1]
+    },
+    resolve(handle) {
+      return runtimesByHandle.get(handle)
+    },
+    forEach(callback) {
+      for (const runtime of [...runtimes.values()]) callback(runtime)
+    },
+    async broadcast(callback) {
+      await Promise.all([...runtimes.values()].map(runtime => callback(runtime)))
+    },
+    clear() {
+      runtimes.clear()
+      runtimesByHandle.clear()
+    },
+  }
+}
+
+export function activate(ctx: PluginContext): PluginExports {
   const documentLanguage = typeof document === 'undefined' ? '' : document.documentElement.lang
   const localeSetting = ctx.ref<LocaleSetting>('auto')
   const localeRef = ctx.ref<PluginLocale>(resolveLocale('auto', documentLanguage))
-  const { t, locale } = initI18n(localeRef)
   const fontScale = ctx.ref(3)
   const activeAgent = ctx.ref<AgentId>(DEFAULT_AGENT)
   const agents = ctx.ref<AgentDescriptor[]>([])
   const themeFollowHost = ctx.ref(true)
-  const settingsOpen = ctx.ref(false)
   const sessions = ctx.ref<IndexedSession[]>([])
+  const exportDestination = ctx.ref(DEFAULT_EXPORT_DESTINATION)
+  const activeDescriptor = ctx.computed(() => agents.value.find(agent => agent.id === activeAgent.value) || null)
+  const activeCapabilities = ctx.computed(() => activeDescriptor.value?.capabilities || UNAVAILABLE_CAPABILITIES)
+  const activeResumeArgv = ctx.computed(() => activeDescriptor.value?.resume.argv
+    || DEFAULT_RESUME_ARGV_BY_AGENT.get(activeAgent.value)!)
+  const registry = createPaneRegistry()
+  const paneStates = new Map<string, PaneStateCarrier>()
+  const handoff: ReloadHandoff = typeof window === 'undefined'
+    ? { outstanding: 0, dirty: false, onSettled: null }
+    : ((window as any).__sessionBrowserHandoff ||= { outstanding: 0, dirty: false, onSettled: null })
+  const { t } = initI18n(localeRef)
+  const indexFetches = new Map<string, Promise<IndexSnapshot | null>>()
+  let agentEpoch = 0
+  let publicationSequence = 0
+  let publishedSequence = 0
+  let publishedIndex: IndexSnapshot | null = null
+  let displaySettingsPromise: Promise<void> | null = null
+  let displaySettingsGeneration = 0
+  let initializationPromise: Promise<SharedInitializationResult> | null = null
+  let forceFirstIndexRefresh = false
+  let firstIndexFetch = true
+  let resolveInitialFetch: (() => void) | null = null
+  let installedOnSettled: (() => void) | null = null
+  let localOutstanding = 0
+  let initialFetchGate: Promise<void> | null = null
+
+  if (handoff.outstanding > 0) {
+    initialFetchGate = new Promise(resolve => { resolveInitialFetch = resolve })
+    installedOnSettled = () => {
+      if (handoff.onSettled === installedOnSettled) handoff.onSettled = null
+      forceFirstIndexRefresh = handoff.dirty
+      handoff.dirty = false
+      resolveInitialFetch?.()
+      resolveInitialFetch = null
+      installedOnSettled = null
+    }
+    handoff.onSettled = installedOnSettled
+  } else if (handoff.dirty) {
+    handoff.dirty = false
+    forceFirstIndexRefresh = true
+  }
+
+  async function prepareIndexFetch(refresh: boolean): Promise<boolean> {
+    if (initialFetchGate) await initialFetchGate
+    if (!firstIndexFetch) return refresh
+    firstIndexFetch = false
+    if (!forceFirstIndexRefresh) return refresh
+    forceFirstIndexRefresh = false
+    return true
+  }
+
+  function persistShared(key: string, value: unknown) {
+    ctx.storage.set(key, value).catch((caught: any) => {
+      console.warn('[session-browser] could not persist plugin setting', caught)
+    })
+  }
+
+  function agentLabel(agent: Pick<AgentDescriptor, 'id'>): string {
+    return t(`agent-${agent.id}`)
+  }
+
+  function parseAgentDescriptors(stdout: string): AgentDescriptor[] {
+    const parsed = JSON.parse(stdout) as unknown
+    if (!Array.isArray(parsed)) throw new Error(t('agent-discovery-invalid'))
+    return parsed.map((value: any) => {
+      const caps = value?.capabilities
+      const resumeArgv = value?.resume?.argv
+      const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id)
+      const validCapabilities = caps
+        && ['archive', 'rename', 'delete', 'deleteRequiresArchived', 'nativeIndex', 'tokenStats', 'originFilter']
+          .every(key => typeof caps[key] === 'boolean')
+      if (!value || typeof value.id !== 'string' || typeof value.available !== 'boolean' || !validCapabilities) {
+        throw new Error(t('agent-discovery-invalid'))
+      }
+      const validResumeArgv = Array.isArray(resumeArgv)
+        && resumeArgv.length > 0
+        && resumeArgv.every(arg => typeof arg === 'string' && RESUME_ARG_TOKEN_RE.test(arg))
+      if (!validResumeArgv && !defaultResumeArgv) throw new Error(t('agent-discovery-invalid'))
+      return {
+        id: value.id as AgentId,
+        available: value.available,
+        degraded: value.degraded === true,
+        unavailableReason: typeof value.unavailableReason === 'string' ? value.unavailableReason : undefined,
+        degradedReason: typeof value.degradedReason === 'string' ? value.degradedReason : undefined,
+        capabilities: caps as ConnectorCapabilities,
+        resume: { argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv!] },
+      }
+    })
+  }
+
+  function legacyAgentDescriptor(): AgentDescriptor {
+    return {
+      id: DEFAULT_AGENT,
+      available: true,
+      degraded: false,
+      capabilities: LEGACY_CAPABILITIES,
+      resume: { argv: [...LEGACY_RESUME.argv] },
+    }
+  }
+
+  function notifyDegradedAgent(agent: AgentDescriptor) {
+    if (shared.retired || !agent.degraded) return
+    ctx.ui.notify(
+      t('agent-degraded-notice', { agent: agentLabel(agent), reason: agent.degradedReason || t('agent-degraded-tooltip') }),
+      'warn',
+      t('agent-degraded-title'),
+    )
+  }
+
+  function resetSharedForAgent(nextAgent: AgentId, persistAgent = false) {
+    if (shared.retired) return
+    agentEpoch++
+    activeAgent.value = nextAgent
+    if (persistAgent) persistShared(STORAGE_KEYS.activeAgent, nextAgent)
+    registry.forEach(runtime => runtime.resetForAgentSwitch())
+    sessions.value = []
+    publishedIndex = null
+  }
+
+  function setSessions(nextSessions: IndexedSession[]) {
+    sessions.value = nextSessions
+    if (publishedIndex && publishedIndex.agent === activeAgent.value && publishedIndex.epoch === agentEpoch) {
+      publishedIndex.sessions = nextSessions
+    }
+  }
+
+  async function fetchIndex(agent: AgentId, refresh: boolean): Promise<IndexSnapshot | null> {
+    refresh = await prepareIndexFetch(refresh)
+    if (shared.retired) return null
+    const epoch = agentEpoch
+    const refreshStrength = refresh ? 1 : 0
+    const key = `${epoch}:${agent}:${refreshStrength}`
+    const exact = indexFetches.get(key)
+    if (exact) return exact
+    if (!refresh) {
+      const stronger = indexFetches.get(`${epoch}:${agent}:1`)
+      if (stronger) return stronger
+    }
+
+    const sequence = ++publicationSequence
+    const requestMountGeneration = mountGeneration
+    const request = (async (): Promise<IndexSnapshot | null> => {
+      const descriptor = agents.value.find(candidate => candidate.id === agent)
+      const caps = descriptor?.capabilities || UNAVAILABLE_CAPABILITIES
+      const args = refresh && !caps.nativeIndex ? ['build-index', '--refresh'] : ['build-index']
+      const result = await ctx.exec.run([...args, '--agent', agent], { timeout: 30_000 })
+      if (result.code !== 0) throw new Error(result.stderr || 'build-index failed')
+      const parsed = JSON.parse(result.stdout)
+      if (!Array.isArray(parsed)) throw new Error('build-index returned invalid JSON')
+      if (shared.retired) return null
+      if (epoch !== agentEpoch || agent !== activeAgent.value) return null
+      if (sequence < publishedSequence) {
+        return publishedIndex?.epoch === epoch && publishedIndex.agent === agent ? publishedIndex : null
+      }
+      const snapshot: IndexSnapshot = {
+        agent,
+        epoch,
+        sequence,
+        requestMountGeneration,
+        sessions: parsed as IndexedSession[],
+      }
+      publishedSequence = sequence
+      publishedIndex = snapshot
+      if (!shared.retired) await registry.broadcast(runtime => runtime.applyIndex(snapshot, 'preserve'))
+      return snapshot
+    })()
+    indexFetches.set(key, request)
+    const cleanup = () => {
+      if (!shared.retired && indexFetches.get(key) === request) indexFetches.delete(key)
+    }
+    request.then(cleanup, cleanup)
+    return request
+  }
+
+  function broadcastError(message: string) {
+    if (shared.retired) return
+    registry.forEach(runtime => {
+      runtime.setLoading(false)
+      runtime.showError(message)
+    })
+  }
+
+  async function discoverAgents(): Promise<SharedInitializationResult> {
+    try {
+      const [result, storedAgent] = await Promise.all([
+        ctx.exec.run(['agents'], { timeout: 10_000 }),
+        ctx.storage.get(STORAGE_KEYS.activeAgent).catch(() => null),
+      ])
+      if (shared.retired) return { snapshot: null, error: null }
+      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t('agent-discovery-failed')).message)
+      let discovered: AgentDescriptor[]
+      try {
+        discovered = parseAgentDescriptors(result.stdout)
+      } catch (caught) {
+        let legacyResponse = false
+        try {
+          const parsed = JSON.parse(result.stdout)
+          legacyResponse = Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'outcome' in parsed)
+        } catch { /* handled by the original discovery error */ }
+        if (!legacyResponse) throw caught
+        discovered = []
+      }
+      if (discovered.length === 0) discovered = [legacyAgentDescriptor()]
+      if (shared.retired) return { snapshot: null, error: null }
+      agents.value = discovered
+
+      const requestedId = (typeof storedAgent === 'string' ? storedAgent : DEFAULT_AGENT) as AgentId
+      const requested = discovered.find(agent => agent.id === requestedId)
+      const available = discovered.filter(agent => agent.available)
+      if (available.length === 0) {
+        const unavailableAgent = requested?.id || discovered[0].id
+        if (unavailableAgent !== activeAgent.value) resetSharedForAgent(unavailableAgent)
+        const message = t('agent-none-available')
+        broadcastError(message)
+        return { snapshot: null, error: message }
+      }
+
+      const candidates = requested?.available
+        ? [requested, ...available.filter(agent => agent.id !== requested.id)]
+        : available
+      let chosen: AgentDescriptor | null = null
+      let requestedLoaded = false
+      let lastError: string | null = null
+      for (const candidate of candidates) {
+        if (candidate.id !== activeAgent.value) resetSharedForAgent(candidate.id)
+        let snapshot: IndexSnapshot | null = null
+        try {
+          snapshot = await fetchIndex(candidate.id, false)
+          lastError = null
+        } catch (caught: any) {
+          lastError = t('cli-error', { msg: caught?.message || String(caught) })
+          broadcastError(lastError)
+        }
+        if (shared.retired) return { snapshot: null, error: null }
+        const loaded = snapshot !== null
+        if (candidate.id === requestedId) requestedLoaded = loaded
+        if (loaded && snapshot.sessions.length > 0) {
+          chosen = candidate
+          break
+        }
+      }
+
+      if (!chosen) {
+        const emptyAgent = candidates[0]
+        if (activeAgent.value !== emptyAgent.id) {
+          resetSharedForAgent(emptyAgent.id)
+          try {
+            await fetchIndex(emptyAgent.id, false)
+            lastError = null
+          } catch (caught: any) {
+            lastError = t('cli-error', { msg: caught?.message || String(caught) })
+            broadcastError(lastError)
+          }
+        }
+        if (shared.retired) return { snapshot: null, error: null }
+        if (emptyAgent.id !== requestedId) persistShared(STORAGE_KEYS.activeAgent, emptyAgent.id)
+        ctx.ui.notify(t('agent-no-sessions'), 'warn', t('agent-empty-title'))
+        notifyDegradedAgent(emptyAgent)
+        return { snapshot: publishedIndex, error: lastError }
+      }
+
+      if (chosen.id !== requestedId) {
+        persistShared(STORAGE_KEYS.activeAgent, chosen.id)
+        const requestedName = requested ? agentLabel(requested) : String(requestedId)
+        const reason = !requested
+          ? t('agent-not-registered')
+          : !requested.available
+            ? requested.unavailableReason || t('agent-unavailable-tooltip')
+            : requestedLoaded
+              ? t('agent-no-sessions-short')
+              : t('agent-load-failed-short')
+        ctx.ui.notify(
+          t('agent-fallback-notice', { agent: requestedName, fallback: agentLabel(chosen), reason }),
+          'warn',
+          t('agent-fallback-title'),
+        )
+      }
+      notifyDegradedAgent(chosen)
+      return { snapshot: publishedIndex, error: null }
+    } catch (caught: any) {
+      if (shared.retired) return { snapshot: null, error: null }
+      const message = t('cli-error', { msg: caught?.message || t('agent-discovery-failed') })
+      broadcastError(message)
+      return { snapshot: null, error: message }
+    }
+  }
+
+  function initializeAgents(): Promise<SharedInitializationResult> {
+    if (shared.retired) return Promise.resolve({ snapshot: null, error: null })
+    if (!initializationPromise) {
+      // A failed discovery must not be cached for the lifetime of activate(): before the
+      // per-pane split every mount retried it, so a pane reopened after the CLI recovers has
+      // to get a live attempt.
+      const attempt: Promise<SharedInitializationResult> = discoverAgents().then(
+        (result) => {
+          if (result.error && initializationPromise === attempt) initializationPromise = null
+          return result
+        },
+        (caught) => {
+          if (initializationPromise === attempt) initializationPromise = null
+          throw caught
+        },
+      )
+      initializationPromise = attempt
+    }
+    return initializationPromise
+  }
+
+  function initializeDisplaySettings(): Promise<void> {
+    if (shared.retired) return Promise.resolve()
+    if (!displaySettingsPromise) {
+      const generation = displaySettingsGeneration
+      displaySettingsPromise = (async () => {
+        try {
+          const [savedLocale, savedFontScale, savedThemeFollowHost, savedExportDestination] = await Promise.all([
+            ctx.storage.get(STORAGE_KEYS.locale),
+            ctx.storage.get(STORAGE_KEYS.fontScale),
+            ctx.storage.get(STORAGE_KEYS.themeFollowHost),
+            ctx.storage.get(STORAGE_KEYS.exportDestination),
+          ])
+          if (shared.retired || generation !== displaySettingsGeneration) return
+          localeSetting.value = normalizeLocaleSetting(savedLocale)
+          localeRef.value = resolveLocale(localeSetting.value, documentLanguage)
+          fontScale.value = typeof savedFontScale === 'number' && Number.isInteger(savedFontScale) && savedFontScale >= 1 && savedFontScale <= 5
+            ? savedFontScale
+            : 3
+          themeFollowHost.value = typeof savedThemeFollowHost === 'boolean' ? savedThemeFollowHost : true
+          exportDestination.value = typeof savedExportDestination === 'string' && savedExportDestination.trim()
+            ? savedExportDestination.trim()
+            : DEFAULT_EXPORT_DESTINATION
+        } catch { /* use defaults */ }
+      })()
+    }
+    return displaySettingsPromise
+  }
+
+  function invalidateDisplaySettings() {
+    displaySettingsGeneration++
+  }
+
+  let laneInFlight = false
+  let sessionMutationInFlight = false
+  const pinMutationQueue: QueuedPinMutation[] = []
+
+  function startCoordinatorTask() {
+    localOutstanding++
+    handoff.outstanding++
+  }
+
+  function notifyHandoffSettled() {
+    if (handoff.outstanding !== 0 || !handoff.onSettled) return
+    const onSettled = handoff.onSettled
+    handoff.onSettled = null
+    onSettled()
+  }
+
+  function settleCoordinatorTask() {
+    // dispose() may already have released this instance's whole count; a late settle must not
+    // decrement a successor's tasks. It still carries information: the operation landed after
+    // the handoff, so whatever the successor indexed may already be stale.
+    if (localOutstanding === 0) {
+      if (shared.retired) handoff.dirty = true
+      return
+    }
+    localOutstanding--
+    handoff.outstanding = Math.max(0, handoff.outstanding - 1)
+    if (shared.retired) handoff.dirty = true
+    notifyHandoffSettled()
+  }
+
+  async function drainPinMutationQueue(): Promise<void> {
+    if (laneInFlight || shared.retired) return
+    laneInFlight = true
+    try {
+      while (pinMutationQueue.length > 0 && !shared.retired) {
+        const task = pinMutationQueue.shift()!
+        startCoordinatorTask()
+        let owner: PaneRuntime | undefined
+        let executed = false
+        try {
+          if (shared.retired) continue
+          owner = registry.resolve(task.owner)
+          if (!owner) continue
+          if (!owner.isPinMutationCurrent(task)) {
+            owner.setPinsBulkRunning(false)
+            continue
+          }
+          owner.setPinsBulkRunning(true)
+          executed = true
+          await owner.executePinMutation(task)
+          if (shared.retired) continue
+          if (registry.resolve(task.owner) === owner) owner.setPinsBulkRunning(false)
+          if (!shared.retired) {
+            await registry.broadcast(runtime => runtime.handle === task.owner ? undefined : runtime.loadPins())
+          }
+        } finally {
+          if (!shared.retired && executed && owner && registry.resolve(task.owner) === owner) {
+            owner.setPinsBulkRunning(false)
+          }
+          settleCoordinatorTask()
+        }
+      }
+    } finally {
+      laneInFlight = false
+      if (!shared.retired && pinMutationQueue.length > 0) void drainPinMutationQueue()
+    }
+  }
+
+  const coordinator: MutationCoordinator = {
+    async coordinate<T>(fallback, owner, isCurrent, operation) {
+      if (shared.retired || !registry.resolve(owner) || laneInFlight || pinMutationQueue.length > 0) {
+        ctx.ui.notify(t('notify-mutation-in-progress'), 'warn')
+        return fallback
+      }
+      laneInFlight = true
+      sessionMutationInFlight = true
+      startCoordinatorTask()
+      const coordinatorIsCurrent = () => !shared.retired && isCurrent()
+      try {
+        return await operation(coordinatorIsCurrent)
+      } finally {
+        try {
+          const snapshot = publishedIndex
+          if (!shared.retired && snapshot) {
+            await registry.broadcast(runtime => runtime.applyIndex(snapshot, 'preserve'))
+          }
+        } catch (caught: any) {
+          if (!shared.retired) broadcastError(t('cli-error', { msg: caught?.message || String(caught) }))
+        } finally {
+          sessionMutationInFlight = false
+          laneInFlight = false
+          settleCoordinatorTask()
+          if (!shared.retired && pinMutationQueue.length > 0) void drainPinMutationQueue()
+        }
+      }
+    },
+    enqueuePin(task) {
+      if (shared.retired) return false
+      pinMutationQueue.push(task)
+      void drainPinMutationQueue()
+      return true
+    },
+    isBusy() {
+      return laneInFlight || pinMutationQueue.length > 0
+    },
+    isSessionMutationBusy() {
+      return sessionMutationInFlight
+    },
+    dispose() {
+      pinMutationQueue.length = 0
+    },
+  }
+
+  async function switchAgent(nextAgent: AgentId): Promise<void> {
+    if (shared.retired) return
+    const descriptor = agents.value.find(agent => agent.id === nextAgent)
+    if (!descriptor?.available || nextAgent === activeAgent.value) return
+    if (indexFetches.size > 0 || coordinator.isSessionMutationBusy()) {
+      ctx.ui.notify(t('notify-mutation-in-progress'), 'warn')
+      return
+    }
+    resetSharedForAgent(nextAgent, true)
+    registry.forEach(runtime => {
+      runtime.setLoading(true)
+      runtime.clearError()
+    })
+    let snapshot: IndexSnapshot | null = null
+    try {
+      const [loadedSnapshot] = await Promise.all([
+        fetchIndex(nextAgent, false),
+        registry.broadcast(runtime => runtime.loadPins()),
+      ])
+      snapshot = loadedSnapshot
+    } catch (caught: any) {
+      broadcastError(t('cli-error', { msg: caught?.message || String(caught) }))
+      return
+    }
+    if (shared.retired) return
+    if (!snapshot) return
+    await registry.broadcast(runtime => runtime.applyIndex(snapshot, 'reset'))
+    if (snapshot.sessions.length === 0) {
+      ctx.ui.notify(t('agent-empty-notice', { agent: agentLabel(descriptor) }), 'warn', t('agent-empty-title'))
+    }
+    notifyDegradedAgent(descriptor)
+  }
+
+  const shared: SharedServices = {
+    localeSetting, localeRef, fontScale, activeAgent, agents, themeFollowHost, sessions,
+    exportDestination, activeDescriptor, activeCapabilities, activeResumeArgv, registry, coordinator, paneStates,
+    retired: false,
+    fetchIndex, currentIndex: () => publishedIndex, setSessions, initializeDisplaySettings, invalidateDisplaySettings,
+    initializeAgents, switchAgent,
+  }
+  ctx.commands.register('session-browser.open', () => { ctx.open() })
+  ctx.commands.register('session-browser.search', () => {
+    ctx.open()
+    shared.registry.visibleFocused()?.openSearch()
+  })
+  return {
+    component: {
+      props: ['paneId', 'workspaceId', 'isVisible', 'isFocused'],
+      setup(props: any) {
+        const runtime = createPaneRuntime(ctx, props || {}, shared)
+        shared.registry.register(runtime)
+        ctx.onUnmounted(() => { shared.registry.unregister(runtime) })
+        return runtime.render
+      },
+    },
+    dispose() {
+      if (shared.retired) return
+      shared.retired = true
+      // Release every task this instance still owns. An operation retired by a hot reload may
+      // never reach its `finally` (a confirm dialog torn down mid-await), and a stuck count
+      // would gate every future pane's first index fetch forever. `dirty` records that the
+      // outcome is unknown, so the successor refreshes.
+      if (localOutstanding > 0) {
+        handoff.dirty = true
+        handoff.outstanding = Math.max(0, handoff.outstanding - localOutstanding)
+        localOutstanding = 0
+      }
+      if (handoff.onSettled === installedOnSettled) handoff.onSettled = null
+      installedOnSettled = null
+      resolveInitialFetch?.()
+      resolveInitialFetch = null
+      notifyHandoffSettled()
+      coordinator.dispose()
+      indexFetches.clear()
+      registry.clear()
+      paneStates.clear()
+    },
+  }
+}
+
+function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedServices) {
+  const {
+    localeSetting, localeRef, fontScale, activeAgent, agents, themeFollowHost, sessions,
+    exportDestination, activeDescriptor, activeCapabilities, activeResumeArgv,
+  } = shared
+  const runtimeHandle: PaneRuntimeHandle = Symbol('session-browser-runtime')
+  const paneKey = shared.registry.keyFor(props).replace(/[^A-Za-z0-9_-]/g, '_')
+  const carriedState = shared.paneStates.get(paneKey)
+  const inheritedIndexSequence = shared.currentIndex()?.sequence ?? null
+  const h = ctx.h
+  initIcons(h)
+
+  const { t, locale } = initI18n(localeRef)
+  const settingsOpen = ctx.ref(false)
   const loading = ctx.ref(true)
   const error = ctx.ref<string | null>(null)
   const errorAction = ctx.ref<{ label: string; run: () => void } | null>(null)
-  const visibleRoot = ctx.ref('/')
-  const committedSelection = ctx.ref<CommittedSelection>({ path: '/', mode: 'subtree', sessionId: null })
+  const visibleRoot = ctx.ref(carriedState?.visibleRoot || '/')
+  const committedSelection = ctx.ref<CommittedSelection>(
+    carriedState ? { ...carriedState.committedSelection } : { path: '/', mode: 'subtree', sessionId: null },
+  )
   const searchOverlay = ctx.ref<SearchOverlay | null>(null)
   const transientHighlightPath = ctx.ref<string | null>(null)
   const expandedPaths = ctx.ref<Set<string>>(new Set())
   const hideScriptedSessions = ctx.ref(false)
-  const exportDestination = ctx.ref(DEFAULT_EXPORT_DESTINATION)
   const showRootPicker = ctx.ref(false)
   const pickerCurrentDir = ctx.ref('/')
   const pickerEntries = ctx.ref<DirectoryEntry[]>([])
@@ -1276,7 +1976,7 @@ export function activate(ctx: PluginContext): PluginExports {
   const searchQuery = ctx.ref('')
   const globalSearch = ctx.ref(false)
   const searching = ctx.ref(false)
-  const selectedSession = ctx.ref<IndexedSession | null>(null)
+  const selectedSession = ctx.ref<IndexedSession | null>(carriedState?.selectedSession || null)
   const compactMode = ctx.ref(false)
   const compactView = ctx.ref<CompactView>('list')
   const kbAvoid = ctx.ref(false)
@@ -1290,6 +1990,8 @@ export function activate(ctx: PluginContext): PluginExports {
   const expandedTools = ctx.ref<Set<string>>(new Set())
   const copiedSessionId = ctx.ref(false)
   const transcriptScrollRef = ctx.ref<HTMLElement | null>(null)
+  let transcriptScrollDisposer: (() => void) | null = null
+  let programmaticScrollSequence = 0
   const detailPaneRef = ctx.ref<HTMLElement | null>(null)
   const minimapVisible = ctx.ref(false)
   const minimapTicks = ctx.ref<MinimapTick[]>([])
@@ -1340,32 +2042,23 @@ export function activate(ctx: PluginContext): PluginExports {
   let resizeActive = false
   const COMPACT_BASE_WIDTH = 900
   let rootWidth = 0
-  let mountGeneration = 0
+  let rootWidthMeasured = false
   let activeMount: MountContext | null = null
-  let mutationInFlight = false
-  let hasMounted = false
+  let hasMounted = Boolean(carriedState)
   let warnedPersistFailure = false
-  const pinMutationQueue: QueuedPinMutation[] = []
-  let pinMutationInFlight = false
 
   function runAgent(args: string[], opts: Parameters<typeof ctx.exec.run>[1]) {
     if (AGENT_AGNOSTIC.has(args[0])) return ctx.exec.run(args, opts)
     return ctx.exec.run([...args, '--agent', activeAgent.value], opts)
   }
 
-  ctx.commands.register('session-browser.open', () => { ctx.open() })
-  ctx.commands.register('session-browser.search', () => {
-    ctx.open()
+  function openSearch() {
     if (compactMode.value) compactView.value = 'list'
     settingsOpen.value = false
     filtersOpen.value = false
     scheduleMountTimeout(() => searchInputRef.value?.focus(), 0)
-  })
+  }
 
-  const activeDescriptor = ctx.computed(() => agents.value.find(agent => agent.id === activeAgent.value) || null)
-  const activeCapabilities = ctx.computed(() => activeDescriptor.value?.capabilities || UNAVAILABLE_CAPABILITIES)
-  const activeResumeArgv = ctx.computed(() => activeDescriptor.value?.resume.argv
-    || DEFAULT_RESUME_ARGV_BY_AGENT.get(activeAgent.value)!)
   const originFilteredSessions = ctx.computed(() => sessions.value.filter(session => isSessionVisibleByOrigin(session)))
   const tree = ctx.computed(() => deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value))
 
@@ -1455,17 +2148,17 @@ export function activate(ctx: PluginContext): PluginExports {
     updatePinsState({ conflictNote: true })
     if (mount.pinsNoteTimer) clearTimeout(mount.pinsNoteTimer)
     mount.pinsNoteTimer = scheduleMountTimeout(() => {
-      if (isActiveMount(mount)) updatePinsState({ conflictNote: false })
+      if (!shared.retired && isActiveMount(mount)) updatePinsState({ conflictNote: false })
       mount.pinsNoteTimer = null
     }, 4_000)
   }
 
   async function loadPins(requestGeneration?: number, expectedPaths?: string[]): Promise<boolean> {
     const mount = activeMount
-    if (!isActiveMount(mount)) return false
+    if (shared.retired || !isActiveMount(mount)) return false
     const generation = requestGeneration ?? ++mount.pinsGeneration
     const requestAgent = activeAgent.value
-    const isCurrent = () => isActiveMount(mount)
+    const isCurrent = () => !shared.retired && isActiveMount(mount)
       && generation === mount.pinsGeneration
       && requestAgent === activeAgent.value
     if (isCurrent()) updatePinsState({ loading: true, error: null })
@@ -1523,13 +2216,21 @@ export function activate(ctx: PluginContext): PluginExports {
 
   async function reconcilePinsAfterStaleMutation() {
     const mount = activeMount
-    if (!isActiveMount(mount)) return
+    if (shared.retired || !isActiveMount(mount)) return
     await loadPins(mount.pinsGeneration)
   }
 
+  function isPinMutationCurrent(task: QueuedPinMutation): boolean {
+    const mount = activeMount
+    return Boolean(!shared.retired && isActiveMount(mount)
+      && task.generation === mount.pinsGeneration
+      && task.agent === activeAgent.value)
+  }
+
   async function executePinMutation(task: QueuedPinMutation) {
-    const { mount, agent, generation, intent } = task
-    const isCurrent = () => isActiveMount(mount)
+    const { agent, generation, intent } = task
+    const mount = activeMount
+    const isCurrent = () => !shared.retired && isActiveMount(mount)
       && generation === mount.pinsGeneration
       && agent === activeAgent.value
     if (!isCurrent()) return
@@ -1588,35 +2289,16 @@ export function activate(ctx: PluginContext): PluginExports {
     }
   }
 
-  async function drainPinMutationQueue() {
-    if (pinMutationInFlight) return
-    pinMutationInFlight = true
-    try {
-      while (pinMutationQueue.length > 0) {
-        const task = pinMutationQueue.shift()!
-        const current = isActiveMount(task.mount)
-          && task.generation === task.mount.pinsGeneration
-          && task.agent === activeAgent.value
-        if (!current) continue
-        pinsBulkRunning.value = true
-        await executePinMutation(task)
-        if (current && task.generation === task.mount.pinsGeneration && task.agent === activeAgent.value) {
-          pinsBulkRunning.value = false
-        }
-      }
-    } finally {
-      pinMutationInFlight = false
-      const mount = activeMount
-      if (isActiveMount(mount) && pinMutationQueue.length === 0) pinsBulkRunning.value = false
-    }
-  }
-
   function enqueuePinMutation(intent: PinMutationIntent) {
     const mount = activeMount
     if (!isActiveMount(mount)) return
-    pinMutationQueue.push({ mount, agent: activeAgent.value, generation: mount.pinsGeneration, intent })
-    pinsBulkRunning.value = true
-    void drainPinMutationQueue()
+    const queued = shared.coordinator.enqueuePin({
+      owner: runtimeHandle,
+      agent: activeAgent.value,
+      generation: mount.pinsGeneration,
+      intent,
+    })
+    if (queued) pinsBulkRunning.value = true
   }
 
   async function persistPinsCollapsed(collapsed: boolean) {
@@ -1652,6 +2334,12 @@ export function activate(ctx: PluginContext): PluginExports {
       transcriptResizeObserver: null,
       transcriptScrollFrame: null,
       minimapRebuildFrame: null,
+      stickToBottom: false,
+      scrollAnchorId: null,
+      scrollAnchorOffset: 0,
+      pendingScrollRestore: false,
+      restoreGeneration: 0,
+      programmaticScroll: false,
       localeObserver: null,
       mobileKbObserverTarget: undefined,
       pinsNoteTimer: null,
@@ -1708,12 +2396,14 @@ export function activate(ctx: PluginContext): PluginExports {
 
   function setExportDestination(value: string) {
     if (activeMount) activeMount.displayGeneration++
+    shared.invalidateDisplaySettings()
     exportDestination.value = value.trim() || DEFAULT_EXPORT_DESTINATION
     persist(STORAGE_KEYS.exportDestination, exportDestination.value)
   }
 
   function setLocaleSetting(value: unknown) {
     if (activeMount) activeMount.displayGeneration++
+    shared.invalidateDisplaySettings()
     localeSetting.value = normalizeLocaleSetting(value)
     localeRef.value = resolveLocale(localeSetting.value, typeof document === 'undefined' ? '' : document.documentElement.lang)
     persist(STORAGE_KEYS.locale, localeSetting.value)
@@ -1721,10 +2411,15 @@ export function activate(ctx: PluginContext): PluginExports {
 
   function setFontScale(value: number) {
     if (activeMount) activeMount.displayGeneration++
+    shared.invalidateDisplaySettings()
     fontScale.value = Math.min(5, Math.max(1, Math.round(value)))
+    shared.registry.forEach(runtime => runtime.applyFontScale())
+    persist(STORAGE_KEYS.fontScale, fontScale.value)
+  }
+
+  function applyFontScale() {
     updateCompactMode(rootWidth)
     scheduleMinimapRebuild()
-    persist(STORAGE_KEYS.fontScale, fontScale.value)
   }
 
   function updateKbAvoid() {
@@ -1771,6 +2466,7 @@ export function activate(ctx: PluginContext): PluginExports {
   }
 
   function updateCompactMode(width: number) {
+    if (width === 0 && props.isVisible === false) return
     rootWidth = width
     const multiplier = FONT_SCALE_MULTIPLIERS[fontScale.value] || 1
     const nextCompact = width < COMPACT_BASE_WIDTH * multiplier
@@ -1786,9 +2482,18 @@ export function activate(ctx: PluginContext): PluginExports {
 
   function observeRootElement(mount: MountContext, element: HTMLElement) {
     updateCompactMode(element.getBoundingClientRect().width)
+    rootWidthMeasured = true
     if (typeof ResizeObserver === 'undefined') return
     mount.rootResizeObserver?.disconnect()
-    mount.rootResizeObserver = new ResizeObserver(() => updateCompactMode(element.getBoundingClientRect().width))
+    mount.rootResizeObserver = new ResizeObserver(() => {
+      const previousWidth = rootWidth
+      const width = element.getBoundingClientRect().width
+      updateCompactMode(width)
+      if (typeof props.isVisible !== 'boolean' && rootWidthMeasured && previousWidth === 0 && width > 0) {
+        triggerTranscriptScrollRestore(mount)
+      }
+      rootWidthMeasured = true
+    })
     mount.rootResizeObserver.observe(element)
     const kbBtn = document.getElementById('kb-toggle-btn')
     if (kbBtn) mount.rootResizeObserver.observe(kbBtn)
@@ -1827,6 +2532,7 @@ export function activate(ctx: PluginContext): PluginExports {
     if (element === rootRef.value) return
     rootRef.value = element
     if (!element) {
+      rootWidthMeasured = false
       activeMount?.rootResizeObserver?.disconnect()
       if (activeMount) activeMount.rootResizeObserver = null
       return
@@ -1837,6 +2543,7 @@ export function activate(ctx: PluginContext): PluginExports {
 
   function setThemeFollowHost(value: boolean) {
     if (activeMount) activeMount.displayGeneration++
+    shared.invalidateDisplaySettings()
     themeFollowHost.value = value
     persist(STORAGE_KEYS.themeFollowHost, value)
   }
@@ -1876,62 +2583,10 @@ export function activate(ctx: PluginContext): PluginExports {
     return t(`agent-${agent.id}`)
   }
 
-  function parseAgentDescriptors(stdout: string): AgentDescriptor[] {
-    const parsed = JSON.parse(stdout) as unknown
-    if (!Array.isArray(parsed)) throw new Error(t('agent-discovery-invalid'))
-    return parsed.map((value: any) => {
-      const caps = value?.capabilities
-      const resumeArgv = value?.resume?.argv
-      const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id)
-      const validCapabilities = caps
-        && ['archive', 'rename', 'delete', 'deleteRequiresArchived', 'nativeIndex', 'tokenStats', 'originFilter']
-          .every(key => typeof caps[key] === 'boolean')
-      if (!value || typeof value.id !== 'string' || typeof value.available !== 'boolean' || !validCapabilities) {
-        throw new Error(t('agent-discovery-invalid'))
-      }
-      const validResumeArgv = Array.isArray(resumeArgv)
-        && resumeArgv.length > 0
-        && resumeArgv.every(arg => typeof arg === 'string' && RESUME_ARG_TOKEN_RE.test(arg))
-      if (!validResumeArgv && !defaultResumeArgv) throw new Error(t('agent-discovery-invalid'))
-      return {
-        id: value.id as AgentId,
-        available: value.available,
-        degraded: value.degraded === true,
-        unavailableReason: typeof value.unavailableReason === 'string' ? value.unavailableReason : undefined,
-        degradedReason: typeof value.degradedReason === 'string' ? value.degradedReason : undefined,
-        capabilities: caps as ConnectorCapabilities,
-        resume: {
-          argv: validResumeArgv
-            ? [...resumeArgv]
-            : [...defaultResumeArgv!],
-        },
-      }
-    })
-  }
-
-  function legacyAgentDescriptor(): AgentDescriptor {
-    return {
-      id: DEFAULT_AGENT,
-      available: true,
-      degraded: false,
-      capabilities: LEGACY_CAPABILITIES,
-      resume: { argv: [...LEGACY_RESUME.argv] },
-    }
-  }
-
   function agentTooltip(agent: AgentDescriptor): string {
     if (!agent.available) return agent.unavailableReason || t('agent-unavailable-tooltip')
     if (agent.degraded) return agent.degradedReason || t('agent-degraded-tooltip')
     return t('agent-switcher')
-  }
-
-  function notifyDegradedAgent(agent: AgentDescriptor) {
-    if (!agent.degraded) return
-    ctx.ui.notify(
-      t('agent-degraded-notice', { agent: agentLabel(agent), reason: agent.degradedReason || t('agent-degraded-tooltip') }),
-      'warn',
-      t('agent-degraded-title'),
-    )
   }
 
   function resetForAgentSwitch() {
@@ -1947,7 +2602,6 @@ export function activate(ctx: PluginContext): PluginExports {
     }
     clearSearchOverlay(true)
     resetTranscript()
-    sessions.value = []
     committedSelection.value = { path: '/', mode: 'subtree', sessionId: null }
     activePartition.value = 'active'
     page.value = 1
@@ -1982,119 +2636,38 @@ export function activate(ctx: PluginContext): PluginExports {
     compactView.value = 'list'
   }
 
-  async function switchAgent(nextAgent: AgentId) {
-    const descriptor = agents.value.find(agent => agent.id === nextAgent)
-    if (!descriptor?.available || nextAgent === activeAgent.value || loading.value || bulkRunning.value || mutationInFlight) return
-    activeAgent.value = nextAgent
-    persist(STORAGE_KEYS.activeAgent, nextAgent)
-    resetForAgentSwitch()
-    const [loaded] = await Promise.all([loadIndex(), loadPins()])
-    if (!loaded) return
-    if (sessions.value.length === 0) {
-      ctx.ui.notify(t('agent-empty-notice', { agent: agentLabel(descriptor) }), 'warn', t('agent-empty-title'))
-    }
-    notifyDegradedAgent(descriptor)
-  }
-
   async function initializeAgents(preserveState: boolean) {
     const mount = activeMount
-    if (!isActiveMount(mount)) return
+    if (shared.retired || !isActiveMount(mount)) return
+    const indexGeneration = ++mount.indexGeneration
+    const treeGeneration = ++mount.treeGeneration
+    const isCurrent = () => !shared.retired && isActiveMount(mount)
+      && indexGeneration === mount.indexGeneration
     loading.value = true
     clearError()
     try {
-      const [result, storedAgent] = await Promise.all([
-        runAgent(['agents'], { timeout: 10_000 }),
-        ctx.storage.get(STORAGE_KEYS.activeAgent).catch(() => null),
-      ])
-      if (!isActiveMount(mount)) return
-      if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t('agent-discovery-failed')).message)
-      let discovered: AgentDescriptor[]
-      try {
-        discovered = parseAgentDescriptors(result.stdout)
-      } catch (caught) {
-        let legacyResponse = false
-        try {
-          const parsed = JSON.parse(result.stdout)
-          legacyResponse = Boolean(parsed && typeof parsed === 'object' && !Array.isArray(parsed) && 'outcome' in parsed)
-        } catch { /* handled by the original discovery error */ }
-        if (!legacyResponse) throw caught
-        discovered = []
-      }
-      if (discovered.length === 0) discovered = [legacyAgentDescriptor()]
-      agents.value = discovered
-
-      const requestedId = (typeof storedAgent === 'string' ? storedAgent : DEFAULT_AGENT) as AgentId
-      const requested = discovered.find(agent => agent.id === requestedId)
-      const available = discovered.filter(agent => agent.available)
-      if (available.length === 0) {
-        activeAgent.value = requested?.id || discovered[0].id
+      const result = await shared.initializeAgents()
+      if (!isCurrent()) return
+      const snapshot = shared.currentIndex()
+      if (result.error || !snapshot) {
         loading.value = false
-        showError(t('agent-none-available'))
+        if (result.error) showError(result.error)
         return
       }
-
-      const candidates = requested?.available
-        ? [requested, ...available.filter(agent => agent.id !== requested.id)]
-        : available
-      const previousAgent = activeAgent.value
-      let chosen: AgentDescriptor | null = null
-      let requestedLoaded = false
-      for (const candidate of candidates) {
-        const switchedAgent = candidate.id !== activeAgent.value
-        if (switchedAgent) resetForAgentSwitch()
-        activeAgent.value = candidate.id
-        const preserveCandidateState = preserveState
-          && !switchedAgent
-          && candidate.id === previousAgent
-          && candidate.id === requestedId
-        const [loaded] = await Promise.all([loadIndex(preserveCandidateState), loadPins()])
-        if (!isActiveMount(mount)) return
-        if (candidate.id === requestedId) requestedLoaded = loaded
-        if (loaded && sessions.value.length > 0) {
-          chosen = candidate
-          break
-        }
+      const applied = await applyIndex(
+        snapshot,
+        preserveState ? 'preserve' : 'reset',
+        { indexGeneration, treeGeneration },
+      )
+      if (!applied
+        && isCurrent()
+        && snapshot.requestMountGeneration < mount.generation
+        && snapshot.sequence !== inheritedIndexSequence) {
+        await loadIndex(preserveState)
       }
-
-      if (!chosen) {
-        const emptyAgent = candidates[0]
-        if (activeAgent.value !== emptyAgent.id) {
-          resetForAgentSwitch()
-          activeAgent.value = emptyAgent.id
-          await Promise.all([loadIndex(), loadPins()])
-          if (!isActiveMount(mount)) return
-        } else if (requestedLoaded && sessions.value.length === 0) {
-          clearSearchOverlay(true)
-          resetTranscript()
-          page.value = 1
-          selection.value = selectionReducer(selection.value, { type: 'clear-partition' })
-          selectMode.value = false
-        }
-        if (emptyAgent.id !== requestedId) persist(STORAGE_KEYS.activeAgent, emptyAgent.id)
-        ctx.ui.notify(t('agent-no-sessions'), 'warn', t('agent-empty-title'))
-        notifyDegradedAgent(emptyAgent)
-        return
-      }
-
-      if (chosen.id !== requestedId) {
-        persist(STORAGE_KEYS.activeAgent, chosen.id)
-        const requestedName = requested ? agentLabel(requested) : String(requestedId)
-        const reason = !requested
-          ? t('agent-not-registered')
-          : !requested.available
-            ? requested.unavailableReason || t('agent-unavailable-tooltip')
-            : requestedLoaded
-              ? t('agent-no-sessions-short')
-              : t('agent-load-failed-short')
-        ctx.ui.notify(
-          t('agent-fallback-notice', { agent: requestedName, fallback: agentLabel(chosen), reason }),
-          'warn',
-          t('agent-fallback-title'),
-        )
-      }
-      notifyDegradedAgent(chosen)
+      await loadPins()
     } catch (caught: any) {
-      if (isActiveMount(mount)) {
+      if (!shared.retired && isActiveMount(mount)) {
         loading.value = false
         showError(cliError(caught?.message || t('agent-discovery-failed')))
       }
@@ -2144,7 +2717,7 @@ export function activate(ctx: PluginContext): PluginExports {
   function retagSession(session: IndexedSession, partition: SessionPartition): IndexedSession {
     const oldKey = sessionKey(session)
     const updated = { ...session, partition }
-    sessions.value = sessions.value.map(candidate => sameSession(candidate, session) ? updated : candidate)
+    shared.setSessions(sessions.value.map(candidate => sameSession(candidate, session) ? updated : candidate))
     if (selectedSession.value && sameSession(selectedSession.value, session)) selectedSession.value = updated
     if (committedSelection.value.sessionId === oldKey) {
       committedSelection.value = { ...committedSelection.value, sessionId: sessionKey(updated) }
@@ -2174,7 +2747,7 @@ export function activate(ctx: PluginContext): PluginExports {
 
   function removeSession(session: IndexedSession) {
     const removedKey = sessionKey(session)
-    sessions.value = sessions.value.filter(candidate => !sameSession(candidate, session))
+    shared.setSessions(sessions.value.filter(candidate => !sameSession(candidate, session)))
     if (committedSelection.value.sessionId === removedKey) {
       committedSelection.value = { ...committedSelection.value, sessionId: null }
     }
@@ -2224,6 +2797,139 @@ export function activate(ctx: PluginContext): PluginExports {
     return body.scrollHeight - body.scrollTop - body.clientHeight <= 24
   }
 
+  function captureTranscriptScrollPosition(mount: MountContext, body: HTMLElement) {
+    mount.stickToBottom = isTranscriptAtBottom(body)
+    if (mount.stickToBottom) return
+    const bodyRect = body.getBoundingClientRect()
+    const anchors = Array.from(body.querySelectorAll<HTMLElement>('[data-transcript-id]'))
+    const anchor = anchors.find((element) => {
+      const rect = element.getBoundingClientRect()
+      return rect.bottom > bodyRect.top && rect.top < bodyRect.bottom
+    })
+    const anchorId = anchor?.getAttribute('data-transcript-id')
+    if (!anchor || anchorId === null) return
+    mount.scrollAnchorId = anchorId
+    mount.scrollAnchorOffset = anchor.getBoundingClientRect().top - bodyRect.top
+  }
+
+  function resetTranscriptScrollState(mount: MountContext | null) {
+    // Restore metadata belongs to ONE transcript. Carrying it into the next one makes the new
+    // transcript jump to the previous one's saved position on the first tab switch.
+    if (!mount) return
+    mount.stickToBottom = false
+    mount.scrollAnchorId = null
+    mount.scrollAnchorOffset = 0
+    mount.pendingScrollRestore = false
+    mount.programmaticScroll = false
+    mount.restoreGeneration++
+    programmaticScrollSequence++
+  }
+
+  function scheduleProgrammaticScrollRelease(
+    mount: MountContext,
+    body: HTMLElement,
+    sequence: number,
+    previousPosition: number,
+    stableFrames: number,
+    captureOnSettle: boolean,
+  ) {
+    scheduleMountFrame(mount, () => {
+      if (!mount.programmaticScroll || sequence !== programmaticScrollSequence) return
+      const position = body.scrollTop
+      const nextStableFrames = position === previousPosition ? stableFrames + 1 : 0
+      if (nextStableFrames >= 2) {
+        mount.programmaticScroll = false
+        // A jump moves the transcript to a NEW position the user chose, but every scroll event
+        // it fired was deliberately ignored, so the saved position is still the pre-jump one.
+        // Capture the settled position here, or a jump to the bottom would be undone by the
+        // next tab switch. A restore is excluded: it is already moving to the saved position,
+        // and re-capturing there can re-anchor onto a different element.
+        if (captureOnSettle && isActiveMount(mount) && transcriptScrollRef.value === body) {
+          captureTranscriptScrollPosition(mount, body)
+        }
+        return
+      }
+      scheduleProgrammaticScrollRelease(mount, body, sequence, position, nextStableFrames, captureOnSettle)
+    })
+  }
+
+  function performProgrammaticTranscriptScroll(
+    mount: MountContext,
+    body: HTMLElement,
+    write: () => void,
+    captureOnSettle = false,
+  ) {
+    mount.programmaticScroll = true
+    const sequence = ++programmaticScrollSequence
+    write()
+    scheduleProgrammaticScrollRelease(mount, body, sequence, body.scrollTop, 0, captureOnSettle)
+  }
+
+  function transcriptAnchorSelector(id: string): string {
+    const escaped = typeof CSS !== 'undefined' && typeof CSS.escape === 'function'
+      ? CSS.escape(id)
+      : id.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+    return `[data-transcript-id="${escaped}"]`
+  }
+
+  function applySavedTranscriptScrollPosition(mount: MountContext): boolean {
+    const body = transcriptScrollRef.value
+    if (!body) return false
+    if (mount.stickToBottom) {
+      performProgrammaticTranscriptScroll(mount, body, () => {
+        body.scrollTop = Math.max(0, body.scrollHeight - body.clientHeight)
+      })
+      return true
+    }
+    if (!mount.scrollAnchorId) return false
+    const anchor = body.querySelector<HTMLElement>(transcriptAnchorSelector(mount.scrollAnchorId))
+    if (!anchor) return false
+    const bodyTop = body.getBoundingClientRect().top
+    const anchorOffset = anchor.getBoundingClientRect().top - bodyTop
+    performProgrammaticTranscriptScroll(mount, body, () => {
+      body.scrollTop += anchorOffset - mount.scrollAnchorOffset
+    })
+    return true
+  }
+
+  function scheduleTranscriptScrollRestore(mount: MountContext, generation: number, finalFrame = false) {
+    scheduleMountFrame(mount, () => {
+      if (generation !== mount.restoreGeneration || !mount.pendingScrollRestore) return
+      if (mount.transcriptFrame !== null || mount.minimapRebuildFrame !== null) {
+        scheduleTranscriptScrollRestore(mount, generation)
+        return
+      }
+      if (!finalFrame) {
+        scheduleTranscriptScrollRestore(mount, generation, true)
+        return
+      }
+      applySavedTranscriptScrollPosition(mount)
+      mount.pendingScrollRestore = false
+    })
+  }
+
+  function triggerTranscriptScrollRestore(mount: MountContext) {
+    if (!isActiveMount(mount)) return
+    const generation = ++mount.restoreGeneration
+    mount.pendingScrollRestore = true
+    applySavedTranscriptScrollPosition(mount)
+    scheduleTranscriptScrollRestore(mount, generation)
+  }
+
+  function cancelTranscriptScrollRestore() {
+    const mount = activeMount
+    if (!isActiveMount(mount)) return
+    mount.pendingScrollRestore = false
+    mount.programmaticScroll = false
+    mount.restoreGeneration++
+    programmaticScrollSequence++
+  }
+
+  function onTranscriptUserKeydown(event: KeyboardEvent) {
+    if (!['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'PageUp', 'PageDown', 'Home', 'End', ' ', 'Spacebar'].includes(event.key)) return
+    cancelTranscriptScrollRestore()
+  }
+
   function updateTranscriptScrollState() {
     const body = transcriptScrollRef.value
     if (!body) return
@@ -2241,6 +2947,10 @@ export function activate(ctx: PluginContext): PluginExports {
     if (!isActiveMount(mount) || mount.transcriptScrollFrame !== null) return
     mount.transcriptScrollFrame = scheduleMountFrame(mount, () => {
       mount.transcriptScrollFrame = null
+      if (!mount.programmaticScroll) {
+        const body = transcriptScrollRef.value
+        if (body) captureTranscriptScrollPosition(mount, body)
+      }
       updateTranscriptScrollState()
     })
   }
@@ -2560,11 +3270,27 @@ export function activate(ctx: PluginContext): PluginExports {
     const mount = activeMount
     const previous = transcriptScrollRef.value
     if (element === previous) return
-    if (previous) previous.removeEventListener('scroll', onTranscriptScroll)
+    if (transcriptScrollDisposer) {
+      transcriptScrollDisposer()
+      if (mount) mount.disposers.delete(transcriptScrollDisposer)
+      transcriptScrollDisposer = null
+    }
     mount?.transcriptResizeObserver?.disconnect()
     transcriptScrollRef.value = element
     if (!element || !isActiveMount(mount)) return
     element.addEventListener('scroll', onTranscriptScroll, { passive: true })
+    element.addEventListener('wheel', cancelTranscriptScrollRestore, { passive: true })
+    element.addEventListener('touchstart', cancelTranscriptScrollRestore, { passive: true })
+    element.addEventListener('keydown', onTranscriptUserKeydown)
+    element.addEventListener('pointerdown', cancelTranscriptScrollRestore, { passive: true })
+    transcriptScrollDisposer = () => {
+      element.removeEventListener('scroll', onTranscriptScroll)
+      element.removeEventListener('wheel', cancelTranscriptScrollRestore)
+      element.removeEventListener('touchstart', cancelTranscriptScrollRestore)
+      element.removeEventListener('keydown', onTranscriptUserKeydown)
+      element.removeEventListener('pointerdown', cancelTranscriptScrollRestore)
+    }
+    addMountDisposer(mount, transcriptScrollDisposer)
     if (typeof ResizeObserver !== 'undefined') {
       mount.transcriptResizeObserver = new ResizeObserver(() => scheduleMinimapRebuild())
       mount.transcriptResizeObserver.observe(element)
@@ -2574,25 +3300,37 @@ export function activate(ctx: PluginContext): PluginExports {
 
   function jumpToMinimapTick(tick: MinimapTick) {
     const body = transcriptScrollRef.value
-    if (!body) return
+    const mount = activeMount
+    if (!body || !isActiveMount(mount)) return
     const article = body.querySelector<HTMLElement>(`[data-transcript-index="${tick.messageIndex}"]`)
-    if (article) article.scrollIntoView({ block: 'start', behavior: 'smooth' })
-    else {
-      const maximum = Math.max(0, body.scrollHeight - body.clientHeight)
-      body.scrollTop = minimapTurns.length > 1 ? maximum * tick.turnIndex / (minimapTurns.length - 1) : 0
-    }
+    performProgrammaticTranscriptScroll(mount, body, () => {
+      if (article) article.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      else {
+        const maximum = Math.max(0, body.scrollHeight - body.clientHeight)
+        body.scrollTop = minimapTurns.length > 1 ? maximum * tick.turnIndex / (minimapTurns.length - 1) : 0
+      }
+    }, true)
   }
 
   function activateJumpPill() {
     const body = transcriptScrollRef.value
-    if (!body) return
-    if (jumpPillAtBottom.value) body.scrollTo({ top: 0 })
-    else body.scrollTo({ top: Math.max(0, body.scrollHeight - body.clientHeight), behavior: 'smooth' })
+    const mount = activeMount
+    if (!body || !isActiveMount(mount)) return
+    // Record the destination the moment the jump starts. The settle-time capture refines it,
+    // but a tab switch during the animation would otherwise restore the pre-jump anchor.
+    mount.stickToBottom = !jumpPillAtBottom.value
+    mount.scrollAnchorId = null
+    mount.scrollAnchorOffset = 0
+    performProgrammaticTranscriptScroll(mount, body, () => {
+      if (jumpPillAtBottom.value) body.scrollTo({ top: 0 })
+      else body.scrollTo({ top: Math.max(0, body.scrollHeight - body.clientHeight), behavior: 'smooth' })
+    }, true)
   }
 
   function resetTranscript() {
     const mount = activeMount
     if (mount) mount.transcriptLoadToken++
+    resetTranscriptScrollState(mount)
     cancelTranscriptFrame()
     if (mount?.copiedTimer) clearTimeout(mount.copiedTimer)
     if (mount) mount.copiedTimer = null
@@ -2631,6 +3369,7 @@ export function activate(ctx: PluginContext): PluginExports {
     const mount = activeMount
     if (!isActiveMount(mount)) return
     const token = ++mount.transcriptLoadToken
+    resetTranscriptScrollState(mount)
     cancelTranscriptFrame()
     clearMinimapState()
     jumpPillVisible.value = false
@@ -2652,7 +3391,10 @@ export function activate(ctx: PluginContext): PluginExports {
       mount.allTranscriptMessages = parsed as TranscriptMessage[]
       renderNextTranscriptBatch(mount, token)
       scheduleMountFrame(mount, () => {
-        if (token === mount.transcriptLoadToken && transcriptScrollRef.value) transcriptScrollRef.value.scrollTop = 0
+        const body = transcriptScrollRef.value
+        if (token === mount.transcriptLoadToken && body) {
+          performProgrammaticTranscriptScroll(mount, body, () => { body.scrollTop = 0 }, true)
+        }
       })
     } catch (caught: any) {
       if (isActiveMount(mount) && token === mount.transcriptLoadToken) transcriptError.value = cliError(caught?.message || String(caught))
@@ -2711,16 +3453,7 @@ export function activate(ctx: PluginContext): PluginExports {
   async function coordinateMutation<T>(fallback: T, operation: (isCurrent: () => boolean) => Promise<T>): Promise<T> {
     const mount = activeMount
     if (!isActiveMount(mount)) return fallback
-    if (mutationInFlight) {
-      ctx.ui.notify(t('notify-mutation-in-progress'), 'warn')
-      return fallback
-    }
-    mutationInFlight = true
-    try {
-      return await operation(() => isActiveMount(mount))
-    } finally {
-      mutationInFlight = false
-    }
+    return shared.coordinator.coordinate(fallback, runtimeHandle, () => isActiveMount(mount), operation)
   }
 
   async function restoreSessionCore(session: IndexedSession, isCurrent: () => boolean): Promise<IndexedSession | null> {
@@ -2963,24 +3696,25 @@ export function activate(ctx: PluginContext): PluginExports {
     scheduleMinimapRebuild()
   }
 
-  async function loadIndex(preserveState = false, refresh = false): Promise<boolean> {
+  async function applyIndex(
+    snapshot: IndexSnapshot,
+    mode: IndexApplyMode,
+    guard?: { indexGeneration: number; treeGeneration: number },
+  ): Promise<boolean> {
     const mount = activeMount
-    if (!isActiveMount(mount)) return false
-    const requestGeneration = ++mount.indexGeneration
-    const isCurrent = () => isActiveMount(mount) && requestGeneration === mount.indexGeneration
-    const treeGeneration = ++mount.treeGeneration
+    if (shared.retired || !isActiveMount(mount)) return false
+    if (snapshot.requestMountGeneration < mount.generation && snapshot.sequence !== inheritedIndexSequence) return false
+    const isCurrent = () => !shared.retired && isActiveMount(mount)
+      && (!guard || guard.indexGeneration === mount.indexGeneration)
+    const treeGeneration = guard?.treeGeneration ?? mount.treeGeneration
     const isCurrentTree = () => isCurrent() && treeGeneration === mount.treeGeneration
     loading.value = true
-    clearError()
+    if (mode === 'reset') clearError()
     try {
-      const caps = activeCapabilities.value
-      const result = await runAgent(refresh && !caps.nativeIndex ? ['build-index', '--refresh'] : ['build-index'], { timeout: 30_000 })
       if (!isCurrent()) return false
-      if (result.code !== 0) throw new Error(result.stderr || 'build-index failed')
-      const parsed = JSON.parse(result.stdout)
-      if (!Array.isArray(parsed)) throw new Error('build-index returned invalid JSON')
-      sessions.value = parsed as IndexedSession[]
-      const requestAgent = activeAgent.value
+      shared.setSessions(snapshot.sessions)
+      const caps = agents.value.find(agent => agent.id === snapshot.agent)?.capabilities || UNAVAILABLE_CAPABILITIES
+      const requestAgent = snapshot.agent
       if (caps.originFilter) {
         try {
           hideScriptedSessions.value = await ctx.storage.get(
@@ -2994,7 +3728,7 @@ export function activate(ctx: PluginContext): PluginExports {
       const presentKeys = sessionsForList(activePartition.value).map(sessionKey)
       selection.value = selectionReducer(selection.value, { type: 'intersect', keys: presentKeys })
 
-      if (preserveState) {
+      if (mode === 'preserve') {
         page.value = clampPage(page.value, sessionsForList(activePartition.value).length, pageSize.value)
         if (selectedSession.value) {
           selectedSession.value = sessions.value.find(item => sessionKey(item) === sessionKey(selectedSession.value!)) || selectedSession.value
@@ -3009,7 +3743,6 @@ export function activate(ctx: PluginContext): PluginExports {
       } catch { /* use the indexed common ancestor */ }
       if (!isCurrentTree()) return false
       visibleRoot.value = savedRoot || deepestCommonAncestor(originFilteredSessions.value.map(session => session.rootPath))
-      persist(perAgentStorageKey(STORAGE_KEYS.treeRoot, requestAgent), visibleRoot.value)
       committedSelection.value = { path: visibleRoot.value, mode: 'subtree', sessionId: null }
 
       let savedExpanded: Set<string> | null = null
@@ -3023,16 +3756,39 @@ export function activate(ctx: PluginContext): PluginExports {
         expandedPaths.value = savedExpanded
       } else {
         expandedPaths.value = collectTreePaths(deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value))
-        persistExpandedPaths()
       }
       expandedPaths.value.add(visibleRoot.value)
-      persistExpandedPaths()
       return true
     } catch (caught: any) {
       if (isCurrent()) showError(cliError(caught?.message || String(caught)))
       return false
     } finally {
       if (isCurrent()) loading.value = false
+    }
+  }
+
+  async function loadIndex(preserveState = false, refresh = false): Promise<boolean> {
+    const mount = activeMount
+    if (shared.retired || !isActiveMount(mount)) return false
+    const indexGeneration = ++mount.indexGeneration
+    const treeGeneration = ++mount.treeGeneration
+    const requestAgent = activeAgent.value
+    const isCurrent = () => !shared.retired && isActiveMount(mount)
+      && indexGeneration === mount.indexGeneration
+      && requestAgent === activeAgent.value
+    loading.value = true
+    clearError()
+    try {
+      const snapshot = await shared.fetchIndex(requestAgent, refresh)
+      if (!isCurrent() || !snapshot) return false
+      return applyIndex(snapshot, preserveState ? 'preserve' : 'reset', { indexGeneration, treeGeneration })
+    } catch (caught: any) {
+      if (isCurrent()) {
+        showError(cliError(caught?.message || String(caught)))
+      }
+      return false
+    } finally {
+      if (isCurrent() && loading.value) loading.value = false
     }
   }
 
@@ -3068,26 +3824,14 @@ export function activate(ctx: PluginContext): PluginExports {
     if (!isActiveMount(mount)) return
     const generation = ++mount.displayGeneration
     try {
-      const [savedLocale, savedFontScale, savedThemeFollowHost, savedPageSize, savedExportDestination, savedPinsCollapsed] = await Promise.all([
-        ctx.storage.get(STORAGE_KEYS.locale),
-        ctx.storage.get(STORAGE_KEYS.fontScale),
-        ctx.storage.get(STORAGE_KEYS.themeFollowHost),
+      await shared.initializeDisplaySettings()
+      const [savedPageSize, savedPinsCollapsed] = await Promise.all([
         ctx.storage.get(STORAGE_KEYS.pageSize),
-        ctx.storage.get(STORAGE_KEYS.exportDestination),
         ctx.storage.get(STORAGE_KEYS.pinsCollapsed),
       ])
       if (!isActiveMount(mount) || generation !== mount.displayGeneration) return
-      localeSetting.value = normalizeLocaleSetting(savedLocale)
-      localeRef.value = resolveLocale(localeSetting.value, typeof document === 'undefined' ? '' : document.documentElement.lang)
-      fontScale.value = typeof savedFontScale === 'number' && Number.isInteger(savedFontScale) && savedFontScale >= 1 && savedFontScale <= 5
-        ? savedFontScale
-        : 3
       updateCompactMode(rootWidth)
-      themeFollowHost.value = typeof savedThemeFollowHost === 'boolean' ? savedThemeFollowHost : true
       pageSize.value = PAGE_SIZES.includes(savedPageSize as any) ? savedPageSize as (typeof PAGE_SIZES)[number] : 50
-      exportDestination.value = typeof savedExportDestination === 'string' && savedExportDestination.trim()
-        ? savedExportDestination.trim()
-        : DEFAULT_EXPORT_DESTINATION
       updatePinsState({ collapsed: savedPinsCollapsed === true })
     } catch { /* use defaults */ }
   }
@@ -4311,10 +5055,10 @@ export function activate(ctx: PluginContext): PluginExports {
       IconTerminal(13),
       h('select', {
         value: activeAgent.value,
-        disabled: loading.value || bulkRunning.value || mutationInFlight || agents.value.length === 0,
+        disabled: loading.value || bulkRunning.value || shared.coordinator.isSessionMutationBusy() || agents.value.length === 0,
         'aria-label': t('agent-switcher'),
         onChange: (event: Event) => {
-          void switchAgent((event.target as HTMLSelectElement).value as AgentId)
+          void shared.switchAgent((event.target as HTMLSelectElement).value as AgentId)
         },
       }, agents.value.map(agent => h('option', {
         value: agent.id,
@@ -4433,7 +5177,7 @@ export function activate(ctx: PluginContext): PluginExports {
         h('label', { class: 'ccm-browser-search-box', title: partition === 'archive' ? archiveSearchTooltip : t('type-filter-search') }, [
           IconSearch(14),
           h('input', {
-            id: 'session-browser-search-input',
+            id: `session-browser-search-input-${paneKey}`,
             ref: (element: HTMLInputElement | null) => { searchInputRef.value = element },
             value: searchQuery.value,
             disabled: bulkRunning.value,
@@ -4812,6 +5556,7 @@ export function activate(ctx: PluginContext): PluginExports {
       class: ['ccm-browser-message', isUser ? 'ccm-browser-message-user' : 'ccm-browser-message-assistant'],
       key: messageKey,
       'data-transcript-index': String(index),
+      'data-transcript-id': messageKey,
     }, [
       h('div', { class: 'ccm-browser-message-gutter' }, [
         h('div', { class: ['ccm-browser-avatar', isUser ? 'ccm-browser-avatar-user' : 'ccm-browser-avatar-assistant'] }, [
@@ -4845,7 +5590,7 @@ export function activate(ctx: PluginContext): PluginExports {
       tabindex: 0,
       inputmode: 'none',
       'aria-label': t('minimap-label'),
-      'aria-activedescendant': focused >= 0 ? `ccm-tick-${minimapTicks.value[focused]?.turnIndex}` : undefined,
+      'aria-activedescendant': focused >= 0 ? `ccm-tick-${paneKey}-${minimapTicks.value[focused]?.turnIndex}` : undefined,
       onPointerdown: onMinimapPointerDown,
       onPointermove: onMinimapPointerMove,
       onPointerup: onMinimapPointerUp,
@@ -4856,7 +5601,7 @@ export function activate(ctx: PluginContext): PluginExports {
       onKeydown: onMinimapKeydown,
       onTouchend: (event: TouchEvent) => event.stopPropagation(),
     }, minimapTicks.value.map((tick, tickIndex) => h('div', {
-      id: `ccm-tick-${tick.turnIndex}`,
+      id: `ccm-tick-${paneKey}-${tick.turnIndex}`,
       class: [
         'ccm-minimap-tick',
         tickIndex === minimapActiveTick.value ? 'ccm-minimap-tick-active' : '',
@@ -5124,12 +5869,16 @@ export function activate(ctx: PluginContext): PluginExports {
     ])
   }
 
-  return {
-    component: {
-      setup() {
-        const mount = createMountContext()
-        activeMount = mount
-        ctx.onMounted(() => {
+  const mount = createMountContext()
+  activeMount = mount
+  const stopVisibilityWatch = ctx.watch(
+    () => props.isVisible,
+    (visible, previous) => {
+      if (previous === false && visible === true) triggerTranscriptScrollRestore(mount)
+    },
+  )
+  if (typeof stopVisibilityWatch === 'function') addMountDisposer(mount, stopVisibilityWatch)
+  ctx.onMounted(() => {
           mount.active = true
           activeMount = mount
           if (typeof MutationObserver !== 'undefined' && typeof document !== 'undefined') {
@@ -5153,7 +5902,12 @@ export function activate(ctx: PluginContext): PluginExports {
             if (isActiveMount(mount)) await initializeAgents(preserveState)
           })()
         })
-        ctx.onUnmounted(() => {
+  ctx.onUnmounted(() => {
+          shared.paneStates.set(paneKey, {
+            committedSelection: { ...committedSelection.value },
+            selectedSession: selectedSession.value,
+            visibleRoot: visibleRoot.value,
+          })
           setTranscriptScrollElement(null)
           detailPaneRef.value = null
           bulkCancelRequested.value = true
@@ -5186,9 +5940,8 @@ export function activate(ctx: PluginContext): PluginExports {
           closeMinimapPreview()
           if (activeMount === mount) activeMount = null
         })
-        return {}
-      },
-      render() {
+
+  function render() {
         return h('div', {
           class: [
             'ccm-root ccm-browser-root',
@@ -5247,7 +6000,22 @@ export function activate(ctx: PluginContext): PluginExports {
           ]),
           renderRootPicker(),
         ])
-      },
-    },
+  }
+
+  return {
+    handle: runtimeHandle,
+    render,
+    openSearch,
+    applyIndex,
+    applyFontScale,
+    resetForAgentSwitch,
+    loadPins: () => loadPins(),
+    executePinMutation,
+    isPinMutationCurrent,
+    setPinsBulkRunning: (value: boolean) => { pinsBulkRunning.value = value },
+    setLoading: (value: boolean) => { loading.value = value },
+    clearError,
+    showError,
+    props,
   }
 }

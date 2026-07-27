@@ -156,20 +156,26 @@ test('bulk progress increments only after the current command completes', async 
 })
 
 test('restoring font scale immediately recomputes compact mode at the current root width', () => {
-  const start = uiSource.indexOf('async function loadDisplaySettings()')
-  const end = uiSource.indexOf('function setVisibleRoot', start)
-  const body = uiSource.slice(start, end)
-  const restore = body.indexOf('fontScale.value =')
-  const recompute = body.indexOf('updateCompactMode(rootWidth)')
+  const sharedStart = uiSource.indexOf('function initializeDisplaySettings()')
+  const sharedEnd = uiSource.indexOf('let laneInFlight', sharedStart)
+  const sharedBody = uiSource.slice(sharedStart, sharedEnd)
+  const paneStart = uiSource.indexOf('async function loadDisplaySettings()')
+  const paneEnd = uiSource.indexOf('function setVisibleRoot', paneStart)
+  const paneBody = uiSource.slice(paneStart, paneEnd)
+  const initialize = paneBody.indexOf('await shared.initializeDisplaySettings()')
+  const recompute = paneBody.indexOf('updateCompactMode(rootWidth)')
 
-  assert.notEqual(start, -1)
-  assert.notEqual(end, -1)
-  assert.ok(restore >= 0 && recompute > restore)
+  assert.notEqual(sharedStart, -1)
+  assert.notEqual(sharedEnd, -1)
+  assert.notEqual(paneStart, -1)
+  assert.notEqual(paneEnd, -1)
+  assert.match(sharedBody, /fontScale\.value =/)
+  assert.ok(initialize >= 0 && recompute > initialize)
 })
 
 test('index refresh intersects selection through sessionsForList', () => {
-  const start = uiSource.indexOf('async function loadIndex(')
-  const end = uiSource.indexOf('async function loadPaneWidths()', start)
+  const start = uiSource.indexOf('async function applyIndex(')
+  const end = uiSource.indexOf('async function loadIndex(', start)
   const body = uiSource.slice(start, end)
 
   assert.notEqual(start, -1)

@@ -243,8 +243,13 @@ async function mountPins(options = {}) {
   }
 
   const plugin = activate(ctx)
-  plugin.component.setup()
-  mounted[0]()
+  const render = plugin.component.setup({
+    paneId: 'pane-a',
+    workspaceId: 'ws-a',
+    isVisible: true,
+    isFocused: true,
+  })
+  for (const callback of mounted) callback()
   await flush(8)
 
   return {
@@ -253,9 +258,9 @@ async function mountPins(options = {}) {
     notifications,
     pinsByAgent,
     storage,
-    render: () => plugin.component.render(),
+    render,
     cleanup() {
-      unmounted[0]()
+      for (const callback of unmounted) callback()
       global.document = previousDocument
       global.MutationObserver = previousMutationObserver
       global.requestAnimationFrame = previousRequestAnimationFrame
