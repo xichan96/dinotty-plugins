@@ -111,6 +111,7 @@ interface MinimapCardPointerState {
 
 export interface SessionPathTreeNode {
   path: string
+  ioPath: string
   name: string
   directActiveCount: number
   directArchiveCount: number
@@ -241,12 +242,22 @@ interface ConnectorCapabilities {
 
 interface AgentDescriptor {
   id: AgentId
+  pathStyle: 'windows' | 'posix'
   available: boolean
   degraded?: boolean
   unavailableReason?: string
   degradedReason?: string
   capabilities: ConnectorCapabilities
-  resume: { argv: string[] }
+  resume: { argv: string[]; windowsCommand?: string }
+}
+
+export function displayPath(value: string, style: 'windows' | 'posix'): string {
+  if (style !== 'windows') return value
+  const syntheticPrefix = value.startsWith('/\\\\?\\') ? value.slice(1) : value
+  const unc = syntheticPrefix.match(/^\\\\\?\\UNC\\(.+)$/i)
+  if (unc) return `\\\\${unc[1]}`
+  const drive = syntheticPrefix.match(/^\\\\\?\\([A-Za-z]:\\.*)$/)
+  return drive ? drive[1] : value
 }
 
 interface MutationReason {
@@ -361,6 +372,31 @@ const DEFAULT_RESUME_ARGV_BY_AGENT = new Map<AgentId, readonly string[]>([
 ])
 const LEGACY_RESUME = { argv: ['claude', '--resume'] }
 const RESUME_ARG_TOKEN_RE = /^[A-Za-z0-9_@%+=:,./-]+$/
+const WINDOWS_CODEX_SHIM_RE = /^(?:[A-Za-z]:\\|\\\\)[^"&|<>()^%!\r\n]*\\codex\.cmd$/i
+
+export function terminalResumeArgv(
+  agent: AgentId,
+  pathStyle: AgentDescriptor['pathStyle'],
+  resumeArgv: readonly string[],
+  sessionId: string,
+  windowsCommand?: string,
+): string[] {
+  if (!SESSION_ID_RE.test(sessionId)) throw new Error('Invalid session id')
+  const isBuiltInWindowsCodex = agent === 'codex'
+    && pathStyle === 'windows'
+    && resumeArgv.length === 2
+    && resumeArgv[0] === 'codex'
+    && resumeArgv[1] === 'resume'
+    && typeof windowsCommand === 'string'
+    && WINDOWS_CODEX_SHIM_RE.test(windowsCommand)
+  if (isBuiltInWindowsCodex && windowsCommand) {
+    // npm exposes Codex as a .cmd shim on Windows. The session id is UUID-
+    // validated and the absolute shim is resolved outside the session cwd, so
+    // neither shell syntax nor a repository-local executable can be injected.
+    return ['cmd.exe', '/D', '/V:OFF', '/S', '/C', 'call', windowsCommand, 'resume', sessionId]
+  }
+  return [...resumeArgv, sessionId]
+}
 
 type Translate = ReturnType<typeof initI18n>['t']
 type CompactView = 'tree' | 'list' | 'detail'
@@ -1115,8 +1151,9 @@ export function deriveSessionPathTree(
   const scoped = sessions.filter(session => isPathWithin(rootPath, session.rootPath))
   if (scoped.length === 0) return null
 
-  const makeNode = (nodePath: string): MutableTreeNode => ({
+  const makeNode = (nodePath: string, ioPath = nodePath): MutableTreeNode => ({
     path: nodePath,
+    ioPath,
     name: pathName(nodePath),
     directActiveCount: 0,
     directArchiveCount: 0,
@@ -1126,7 +1163,7 @@ export function deriveSessionPathTree(
     childrenByName: new Map(),
   })
 
-  const root = makeNode(rootPath)
+  const root = makeNode(rootPath, visibleRoot)
   for (const session of scoped) {
     const sessionPath = normalizePath(session.rootPath)
     const relativeParts = sessionPath === rootPath
@@ -1147,6 +1184,8 @@ export function deriveSessionPathTree(
       chain.push(node)
     }
 
+    node.ioPath = session.rootPath
+
     if (session.partition === 'active') node.directActiveCount += 1
     else node.directArchiveCount += 1
 
@@ -1159,6 +1198,7 @@ export function deriveSessionPathTree(
 
   const freezeNode = (node: MutableTreeNode): SessionPathTreeNode => ({
     path: node.path,
+    ioPath: node.ioPath,
     name: node.name,
     directActiveCount: node.directActiveCount,
     directArchiveCount: node.directArchiveCount,
@@ -1462,6 +1502,7 @@ export function activate(ctx: PluginContext): PluginExports {
     return parsed.map((value: any) => {
       const caps = value?.capabilities
       const resumeArgv = value?.resume?.argv
+      const windowsCommand = value?.resume?.windowsCommand
       const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id)
       const validCapabilities = caps
         && ['archive', 'rename', 'delete', 'deleteRequiresArchived', 'nativeIndex', 'tokenStats', 'originFilter']
@@ -1475,12 +1516,18 @@ export function activate(ctx: PluginContext): PluginExports {
       if (!validResumeArgv && !defaultResumeArgv) throw new Error(t('agent-discovery-invalid'))
       return {
         id: value.id as AgentId,
+        pathStyle: value.pathStyle === 'windows' ? 'windows' : 'posix',
         available: value.available,
         degraded: value.degraded === true,
         unavailableReason: typeof value.unavailableReason === 'string' ? value.unavailableReason : undefined,
         degradedReason: typeof value.degradedReason === 'string' ? value.degradedReason : undefined,
         capabilities: caps as ConnectorCapabilities,
-        resume: { argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv!] },
+        resume: {
+          argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv!],
+          ...(typeof windowsCommand === 'string' && WINDOWS_CODEX_SHIM_RE.test(windowsCommand)
+            ? { windowsCommand }
+            : {}),
+        },
       }
     })
   }
@@ -1488,6 +1535,7 @@ export function activate(ctx: PluginContext): PluginExports {
   function legacyAgentDescriptor(): AgentDescriptor {
     return {
       id: DEFAULT_AGENT,
+      pathStyle: 'posix',
       available: true,
       degraded: false,
       capabilities: LEGACY_CAPABILITIES,
@@ -3676,11 +3724,17 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     try {
       await terminal.createTerminalTab({
         cwd: resumable.rootPath,
-        argv: [...activeResumeArgv.value, resumable.id],
+        argv: terminalResumeArgv(
+          activeAgent.value,
+          activeDescriptor.value?.pathStyle || 'posix',
+          activeResumeArgv.value,
+          resumable.id,
+          activeDescriptor.value?.resume.windowsCommand,
+        ),
         title: resolveSessionTitle(resumable).slice(0, 24),
       })
-    } catch {
-      if (isCurrent()) showError(t('error-open-terminal'), {
+    } catch (caught: any) {
+      if (isCurrent()) showError(cliError(caught?.message || t('error-open-terminal')), {
         label: t('copy-command'),
         run: () => { void copyResumeCommand(resumable, isCurrent) },
       })
@@ -4367,9 +4421,12 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     const selectMode = pinsSelectMode.value
     const metadata = pinMetadata(pin)
     const name = pathName(pin.path)
+    const displayName = displayPath(name, activeDescriptor.value?.pathStyle || 'posix')
     const count = t(metadata.count === 1 ? 'pin-session-count-one' : 'pin-session-count-other', { n: metadata.count })
     const activity = t('pin-last-activity', { time: formatRelativeTime(metadata.lastActiveAt, t) })
-    const missingTitle = pin.exists ? pin.path : t('pin-folder-missing')
+    const missingTitle = pin.exists
+      ? displayPath(pin.path, activeDescriptor.value?.pathStyle || 'posix')
+      : t('pin-folder-missing')
     const activePath = pinsSelection.value.activePath
     const active = activePath !== null && normalizePath(pin.path) === normalizePath(activePath)
     const activateOrToggle = (shiftKey = false) => {
@@ -4407,7 +4464,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
         type: 'checkbox',
         checked: pinsSelection.value.selected.has(pin.path),
         disabled: pinsBulkRunning.value,
-        'aria-label': t('pin-select-folder', { name }),
+        'aria-label': t('pin-select-folder', { name: displayName }),
         onClick: (event: MouseEvent) => {
           event.stopPropagation()
           reducePinsSelection(event.shiftKey
@@ -4416,7 +4473,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
         },
       }) : null,
       IconFolder(14),
-      h('span', { class: 'ccm-browser-pin-name' }, name),
+      h('span', { class: 'ccm-browser-pin-name' }, displayName),
       h('span', { class: 'ccm-browser-pin-meta' }, [
         h('span', {}, count),
         h('span', {}, activity),
@@ -4424,8 +4481,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       pinsSelectMode.value ? h('button', {
         class: 'ccm-icon-btn ccm-browser-pin-move',
         type: 'button',
-        title: t('pin-move-up', { name }),
-        'aria-label': t('pin-move-up', { name }),
+        title: t('pin-move-up', { name: displayName }),
+        'aria-label': t('pin-move-up', { name: displayName }),
         disabled: pinsBulkRunning.value || index === 0,
         onClick: (event?: MouseEvent) => {
           event?.stopPropagation()
@@ -4435,8 +4492,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       pinsSelectMode.value ? h('button', {
         class: 'ccm-icon-btn ccm-browser-pin-move',
         type: 'button',
-        title: t('pin-move-down', { name }),
-        'aria-label': t('pin-move-down', { name }),
+        title: t('pin-move-down', { name: displayName }),
+        'aria-label': t('pin-move-down', { name: displayName }),
         disabled: pinsBulkRunning.value || index === pinsSelection.value.pins.length - 1,
         onClick: (event?: MouseEvent) => {
           event?.stopPropagation()
@@ -4556,7 +4613,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   }
 
   function renderTreeNode(node: SessionPathTreeNode, depth: number): any {
-    const selected = committedSelection.value.path === node.path
+    const selected = normalizePath(committedSelection.value.path) === node.path
     const highlighted = transientHighlightPath.value === node.path
     const expanded = expandedPaths.value.has(node.path)
     const hasChildren = node.children.length > 0
@@ -4574,8 +4631,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
           highlighted ? 'ccm-browser-tree-node-highlight' : '',
         ],
         style: { paddingLeft: `${8 + depth * 16}px` },
-        title: node.path,
-        onClick: () => selectNode(node.path),
+        title: displayPath(node.ioPath, activeDescriptor.value?.pathStyle || 'posix'),
+        onClick: () => selectNode(node.ioPath),
       }, [
         hasChildren
           ? h('button', {
@@ -4590,7 +4647,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
             }, [expanded ? IconChevronDown(14) : IconChevronRight(14)])
           : h('span', { class: 'ccm-browser-tree-chevron-spacer' }),
         IconFolder(15),
-        h('span', { class: 'ccm-browser-tree-label' }, node.name),
+        h('span', { class: 'ccm-browser-tree-label' }, displayPath(node.name, activeDescriptor.value?.pathStyle || 'posix')),
         h('span', { class: 'ccm-browser-tree-badge', title: badgeTitle }, [
           h('span', { class: 'ccm-browser-tree-count ccm-browser-tree-count-active' }, t('tree-count-active', { n: node.activeCount })),
           h('span', { class: 'ccm-browser-tree-count ccm-browser-tree-count-archive' }, t('tree-count-archive', { n: node.archiveCount })),
@@ -4677,7 +4734,10 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
             }, [IconPencil(15)]),
           ]),
         ]),
-        h('div', { class: 'ccm-browser-root-path', title: visibleRoot.value }, visibleRoot.value),
+        h('div', {
+          class: 'ccm-browser-root-path',
+          title: displayPath(visibleRoot.value, activeDescriptor.value?.pathStyle || 'posix'),
+        }, displayPath(visibleRoot.value, activeDescriptor.value?.pathStyle || 'posix')),
         h('div', { class: 'ccm-browser-tree-body' }, [
           loading.value
             ? h('div', { class: 'ccm-browser-pane-state' }, t('building-index'))
@@ -4831,7 +4891,10 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
           title,
           titles.secondary ? h('span', { class: 'ccm-browser-title-sub' }, titles.secondary) : null,
         ]),
-        h('span', { class: 'ccm-browser-search-path', title: session.rootPath }, session.rootPath),
+        h('span', {
+          class: 'ccm-browser-search-path',
+          title: displayPath(session.rootPath, activeDescriptor.value?.pathStyle || 'posix'),
+        }, displayPath(session.rootPath, activeDescriptor.value?.pathStyle || 'posix')),
       ]),
       h('div', { class: 'ccm-browser-search-match' }, result.match),
       h('div', { class: 'ccm-browser-session-footer' }, [
@@ -4880,7 +4943,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
           event.preventDefault()
           void navigatePickerDir(target)
         },
-      }, segment))
+      }, displayPath(segment, activeDescriptor.value?.pathStyle || 'posix')))
     }
 
     return h('div', {
@@ -4924,13 +4987,21 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
             onClick: () => { void validateAndCommitRoot(pickerManualPath.value) },
           }, [IconCheck(14), h('span', {}, t(selectingExportDestination ? 'picker-export-use-manual-path' : 'picker-use-manual-path'))]),
         ]),
-        h('div', { class: 'ccm-picker-current' }, [IconFolder(14), h('span', {}, t('picker-current', { path: dir }))]),
+        h('div', { class: 'ccm-picker-current' }, [
+          IconFolder(14),
+          h('span', {}, t('picker-current', {
+            path: displayPath(dir, activeDescriptor.value?.pathStyle || 'posix'),
+          })),
+        ]),
         h('div', { class: 'ccm-picker-actions' }, [
           h('button', {
             class: 'ccm-picker-action-btn',
             type: 'button',
             onClick: () => { void validateAndCommitRoot(dir) },
-          }, [IconCheck(14), h('span', {}, t(selectingExportDestination ? 'picker-export-select-current' : 'picker-select-current', { name: dir.split('/').pop() || '/' }))]),
+          }, [IconCheck(14), h('span', {}, t(
+            selectingExportDestination ? 'picker-export-select-current' : 'picker-select-current',
+            { name: displayPath(dir.split('/').pop() || '/', activeDescriptor.value?.pathStyle || 'posix') },
+          ))]),
         ]),
         h('div', { class: 'ccm-picker-breadcrumb' }, breadcrumbs),
         h('div', { class: 'ccm-picker-list' }, pickerLoading.value
@@ -4952,8 +5023,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
                 }, [
                   IconFolder(14),
                   h('div', { class: 'ccm-picker-item-info' }, [
-                    h('span', { class: 'ccm-picker-item-name' }, entry.name),
-                    h('span', { class: 'ccm-picker-item-path' }, entry.path),
+                    h('span', { class: 'ccm-picker-item-name' }, displayPath(entry.name, activeDescriptor.value?.pathStyle || 'posix')),
+                    h('span', { class: 'ccm-picker-item-path' }, displayPath(entry.path, activeDescriptor.value?.pathStyle || 'posix')),
                   ]),
                   IconChevronRight(14),
                 ]))
@@ -5378,12 +5449,15 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       ]),
       h('div', {
         class: ['ccm-browser-scope-summary', overlay ? 'ccm-browser-search-breadcrumb' : ''],
-        title: overlay?.scopePath || committedSelection.value.path,
+        title: displayPath(
+          overlay?.scopePath || committedSelection.value.path,
+          activeDescriptor.value?.pathStyle || 'posix',
+        ),
       }, [
         h('span', {}, overlay ? t('search') : t(committedSelection.value.mode === 'subtree' ? 'subtree' : 'exact-directory')),
         h('span', { class: 'ccm-browser-scope-path' }, overlay
-          ? `${overlay.scopePath ? overlay.scopePath : t('global')} · “${overlay.query}”`
-          : committedSelection.value.path),
+          ? `${overlay.scopePath ? displayPath(overlay.scopePath, activeDescriptor.value?.pathStyle || 'posix') : t('global')} · “${overlay.query}”`
+          : displayPath(committedSelection.value.path, activeDescriptor.value?.pathStyle || 'posix')),
         overlay
           ? h('button', {
               class: 'ccm-icon-btn',
@@ -5819,7 +5893,10 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
             }, [copiedSessionId.value ? IconCheck(13) : IconCopy(13)]),
             copiedSessionId.value ? h('span', { class: 'ccm-browser-copy-feedback', 'aria-live': 'polite' }, t('copied')) : null,
           ]),
-          h('div', { class: 'ccm-browser-transcript-cwd', title: session.rootPath }, session.rootPath),
+          h('div', {
+            class: 'ccm-browser-transcript-cwd',
+            title: displayPath(session.rootPath, activeDescriptor.value?.pathStyle || 'posix'),
+          }, displayPath(session.rootPath, activeDescriptor.value?.pathStyle || 'posix')),
           h('div', { class: 'ccm-browser-transcript-span', title: `${session.createdAt} → ${session.lastActiveAt}` }, formatSessionSpan(session.createdAt, session.lastActiveAt, locale(), t)),
         ]),
         h('div', { class: 'ccm-browser-pane-actions' }, [

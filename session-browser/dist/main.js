@@ -839,6 +839,14 @@ function resolveLocale(setting, documentLanguage = "") {
 }
 
 // src/ui.ts
+function displayPath(value, style) {
+  if (style !== "windows") return value;
+  const syntheticPrefix = value.startsWith("/\\\\?\\") ? value.slice(1) : value;
+  const unc = syntheticPrefix.match(/^\\\\\?\\UNC\\(.+)$/i);
+  if (unc) return `\\\\${unc[1]}`;
+  const drive = syntheticPrefix.match(/^\\\\\?\\([A-Za-z]:\\.*)$/);
+  return drive ? drive[1] : value;
+}
 var STORAGE_KEYS = {
   locale: "locale",
   activeAgent: "activeAgent",
@@ -894,6 +902,15 @@ var DEFAULT_RESUME_ARGV_BY_AGENT = /* @__PURE__ */ new Map([
 ]);
 var LEGACY_RESUME = { argv: ["claude", "--resume"] };
 var RESUME_ARG_TOKEN_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+var WINDOWS_CODEX_SHIM_RE = /^(?:[A-Za-z]:\\|\\\\)[^"&|<>()^%!\r\n]*\\codex\.cmd$/i;
+function terminalResumeArgv(agent, pathStyle, resumeArgv, sessionId, windowsCommand) {
+  if (!SESSION_ID_RE.test(sessionId)) throw new Error("Invalid session id");
+  const isBuiltInWindowsCodex = agent === "codex" && pathStyle === "windows" && resumeArgv.length === 2 && resumeArgv[0] === "codex" && resumeArgv[1] === "resume" && typeof windowsCommand === "string" && WINDOWS_CODEX_SHIM_RE.test(windowsCommand);
+  if (isBuiltInWindowsCodex && windowsCommand) {
+    return ["cmd.exe", "/D", "/V:OFF", "/S", "/C", "call", windowsCommand, "resume", sessionId];
+  }
+  return [...resumeArgv, sessionId];
+}
 function localizedExportError(failure, destination, t) {
   switch (failure.error) {
     case "export-destination-outside-home":
@@ -1494,8 +1511,9 @@ function deriveSessionPathTree(sessions, visibleRoot = deepestCommonAncestor(ses
   const rootPath = normalizePath(visibleRoot);
   const scoped = sessions.filter((session) => isPathWithin(rootPath, session.rootPath));
   if (scoped.length === 0) return null;
-  const makeNode = (nodePath) => ({
+  const makeNode = (nodePath, ioPath = nodePath) => ({
     path: nodePath,
+    ioPath,
     name: pathName(nodePath),
     directActiveCount: 0,
     directArchiveCount: 0,
@@ -1504,7 +1522,7 @@ function deriveSessionPathTree(sessions, visibleRoot = deepestCommonAncestor(ses
     newestLastActiveAt: "",
     childrenByName: /* @__PURE__ */ new Map()
   });
-  const root = makeNode(rootPath);
+  const root = makeNode(rootPath, visibleRoot);
   for (const session of scoped) {
     const sessionPath = normalizePath(session.rootPath);
     const relativeParts = sessionPath === rootPath ? [] : sessionPath.slice(rootPath === "/" ? 1 : rootPath.length + 1).split("/").filter(Boolean);
@@ -1521,6 +1539,7 @@ function deriveSessionPathTree(sessions, visibleRoot = deepestCommonAncestor(ses
       node = child;
       chain.push(node);
     }
+    node.ioPath = session.rootPath;
     if (session.partition === "active") node.directActiveCount += 1;
     else node.directArchiveCount += 1;
     for (const ancestor of chain) {
@@ -1531,6 +1550,7 @@ function deriveSessionPathTree(sessions, visibleRoot = deepestCommonAncestor(ses
   }
   const freezeNode = (node) => ({
     path: node.path,
+    ioPath: node.ioPath,
     name: node.name,
     directActiveCount: node.directActiveCount,
     directArchiveCount: node.directArchiveCount,
@@ -1716,6 +1736,7 @@ function activate(ctx) {
     return parsed.map((value) => {
       const caps = value?.capabilities;
       const resumeArgv = value?.resume?.argv;
+      const windowsCommand = value?.resume?.windowsCommand;
       const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id);
       const validCapabilities = caps && ["archive", "rename", "delete", "deleteRequiresArchived", "nativeIndex", "tokenStats", "originFilter"].every((key) => typeof caps[key] === "boolean");
       if (!value || typeof value.id !== "string" || typeof value.available !== "boolean" || !validCapabilities) {
@@ -1725,18 +1746,23 @@ function activate(ctx) {
       if (!validResumeArgv && !defaultResumeArgv) throw new Error(t("agent-discovery-invalid"));
       return {
         id: value.id,
+        pathStyle: value.pathStyle === "windows" ? "windows" : "posix",
         available: value.available,
         degraded: value.degraded === true,
         unavailableReason: typeof value.unavailableReason === "string" ? value.unavailableReason : void 0,
         degradedReason: typeof value.degradedReason === "string" ? value.degradedReason : void 0,
         capabilities: caps,
-        resume: { argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv] }
+        resume: {
+          argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv],
+          ...typeof windowsCommand === "string" && WINDOWS_CODEX_SHIM_RE.test(windowsCommand) ? { windowsCommand } : {}
+        }
       };
     });
   }
   function legacyAgentDescriptor() {
     return {
       id: DEFAULT_AGENT,
+      pathStyle: "posix",
       available: true,
       degraded: false,
       capabilities: LEGACY_CAPABILITIES,
@@ -3731,11 +3757,17 @@ function createPaneRuntime(ctx, props, shared) {
     try {
       await terminal.createTerminalTab({
         cwd: resumable.rootPath,
-        argv: [...activeResumeArgv.value, resumable.id],
+        argv: terminalResumeArgv(
+          activeAgent.value,
+          activeDescriptor.value?.pathStyle || "posix",
+          activeResumeArgv.value,
+          resumable.id,
+          activeDescriptor.value?.resume.windowsCommand
+        ),
         title: resolveSessionTitle(resumable).slice(0, 24)
       });
-    } catch {
-      if (isCurrent()) showError(t("error-open-terminal"), {
+    } catch (caught) {
+      if (isCurrent()) showError(cliError(caught?.message || t("error-open-terminal")), {
         label: t("copy-command"),
         run: () => {
           void copyResumeCommand(resumable, isCurrent);
@@ -4361,9 +4393,10 @@ function createPaneRuntime(ctx, props, shared) {
     const selectMode2 = pinsSelectMode.value;
     const metadata = pinMetadata(pin);
     const name = pathName(pin.path);
+    const displayName = displayPath(name, activeDescriptor.value?.pathStyle || "posix");
     const count = t(metadata.count === 1 ? "pin-session-count-one" : "pin-session-count-other", { n: metadata.count });
     const activity = t("pin-last-activity", { time: formatRelativeTime(metadata.lastActiveAt, t) });
-    const missingTitle = pin.exists ? pin.path : t("pin-folder-missing");
+    const missingTitle = pin.exists ? displayPath(pin.path, activeDescriptor.value?.pathStyle || "posix") : t("pin-folder-missing");
     const activePath = pinsSelection.value.activePath;
     const active = activePath !== null && normalizePath(pin.path) === normalizePath(activePath);
     const activateOrToggle = (shiftKey = false) => {
@@ -4398,14 +4431,14 @@ function createPaneRuntime(ctx, props, shared) {
         type: "checkbox",
         checked: pinsSelection.value.selected.has(pin.path),
         disabled: pinsBulkRunning.value,
-        "aria-label": t("pin-select-folder", { name }),
+        "aria-label": t("pin-select-folder", { name: displayName }),
         onClick: (event) => {
           event.stopPropagation();
           reducePinsSelection(event.shiftKey ? { type: "shift-range", key: pin.path, pageKeys: pinPaths() } : { type: "toggle", key: pin.path });
         }
       }) : null,
       IconFolder(14),
-      h("span", { class: "ccm-browser-pin-name" }, name),
+      h("span", { class: "ccm-browser-pin-name" }, displayName),
       h("span", { class: "ccm-browser-pin-meta" }, [
         h("span", {}, count),
         h("span", {}, activity)
@@ -4413,8 +4446,8 @@ function createPaneRuntime(ctx, props, shared) {
       pinsSelectMode.value ? h("button", {
         class: "ccm-icon-btn ccm-browser-pin-move",
         type: "button",
-        title: t("pin-move-up", { name }),
-        "aria-label": t("pin-move-up", { name }),
+        title: t("pin-move-up", { name: displayName }),
+        "aria-label": t("pin-move-up", { name: displayName }),
         disabled: pinsBulkRunning.value || index === 0,
         onClick: (event) => {
           event?.stopPropagation();
@@ -4424,8 +4457,8 @@ function createPaneRuntime(ctx, props, shared) {
       pinsSelectMode.value ? h("button", {
         class: "ccm-icon-btn ccm-browser-pin-move",
         type: "button",
-        title: t("pin-move-down", { name }),
-        "aria-label": t("pin-move-down", { name }),
+        title: t("pin-move-down", { name: displayName }),
+        "aria-label": t("pin-move-down", { name: displayName }),
         disabled: pinsBulkRunning.value || index === pinsSelection.value.pins.length - 1,
         onClick: (event) => {
           event?.stopPropagation();
@@ -4531,7 +4564,7 @@ function createPaneRuntime(ctx, props, shared) {
     ]);
   }
   function renderTreeNode(node, depth) {
-    const selected = committedSelection.value.path === node.path;
+    const selected = normalizePath(committedSelection.value.path) === node.path;
     const highlighted = transientHighlightPath.value === node.path;
     const expanded = expandedPaths.value.has(node.path);
     const hasChildren = node.children.length > 0;
@@ -4548,8 +4581,8 @@ function createPaneRuntime(ctx, props, shared) {
           highlighted ? "ccm-browser-tree-node-highlight" : ""
         ],
         style: { paddingLeft: `${8 + depth * 16}px` },
-        title: node.path,
-        onClick: () => selectNode(node.path)
+        title: displayPath(node.ioPath, activeDescriptor.value?.pathStyle || "posix"),
+        onClick: () => selectNode(node.ioPath)
       }, [
         hasChildren ? h("button", {
           class: "ccm-icon-btn ccm-browser-tree-chevron",
@@ -4562,7 +4595,7 @@ function createPaneRuntime(ctx, props, shared) {
           }
         }, [expanded ? IconChevronDown(14) : IconChevronRight(14)]) : h("span", { class: "ccm-browser-tree-chevron-spacer" }),
         IconFolder(15),
-        h("span", { class: "ccm-browser-tree-label" }, node.name),
+        h("span", { class: "ccm-browser-tree-label" }, displayPath(node.name, activeDescriptor.value?.pathStyle || "posix")),
         h("span", { class: "ccm-browser-tree-badge", title: badgeTitle }, [
           h("span", { class: "ccm-browser-tree-count ccm-browser-tree-count-active" }, t("tree-count-active", { n: node.activeCount })),
           h("span", { class: "ccm-browser-tree-count ccm-browser-tree-count-archive" }, t("tree-count-archive", { n: node.archiveCount })),
@@ -4641,7 +4674,10 @@ function createPaneRuntime(ctx, props, shared) {
             }, [IconPencil(15)])
           ])
         ]),
-        h("div", { class: "ccm-browser-root-path", title: visibleRoot.value }, visibleRoot.value),
+        h("div", {
+          class: "ccm-browser-root-path",
+          title: displayPath(visibleRoot.value, activeDescriptor.value?.pathStyle || "posix")
+        }, displayPath(visibleRoot.value, activeDescriptor.value?.pathStyle || "posix")),
         h("div", { class: "ccm-browser-tree-body" }, [
           loading.value ? h("div", { class: "ccm-browser-pane-state" }, t("building-index")) : tree.value ? renderTreeNode(tree.value, 0) : h("div", { class: "ccm-browser-pane-state" }, t("no-indexed-sessions"))
         ])
@@ -4776,7 +4812,10 @@ function createPaneRuntime(ctx, props, shared) {
           title,
           titles.secondary ? h("span", { class: "ccm-browser-title-sub" }, titles.secondary) : null
         ]),
-        h("span", { class: "ccm-browser-search-path", title: session.rootPath }, session.rootPath)
+        h("span", {
+          class: "ccm-browser-search-path",
+          title: displayPath(session.rootPath, activeDescriptor.value?.pathStyle || "posix")
+        }, displayPath(session.rootPath, activeDescriptor.value?.pathStyle || "posix"))
       ]),
       h("div", { class: "ccm-browser-search-match" }, result.match),
       h("div", { class: "ccm-browser-session-footer" }, [
@@ -4826,7 +4865,7 @@ function createPaneRuntime(ctx, props, shared) {
           event.preventDefault();
           void navigatePickerDir(target);
         }
-      }, segment));
+      }, displayPath(segment, activeDescriptor.value?.pathStyle || "posix")));
     }
     return h("div", {
       class: "ccm-picker-overlay",
@@ -4875,7 +4914,12 @@ function createPaneRuntime(ctx, props, shared) {
             }
           }, [IconCheck(14), h("span", {}, t(selectingExportDestination ? "picker-export-use-manual-path" : "picker-use-manual-path"))])
         ]),
-        h("div", { class: "ccm-picker-current" }, [IconFolder(14), h("span", {}, t("picker-current", { path: dir }))]),
+        h("div", { class: "ccm-picker-current" }, [
+          IconFolder(14),
+          h("span", {}, t("picker-current", {
+            path: displayPath(dir, activeDescriptor.value?.pathStyle || "posix")
+          }))
+        ]),
         h("div", { class: "ccm-picker-actions" }, [
           h("button", {
             class: "ccm-picker-action-btn",
@@ -4883,7 +4927,10 @@ function createPaneRuntime(ctx, props, shared) {
             onClick: () => {
               void validateAndCommitRoot(dir);
             }
-          }, [IconCheck(14), h("span", {}, t(selectingExportDestination ? "picker-export-select-current" : "picker-select-current", { name: dir.split("/").pop() || "/" }))])
+          }, [IconCheck(14), h("span", {}, t(
+            selectingExportDestination ? "picker-export-select-current" : "picker-select-current",
+            { name: displayPath(dir.split("/").pop() || "/", activeDescriptor.value?.pathStyle || "posix") }
+          ))])
         ]),
         h("div", { class: "ccm-picker-breadcrumb" }, breadcrumbs),
         h("div", { class: "ccm-picker-list" }, pickerLoading.value ? h("div", { class: "ccm-picker-empty" }, [h("span", { class: "ccm-browser-spinner" }), h("span", {}, t("picker-loading"))]) : pickerError.value ? h("div", { class: "ccm-picker-empty", role: "alert" }, pickerError.value) : pickerEntries.value.length ? pickerEntries.value.map((entry) => h("div", {
@@ -4902,8 +4949,8 @@ function createPaneRuntime(ctx, props, shared) {
         }, [
           IconFolder(14),
           h("div", { class: "ccm-picker-item-info" }, [
-            h("span", { class: "ccm-picker-item-name" }, entry.name),
-            h("span", { class: "ccm-picker-item-path" }, entry.path)
+            h("span", { class: "ccm-picker-item-name" }, displayPath(entry.name, activeDescriptor.value?.pathStyle || "posix")),
+            h("span", { class: "ccm-picker-item-path" }, displayPath(entry.path, activeDescriptor.value?.pathStyle || "posix"))
           ]),
           IconChevronRight(14)
         ])) : h("div", { class: "ccm-picker-empty" }, t("picker-no-subdirs")))
@@ -5320,10 +5367,13 @@ function createPaneRuntime(ctx, props, shared) {
       ]),
       h("div", {
         class: ["ccm-browser-scope-summary", overlay ? "ccm-browser-search-breadcrumb" : ""],
-        title: overlay?.scopePath || committedSelection.value.path
+        title: displayPath(
+          overlay?.scopePath || committedSelection.value.path,
+          activeDescriptor.value?.pathStyle || "posix"
+        )
       }, [
         h("span", {}, overlay ? t("search") : t(committedSelection.value.mode === "subtree" ? "subtree" : "exact-directory")),
-        h("span", { class: "ccm-browser-scope-path" }, overlay ? `${overlay.scopePath ? overlay.scopePath : t("global")} \xB7 \u201C${overlay.query}\u201D` : committedSelection.value.path),
+        h("span", { class: "ccm-browser-scope-path" }, overlay ? `${overlay.scopePath ? displayPath(overlay.scopePath, activeDescriptor.value?.pathStyle || "posix") : t("global")} \xB7 \u201C${overlay.query}\u201D` : displayPath(committedSelection.value.path, activeDescriptor.value?.pathStyle || "posix")),
         overlay ? h("button", {
           class: "ccm-icon-btn",
           title: t("leave-full-text-results"),
@@ -5756,7 +5806,10 @@ function createPaneRuntime(ctx, props, shared) {
             }, [copiedSessionId.value ? IconCheck(13) : IconCopy(13)]),
             copiedSessionId.value ? h("span", { class: "ccm-browser-copy-feedback", "aria-live": "polite" }, t("copied")) : null
           ]),
-          h("div", { class: "ccm-browser-transcript-cwd", title: session.rootPath }, session.rootPath),
+          h("div", {
+            class: "ccm-browser-transcript-cwd",
+            title: displayPath(session.rootPath, activeDescriptor.value?.pathStyle || "posix")
+          }, displayPath(session.rootPath, activeDescriptor.value?.pathStyle || "posix")),
           h("div", { class: "ccm-browser-transcript-span", title: `${session.createdAt} \u2192 ${session.lastActiveAt}` }, formatSessionSpan(session.createdAt, session.lastActiveAt, locale(), t))
         ]),
         h("div", { class: "ccm-browser-pane-actions" }, [
@@ -5970,6 +6023,7 @@ export {
   dateRangeMatches,
   deepestCommonAncestor,
   deriveSessionPathTree,
+  displayPath,
   filterBranchOptions,
   filterSessions,
   findMinimapActiveTurn,
@@ -5996,5 +6050,6 @@ export {
   selectionReducer,
   sessionKey,
   shQuote,
-  sortSessions
+  sortSessions,
+  terminalResumeArgv
 };

@@ -1,0 +1,5 @@
+native/windows-launcher.rs text eol=lf
+native/windows-launcher.provenance.json text eol=lf
+native/write-windows-launcher-provenance.js text eol=lf
+native/rust-toolchain.toml text eol=lf
+dist/cli-wrapper.exe binary

@@ -571,6 +571,33 @@ test('current folder pin prefers an exact case-preserving path before folded mat
   }
 })
 
+test('Windows tree selection pins raw drive and UNC paths instead of POSIX tree keys', async () => {
+  for (const windowsPath of ['D:\\AIProgram\\Codex\\core', '\\\\server\\share\\repo']) {
+    const harness = await mountPins({ sessions: [session('windows-folder', windowsPath)] })
+    try {
+      const treeNode = flatten(harness.render()).find(node => hasClass(node, 'ccm-browser-tree-node')
+        && node.props?.title === windowsPath)
+      assert.ok(treeNode, 'Windows cwd tree node was not rendered with its raw path')
+      treeNode.props.onClick()
+
+      const callStart = harness.calls.length
+      const toggle = flatten(harness.render()).find(node => node?.tag === 'button'
+        && node.props?.title === dictionaries.en['pin-current-folder-add'])
+      assert.equal(toggle.props.disabled, false)
+      toggle.props.onClick()
+      await flush(4)
+
+      assert.deepEqual(harness.calls.slice(callStart).find(args => args[0] === 'add-pin'), [
+        'add-pin',
+        'claude-code',
+        windowsPath,
+      ])
+    } finally {
+      harness.cleanup()
+    }
+  }
+})
+
 test('pins edit mode and selection remain isolated from session select mode and members', async () => {
   const harness = await mountPins({
     pinsByAgent: { 'claude-code': [{ path: '/pinned', addedAt: 1, exists: true }], codex: [] },

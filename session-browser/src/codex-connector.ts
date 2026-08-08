@@ -1,10 +1,11 @@
 import * as fs from 'fs'
 import * as path from 'path'
 import * as readline from 'readline'
+import * as os from 'os'
 import { spawnSync } from 'child_process'
 import { LIVE_WINDOW_MS, type IndexedSession, type Message, type MutationResult, type SessionConnector } from './history-cli'
 
-const HOME = process.env.HOME || '/root'
+const HOME = process.env.HOME || os.homedir()
 const LIVE_DB_PATH = path.join(HOME, '.codex', 'state_5.sqlite')
 const LEGACY_DB_PATH = path.join(HOME, '.codex', 'sqlite', 'state_5.sqlite')
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -326,6 +327,10 @@ function isThreadLive(row: ThreadRow): boolean {
   return Number.isFinite(recencyMs) && Date.now() - recencyMs < LIVE_WINDOW_MS
 }
 
+export function codexPathIdentity(cwd: string): Pick<IndexedSession, 'rootPath' | 'attributionKey'> {
+  return { rootPath: cwd, attributionKey: cwd }
+}
+
 function mapThread(row: ThreadRow): IndexedSession {
   let stat: fs.Stats | null = null
   try {
@@ -340,8 +345,7 @@ function mapThread(row: ThreadRow): IndexedSession {
   return {
     id: row.id,
     agent: 'codex',
-    rootPath: row.cwd,
-    attributionKey: row.cwd,
+    ...codexPathIdentity(row.cwd),
     title: row.title.slice(0, 200),
     createdAt: toIsoTimestamp(row.created_at_ms, row.created_at),
     lastActiveAt: toIsoTimestamp(row.recency_at_ms, row.recency_at),
@@ -590,6 +594,7 @@ async function searchSessions(query: string, scope?: string) {
 
 export const codexConnector: SessionConnector = {
   id: 'codex',
+  pathStyle: process.platform === 'win32' ? 'windows' : 'posix',
   capabilities: {
     archive: true,
     rename: false,

@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as readline from 'readline'
 import * as crypto from 'crypto'
+import * as os from 'os'
 import { codexConnector } from './codex-connector'
 
 let settingsMigrationAttempted = false
@@ -30,7 +31,7 @@ export function migratePluginSettings(pluginDataBase: string, legacyDirName: str
 }
 
 // --- Paths ---
-const HOME = process.env.HOME || '/root'
+const HOME = process.env.HOME || os.homedir()
 const CLAUDE_DIR = path.join(HOME, '.claude')
 const PROJECTS_DIR = process.env.CC_SB_PROJECTS_DIR || path.join(CLAUDE_DIR, 'projects')
 const ARCHIVE_DIR = process.env.CC_SB_ARCHIVE_DIR || path.join(CLAUDE_DIR, 'projects-archive')
@@ -47,8 +48,9 @@ export interface ConnectorCapabilities { archive: boolean; rename: boolean; dele
 export interface ConnectorAvailability { available: boolean; degraded: boolean; reason?: string }
 export interface SessionConnector {
   id: AgentId
+  pathStyle: 'windows' | 'posix'
   capabilities: ConnectorCapabilities
-  resume: { argv: string[] }
+  resume: { argv: string[]; windowsCommand?: string }
   isAvailable(): ConnectorAvailability
   buildIndex(refresh: boolean): void
   indexSessions(refresh: boolean): IndexedSession[]
@@ -311,6 +313,19 @@ function loadPinsForMutation(agent: AgentId, resetCorrupt: boolean): PinMutation
   return { pins: [], resetCorrupt: true }
 }
 
+function fsyncDirectory(directoryPath: string) {
+  const directoryFd = fs.openSync(directoryPath, 'r')
+  try {
+    fs.fsyncSync(directoryFd)
+  } catch (error: any) {
+    const unsupportedOnWindows = process.platform === 'win32'
+      && ['EINVAL', 'ENOTSUP', 'EPERM'].includes(error?.code)
+    if (!unsupportedOnWindows) throw error
+  } finally {
+    fs.closeSync(directoryFd)
+  }
+}
+
 function writePinStore(agent: AgentId, pins: StoredPin[]) {
   fs.mkdirSync(PINS_DIR, { recursive: true })
   pinTempCounter = (pinTempCounter + 1) >>> 0
@@ -329,12 +344,7 @@ function writePinStore(agent: AgentId, pins: StoredPin[]) {
     fs.closeSync(descriptor)
     fs.renameSync(tempPath, destination)
 
-    const directoryFd = fs.openSync(PINS_DIR, 'r')
-    try {
-      fs.fsyncSync(directoryFd)
-    } finally {
-      fs.closeSync(directoryFd)
-    }
+    fsyncDirectory(PINS_DIR)
   } finally {
     if (fd !== undefined) {
       try { fs.closeSync(fd) } catch { /* preserve the primary failure */ }
@@ -542,7 +552,8 @@ function validateEncodedPath(value: string) {
 }
 
 function validateAbsolutePath(value: string) {
-  if (!path.isAbsolute(value) || value.split(path.sep).some(segment => segment === '.' || segment === '..')) {
+  const segments = process.platform === 'win32' ? value.split(/[\\/]/) : value.split(path.sep)
+  if (!path.isAbsolute(value) || segments.some(segment => segment === '.' || segment === '..')) {
     fail('invalid-absolute-path', 'Path must be absolute and contain no traversal segments')
   }
 }
@@ -1070,6 +1081,7 @@ function resolveAllowMissing(filePath: string): string {
     }
   }
 }
+
 
 function cleanupCreatedExportDirectories(firstCreated: string | undefined, requested: string) {
   if (!firstCreated) return
@@ -1873,6 +1885,7 @@ function cmdListRecent(limit = 30) {
 
 const claudeCodeConnector: SessionConnector = {
   id: 'claude-code',
+  pathStyle: process.platform === 'win32' ? 'windows' : 'posix',
   capabilities: {
     archive: true,
     // No rename write path exists.
@@ -1921,16 +1934,34 @@ function findConnector(args: string[]): { connector: SessionConnector; rest: str
 function cmdAgents() {
   output(CONNECTORS.map(connector => {
     const availability = connector.isAvailable()
+    const windowsCommand = connector.id === 'codex' ? resolveWindowsCommandShim('codex.cmd') : undefined
     return {
       id: connector.id,
+      pathStyle: connector.pathStyle,
       available: availability.available,
       ...(!availability.available && availability.reason ? { unavailableReason: availability.reason } : {}),
       ...(connector.id === 'codex' ? { degraded: availability.degraded } : {}),
       ...(availability.degraded && availability.reason ? { degradedReason: availability.reason } : {}),
       capabilities: connector.capabilities,
-      resume: connector.resume,
+      resume: {
+        ...connector.resume,
+        ...(windowsCommand ? { windowsCommand } : {}),
+      },
     }
   }))
+}
+
+function resolveWindowsCommandShim(fileName: string): string | undefined {
+  if (process.platform !== 'win32') return undefined
+  for (const entry of (process.env.PATH || '').split(path.delimiter)) {
+    const directory = entry.trim().replace(/^"(.*)"$/, '$1')
+    if (!path.isAbsolute(directory)) continue
+    const candidate = path.join(directory, fileName)
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate
+    } catch { /* missing and inaccessible PATH entries are skipped */ }
+  }
+  return undefined
 }
 
 function cmdListDirs(dirPath: string) {

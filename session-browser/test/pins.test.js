@@ -405,7 +405,7 @@ test('atomic replace exposes the old list until one whole new list is published'
   assert.deepEqual(finalPaths, [fs.realpathSync.native(newFolder), oldPath])
 })
 
-test('two genuinely overlapping mutations keep valid JSON and lose at most one edit', async () => {
+test('two genuinely overlapping mutations keep valid JSON and lose at most one edit', { skip: process.platform === 'win32' }, async () => {
   const base = mkdir('concurrent-base')
   const left = mkdir('concurrent-left')
   const right = mkdir('concurrent-right')
@@ -463,7 +463,7 @@ test('a pre-existing process temp makes wx fail without truncating or unlinking 
   assert.equal(fs.existsSync(pinFile()), false)
 })
 
-test('replacement destination has mode 0600 under a 0022 umask', () => {
+test('replacement destination has mode 0600 under a 0022 umask', { skip: process.platform === 'win32' }, () => {
   const folder = mkdir('permissions')
   const preload = writePreload('umask.cjs', 'process.umask(0o022)\n')
   runJson(['add-pin', AGENT, folder], { NODE_OPTIONS: nodeOptions(preload) })
@@ -586,7 +586,7 @@ test('SIGKILL during the write protocol leaves the previous file byte-intact', a
   assert.doesNotThrow(() => JSON.parse(fs.readFileSync(pinFile(), 'utf8')))
 })
 
-test('a real EACCES read failure aborts closed and writes nothing', () => {
+test('a real EACCES read failure aborts closed and writes nothing', { skip: process.platform === 'win32' }, () => {
   writeStore([storedPin('/read-error-original')])
   const previous = fs.readFileSync(pinFile())
   const folder = mkdir('read-error-new')

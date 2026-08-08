@@ -29,6 +29,7 @@ const {
   cleanFirstPrompt,
   DEFAULT_PARTITION_SORT,
   deriveSessionPathTree,
+  displayPath,
   filterBranchOptions,
   filterSessions,
   isSafeTranscriptHref,
@@ -50,6 +51,7 @@ const {
   sampleMinimapTurnIndices,
   shQuote,
   sortSessions,
+  terminalResumeArgv,
 } = require(bundlePath)
 const { computeEditDiff, DIFF_MAX_LINES, isFullDiffSafe } = require(diffBundlePath)
 
@@ -60,6 +62,31 @@ test('filterBranchOptions filters case-insensitive substrings and preserves empt
   assert.deepEqual(filterBranchOptions(options, 'SEAr'), ['feature/Search'])
   assert.deepEqual(filterBranchOptions(options, '  '), options)
   assert.deepEqual(filterBranchOptions(options, 'missing'), [])
+})
+
+test('displayPath hides only valid Windows extended drive and UNC prefixes', () => {
+  assert.equal(displayPath('\\\\?\\C:\\Users\\dev\\repo', 'windows'), 'C:\\Users\\dev\\repo')
+  assert.equal(displayPath('/\\\\?\\C:\\Users\\dev\\repo', 'windows'), 'C:\\Users\\dev\\repo')
+  assert.equal(displayPath('\\\\?\\UNC\\server\\share\\repo', 'windows'), '\\\\server\\share\\repo')
+  assert.equal(displayPath('\\\\?\\Volume{abc}\\repo', 'windows'), '\\\\?\\Volume{abc}\\repo')
+  assert.equal(displayPath('\\\\?\\C:\\literal', 'posix'), '\\\\?\\C:\\literal')
+})
+
+test('terminalResumeArgv shells only the trusted built-in Windows Codex shim', () => {
+  const id = '16161616-1616-1616-1616-161616161616'
+  const windowsCommand = 'C:\\Program Files\\Codex\\codex.cmd'
+  assert.deepEqual(
+    terminalResumeArgv('codex', 'windows', ['codex', 'resume'], id, windowsCommand),
+    ['cmd.exe', '/D', '/V:OFF', '/S', '/C', 'call', windowsCommand, 'resume', id],
+  )
+  assert.deepEqual(terminalResumeArgv('codex', 'posix', ['codex', 'resume'], id, windowsCommand), ['codex', 'resume', id])
+  assert.deepEqual(terminalResumeArgv('claude-code', 'windows', ['claude', '--resume'], id, windowsCommand), ['claude', '--resume', id])
+  assert.deepEqual(terminalResumeArgv('codex', 'windows', ['custom.exe', 'resume'], id, windowsCommand), ['custom.exe', 'resume', id])
+  assert.deepEqual(terminalResumeArgv('codex', 'windows', ['codex', 'resume'], id, 'C:\\bad%PATH\\codex.cmd'), ['codex', 'resume', id])
+  assert.throws(
+    () => terminalResumeArgv('codex', 'windows', ['codex', 'resume'], 'bad&id', windowsCommand),
+    /Invalid session id/,
+  )
 })
 
 test('transcript batches advance by 50 without exceeding the parsed message count', () => {

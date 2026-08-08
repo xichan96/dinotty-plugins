@@ -27,13 +27,15 @@ var fs2 = __toESM(require("fs"));
 var path2 = __toESM(require("path"));
 var readline2 = __toESM(require("readline"));
 var crypto = __toESM(require("crypto"));
+var os2 = __toESM(require("os"));
 
 // src/codex-connector.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
 var readline = __toESM(require("readline"));
+var os = __toESM(require("os"));
 var import_child_process = require("child_process");
-var HOME = process.env.HOME || "/root";
+var HOME = process.env.HOME || os.homedir();
 var LIVE_DB_PATH = path.join(HOME, ".codex", "state_5.sqlite");
 var LEGACY_DB_PATH = path.join(HOME, ".codex", "sqlite", "state_5.sqlite");
 var SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -293,6 +295,9 @@ function isThreadLive(row) {
   const recencyMs = threadRecencyMs(row);
   return Number.isFinite(recencyMs) && Date.now() - recencyMs < LIVE_WINDOW_MS;
 }
+function codexPathIdentity(cwd) {
+  return { rootPath: cwd, attributionKey: cwd };
+}
 function mapThread(row) {
   let stat = null;
   try {
@@ -308,8 +313,7 @@ function mapThread(row) {
   return {
     id: row.id,
     agent: "codex",
-    rootPath: row.cwd,
-    attributionKey: row.cwd,
+    ...codexPathIdentity(row.cwd),
     title: row.title.slice(0, 200),
     createdAt: toIsoTimestamp(row.created_at_ms, row.created_at),
     lastActiveAt: toIsoTimestamp(row.recency_at_ms, row.recency_at),
@@ -536,6 +540,7 @@ async function searchSessions(query, scope) {
 }
 var codexConnector = {
   id: "codex",
+  pathStyle: process.platform === "win32" ? "windows" : "posix",
   capabilities: {
     archive: true,
     rename: false,
@@ -611,7 +616,7 @@ function migratePluginSettings(pluginDataBase, legacyDirName, currentDirName) {
   } catch {
   }
 }
-var HOME2 = process.env.HOME || "/root";
+var HOME2 = process.env.HOME || os2.homedir();
 var CLAUDE_DIR = path2.join(HOME2, ".claude");
 var PROJECTS_DIR = process.env.CC_SB_PROJECTS_DIR || path2.join(CLAUDE_DIR, "projects");
 var ARCHIVE_DIR = process.env.CC_SB_ARCHIVE_DIR || path2.join(CLAUDE_DIR, "projects-archive");
@@ -797,6 +802,17 @@ function loadPinsForMutation(agent, resetCorrupt) {
   }
   return { pins: [], resetCorrupt: true };
 }
+function fsyncDirectory(directoryPath) {
+  const directoryFd = fs2.openSync(directoryPath, "r");
+  try {
+    fs2.fsyncSync(directoryFd);
+  } catch (error) {
+    const unsupportedOnWindows = process.platform === "win32" && ["EINVAL", "ENOTSUP", "EPERM"].includes(error?.code);
+    if (!unsupportedOnWindows) throw error;
+  } finally {
+    fs2.closeSync(directoryFd);
+  }
+}
 function writePinStore(agent, pins) {
   fs2.mkdirSync(PINS_DIR, { recursive: true });
   pinTempCounter = pinTempCounter + 1 >>> 0;
@@ -814,12 +830,7 @@ function writePinStore(agent, pins) {
     fd = void 0;
     fs2.closeSync(descriptor);
     fs2.renameSync(tempPath, destination);
-    const directoryFd = fs2.openSync(PINS_DIR, "r");
-    try {
-      fs2.fsyncSync(directoryFd);
-    } finally {
-      fs2.closeSync(directoryFd);
-    }
+    fsyncDirectory(PINS_DIR);
   } finally {
     if (fd !== void 0) {
       try {
@@ -1012,7 +1023,8 @@ function validateEncodedPath(value) {
   if (!ENCODED_PATH_RE.test(value)) fail("invalid-encoded-path", "Encoded path contains invalid characters");
 }
 function validateAbsolutePath(value) {
-  if (!path2.isAbsolute(value) || value.split(path2.sep).some((segment) => segment === "." || segment === "..")) {
+  const segments = process.platform === "win32" ? value.split(/[\\/]/) : value.split(path2.sep);
+  if (!path2.isAbsolute(value) || segments.some((segment) => segment === "." || segment === "..")) {
     fail("invalid-absolute-path", "Path must be absolute and contain no traversal segments");
   }
 }
@@ -2238,6 +2250,7 @@ function cmdListRecent(limit = 30) {
 }
 var claudeCodeConnector = {
   id: "claude-code",
+  pathStyle: process.platform === "win32" ? "windows" : "posix",
   capabilities: {
     archive: true,
     // No rename write path exists.
@@ -2283,16 +2296,34 @@ function findConnector(args) {
 function cmdAgents() {
   output2(CONNECTORS.map((connector) => {
     const availability = connector.isAvailable();
+    const windowsCommand = connector.id === "codex" ? resolveWindowsCommandShim("codex.cmd") : void 0;
     return {
       id: connector.id,
+      pathStyle: connector.pathStyle,
       available: availability.available,
       ...!availability.available && availability.reason ? { unavailableReason: availability.reason } : {},
       ...connector.id === "codex" ? { degraded: availability.degraded } : {},
       ...availability.degraded && availability.reason ? { degradedReason: availability.reason } : {},
       capabilities: connector.capabilities,
-      resume: connector.resume
+      resume: {
+        ...connector.resume,
+        ...windowsCommand ? { windowsCommand } : {}
+      }
     };
   }));
+}
+function resolveWindowsCommandShim(fileName) {
+  if (process.platform !== "win32") return void 0;
+  for (const entry of (process.env.PATH || "").split(path2.delimiter)) {
+    const directory = entry.trim().replace(/^"(.*)"$/, "$1");
+    if (!path2.isAbsolute(directory)) continue;
+    const candidate = path2.join(directory, fileName);
+    try {
+      if (fs2.statSync(candidate).isFile()) return candidate;
+    } catch {
+    }
+  }
+  return void 0;
 }
 function cmdListDirs(dirPath) {
   const resolved = dirPath.replace(/^~/, HOME2);

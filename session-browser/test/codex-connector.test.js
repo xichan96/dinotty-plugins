@@ -11,6 +11,7 @@ function loadCodexResponseParser() {
     ['contentText', /^function contentText\([^]*?^\}/m],
     ['predicate', /^export function isCodexInjectedUserMessage\([^]*?^\}/m],
     ['parser', /^function parseResponseRecord\([^]*?^\}/m],
+    ['pathIdentity', /^export function codexPathIdentity\([^]*?^\}/m],
   ]
   const parts = names.map(([name, pattern]) => {
     const match = source.match(pattern)
@@ -19,7 +20,7 @@ function loadCodexResponseParser() {
   })
   const compiled = esbuild.transformSync([
     ...parts,
-    'module.exports = { CODEX_INJECTED_PREFIXES, isCodexInjectedUserMessage, parseResponseRecord }',
+    'module.exports = { CODEX_INJECTED_PREFIXES, isCodexInjectedUserMessage, parseResponseRecord, codexPathIdentity }',
   ].join('\n'), { loader: 'ts', format: 'cjs', target: 'node18' })
   const loaded = { exports: {} }
   Function('module', 'exports', 'require', compiled.code)(loaded, loaded.exports, require)
@@ -64,4 +65,14 @@ test('Codex response parser explicitly tags only user messages and preserves con
   assert.equal(messages[6].isRealUser, true)
   assert.equal(messages[6].content, '<article>real pasted XML</article>')
   assert.equal(Object.hasOwn(messages[7], 'isRealUser'), false)
+})
+
+test('Codex path identity preserves extended drive and UNC cwd strings byte-for-byte', () => {
+  const { codexPathIdentity } = loadCodexResponseParser()
+  for (const cwd of [
+    '\\\\?\\C:\\Users\\dev\\repo',
+    '\\\\?\\UNC\\server\\share\\repo',
+  ]) {
+    assert.deepEqual(codexPathIdentity(cwd), { rootPath: cwd, attributionKey: cwd })
+  }
 })

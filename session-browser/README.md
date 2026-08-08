@@ -19,6 +19,17 @@ npm install
 npm run build
 ```
 
+### Windows
+
+Windows requires Dinotty 0.19.0 or newer and `node.exe` on `PATH`. The manifest selects the bundled x86-64 native launcher, which forwards arguments directly to Node without a command shell. The Unix Bash wrapper remains the default on other platforms.
+
+When changing `native/windows-launcher.rs`, rebuild the launcher with the pinned Rust toolchain before running the normal build. The launcher build also refreshes the canonical-source and binary hashes in `native/windows-launcher.provenance.json`:
+
+```powershell
+npm run build:windows-launcher
+npm run build
+```
+
 ### Upgrading from `cc-session-browser`
 
 The plugin id changed from `cc-session-browser` to `session-browser`, and dinotty keys plugin settings by id. On its first CLI run, Session Browser copies any missing legacy JSON settings forward automatically. If the plugin directory or symlink under `~/.dinotty/plugins/` still has the old basename, rename it to `session-browser`; the startup scan requires the directory name to match the manifest id exactly and otherwise silently skips the plugin.

@@ -146,7 +146,7 @@ async function mount(indexedSessions, runOverride, confirmOverride = async () =>
         return confirmOverride(message)
       },
     },
-    terminal: { activePaneId: () => null },
+    terminal: lifecycle.terminal || { activePaneId: () => null },
   }
 
   const plugin = activate(ctx)
@@ -452,7 +452,7 @@ test('all export CLI error codes use their localized taxonomy in single and bulk
     [...cliSource.matchAll(/(?:\b(?:fail|exportError)\(\s*['"](export-[^'"]+)['"]|\|\|\s*['"](export-[^'"]+)['"])/g)].map(match => match[1] || match[2]),
   )].sort()
   const localizedExportErrorSource = uiSource.match(
-    /function localizedExportError\b[\s\S]*?\n}\n\nexport function shQuote/,
+    /function localizedExportError\b[\s\S]*?\r?\n}\r?\n\r?\nexport function shQuote/,
   )?.[0] || ''
   const mappedCodes = [...new Set(
     [...localizedExportErrorSource.matchAll(/case\s+['"](export-[^'"]+)['"]\s*:/g)].map(match => match[1]),
@@ -1439,6 +1439,84 @@ test('terminal resume rejects an invalid session id before directory or terminal
 
     assert.equal(harness.calls.some(args => args[0] === 'check-dir'), false)
     assert.match(textOf(harness.render()), /Invalid session id/)
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('Windows path display metadata does not rewrite the raw resume cwd', async () => {
+  const rootPath = '\\\\?\\C:\\Users\\dev\\repo'
+  const active = session('16161616-1616-1616-1616-161616161616', 'active', { rootPath })
+  const capabilities = {
+    archive: true,
+    rename: false,
+    delete: true,
+    deleteRequiresArchived: false,
+    nativeIndex: true,
+    tokenStats: false,
+    originFilter: true,
+  }
+  const terminalCalls = []
+  const harness = await mount([], async args => {
+    if (args[0] === 'agents') {
+      return {
+        code: 0,
+        stdout: JSON.stringify([{
+          id: 'codex',
+          pathStyle: 'windows',
+          available: true,
+          capabilities,
+          resume: { argv: ['codex', 'resume'], windowsCommand: 'C:\\Tools\\codex.cmd' },
+        }]),
+        stderr: '',
+      }
+    }
+    if (args[0] === 'build-index') {
+      return { code: 0, stdout: JSON.stringify([active]), stderr: '' }
+    }
+  }, undefined, {
+    storageGet: (key, fallback) => key === 'activeAgent' ? 'codex' : fallback(),
+    terminal: {
+      activePaneId: () => null,
+      createTerminalTab: async options => {
+        terminalCalls.push(options)
+        return 'pane-resume'
+      },
+    },
+  })
+  try {
+    const nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Resume session').props.onClick({ stopPropagation() {} })
+    await flush()
+
+    assert.equal(harness.calls.some(args => args[0] === 'check-dir' && args[1] === rootPath), true)
+    assert.deepEqual(terminalCalls, [{
+      cwd: rootPath,
+      argv: ['cmd.exe', '/D', '/V:OFF', '/S', '/C', 'call', 'C:\\Tools\\codex.cmd', 'resume', active.id],
+      title: active.title.slice(0, 24),
+    }])
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('terminal resume surfaces a safe native-program resolution error', async () => {
+  const active = session('17171717-1717-1717-1717-171717171717', 'active')
+  const harness = await mount([active], undefined, undefined, {
+    terminal: {
+      activePaneId: () => null,
+      createTerminalTab: async () => {
+        throw new Error('terminal argv[0] did not resolve to a native .exe or .com executable')
+      },
+    },
+  })
+  try {
+    const nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Resume session').props.onClick({ stopPropagation() {} })
+    await flush()
+
+    assert.match(textOf(harness.render()), /native \.exe or \.com/)
+    assert.ok(flatten(harness.render()).some(node => node?.tag === 'button' && textOf(node) === 'Copy command'))
   } finally {
     harness.cleanup()
   }
