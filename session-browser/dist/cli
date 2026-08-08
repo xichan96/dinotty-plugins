@@ -27,13 +27,15 @@ var fs2 = __toESM(require("fs"));
 var path2 = __toESM(require("path"));
 var readline2 = __toESM(require("readline"));
 var crypto = __toESM(require("crypto"));
+var os2 = __toESM(require("os"));
 
 // src/codex-connector.ts
 var fs = __toESM(require("fs"));
 var path = __toESM(require("path"));
 var readline = __toESM(require("readline"));
+var os = __toESM(require("os"));
 var import_child_process = require("child_process");
-var HOME = process.env.HOME || "/root";
+var HOME = process.env.HOME || os.homedir();
 var LIVE_DB_PATH = path.join(HOME, ".codex", "state_5.sqlite");
 var LEGACY_DB_PATH = path.join(HOME, ".codex", "sqlite", "state_5.sqlite");
 var SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -293,6 +295,9 @@ function isThreadLive(row) {
   const recencyMs = threadRecencyMs(row);
   return Number.isFinite(recencyMs) && Date.now() - recencyMs < LIVE_WINDOW_MS;
 }
+function codexPathIdentity(cwd) {
+  return { rootPath: cwd, attributionKey: cwd };
+}
 function mapThread(row) {
   let stat = null;
   try {
@@ -308,8 +313,7 @@ function mapThread(row) {
   return {
     id: row.id,
     agent: "codex",
-    rootPath: row.cwd,
-    attributionKey: row.cwd,
+    ...codexPathIdentity(row.cwd),
     title: row.title.slice(0, 200),
     createdAt: toIsoTimestamp(row.created_at_ms, row.created_at),
     lastActiveAt: toIsoTimestamp(row.recency_at_ms, row.recency_at),
@@ -536,6 +540,7 @@ async function searchSessions(query, scope) {
 }
 var codexConnector = {
   id: "codex",
+  pathStyle: process.platform === "win32" ? "windows" : "posix",
   capabilities: {
     archive: true,
     rename: false,
@@ -611,7 +616,7 @@ function migratePluginSettings(pluginDataBase, legacyDirName, currentDirName) {
   } catch {
   }
 }
-var HOME2 = process.env.HOME || "/root";
+var HOME2 = process.env.HOME || os2.homedir();
 var CLAUDE_DIR = path2.join(HOME2, ".claude");
 var PROJECTS_DIR = process.env.CC_SB_PROJECTS_DIR || path2.join(CLAUDE_DIR, "projects");
 var ARCHIVE_DIR = process.env.CC_SB_ARCHIVE_DIR || path2.join(CLAUDE_DIR, "projects-archive");
@@ -702,7 +707,8 @@ function lexicalNormalizePinPath(value) {
   return parts.length ? `/${parts.join("/")}` : "/";
 }
 function pinMatchKey(value) {
-  return lexicalNormalizePinPath(value.normalize("NFC").toLowerCase());
+  const normalized = path2.resolve(value).normalize("NFC");
+  return process.platform === "win32" ? lexicalNormalizePinPath(normalized.toLowerCase()) : normalized;
 }
 function isPinStore(value) {
   if (!value || typeof value !== "object") return false;
@@ -711,7 +717,7 @@ function isPinStore(value) {
   return candidate.pins.every((pin) => {
     if (!pin || typeof pin !== "object") return false;
     const item = pin;
-    return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0 && (item.matchKeys === void 0 || Array.isArray(item.matchKeys) && item.matchKeys.every((key) => typeof key === "string" && key.length > 0));
+    return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0 && (item.matchKeys === void 0 || Array.isArray(item.matchKeys) && item.matchKeys.every((key) => typeof key === "string" && key.length > 0)) && (item.matchKeyStyle === void 0 || item.matchKeyStyle === "windows" || item.matchKeyStyle === "posix");
   });
 }
 function prunePinSidecars(agent, keepPath) {
@@ -797,6 +803,17 @@ function loadPinsForMutation(agent, resetCorrupt) {
   }
   return { pins: [], resetCorrupt: true };
 }
+function fsyncDirectory(directoryPath) {
+  const directoryFd = fs2.openSync(directoryPath, "r");
+  try {
+    fs2.fsyncSync(directoryFd);
+  } catch (error) {
+    const unsupportedOnWindows = process.platform === "win32" && ["EINVAL", "ENOTSUP", "EPERM"].includes(error?.code);
+    if (!unsupportedOnWindows) throw error;
+  } finally {
+    fs2.closeSync(directoryFd);
+  }
+}
 function writePinStore(agent, pins) {
   fs2.mkdirSync(PINS_DIR, { recursive: true });
   pinTempCounter = pinTempCounter + 1 >>> 0;
@@ -814,12 +831,7 @@ function writePinStore(agent, pins) {
     fd = void 0;
     fs2.closeSync(descriptor);
     fs2.renameSync(tempPath, destination);
-    const directoryFd = fs2.openSync(PINS_DIR, "r");
-    try {
-      fs2.fsyncSync(directoryFd);
-    } finally {
-      fs2.closeSync(directoryFd);
-    }
+    fsyncDirectory(PINS_DIR);
   } finally {
     if (fd !== void 0) {
       try {
@@ -869,7 +881,7 @@ function cmdListPins(agentValue) {
       } catch {
       }
       const matchKeys = pin.matchKeys ? [...pin.matchKeys] : [];
-      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys };
+      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys, matchKeyStyle: pin.matchKeyStyle };
     })
   });
 }
@@ -885,19 +897,28 @@ function cmdAddPin(agentValue, suppliedPath, resetCorrupt) {
   }
   const suppliedAbsolutePath = path2.resolve(suppliedPath);
   const incomingMatchKeys = Array.from(/* @__PURE__ */ new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]));
+  const incomingMatchKeyStyle = process.platform === "win32" ? "windows" : "posix";
   const state = loadPinsForMutation(agentValue, resetCorrupt);
   const existing = state.pins.find((pin) => pin.path === canonicalPath);
   if (existing) {
     const storedMatchKeys = existing.matchKeys || [];
-    const mergedMatchKeys = Array.from(/* @__PURE__ */ new Set([...storedMatchKeys, ...incomingMatchKeys]));
-    const matchKeysMerged = mergedMatchKeys.length !== storedMatchKeys.length;
-    if (matchKeysMerged) existing.matchKeys = mergedMatchKeys;
+    const mergedMatchKeys = existing.matchKeyStyle === incomingMatchKeyStyle ? Array.from(/* @__PURE__ */ new Set([...storedMatchKeys, ...incomingMatchKeys])) : incomingMatchKeys;
+    const matchKeysMerged = existing.matchKeyStyle !== incomingMatchKeyStyle || mergedMatchKeys.length !== storedMatchKeys.length || mergedMatchKeys.some((key, index) => key !== storedMatchKeys[index]);
+    if (matchKeysMerged) {
+      existing.matchKeys = mergedMatchKeys;
+      existing.matchKeyStyle = incomingMatchKeyStyle;
+    }
     if (state.resetCorrupt || matchKeysMerged) writePinStore(agentValue, state.pins);
     output2({ canonicalPath, outcome: "duplicate", matchKeysMerged });
     return;
   }
   if (state.pins.length >= 500) fail("pin-limit-reached", "Cannot add pin: the 500-pin limit has been reached");
-  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys: incomingMatchKeys }, ...state.pins]);
+  writePinStore(agentValue, [{
+    path: canonicalPath,
+    addedAt: Date.now(),
+    matchKeys: incomingMatchKeys,
+    matchKeyStyle: incomingMatchKeyStyle
+  }, ...state.pins]);
   output2({ canonicalPath, outcome: "applied" });
 }
 function cmdRemovePins(agentValue, requestedPaths, resetCorrupt) {
@@ -1012,7 +1033,8 @@ function validateEncodedPath(value) {
   if (!ENCODED_PATH_RE.test(value)) fail("invalid-encoded-path", "Encoded path contains invalid characters");
 }
 function validateAbsolutePath(value) {
-  if (!path2.isAbsolute(value) || value.split(path2.sep).some((segment) => segment === "." || segment === "..")) {
+  const segments = process.platform === "win32" ? value.split(/[\\/]/) : value.split(path2.sep);
+  if (!path2.isAbsolute(value) || segments.some((segment) => segment === "." || segment === "..")) {
     fail("invalid-absolute-path", "Path must be absolute and contain no traversal segments");
   }
 }
@@ -2238,6 +2260,7 @@ function cmdListRecent(limit = 30) {
 }
 var claudeCodeConnector = {
   id: "claude-code",
+  pathStyle: process.platform === "win32" ? "windows" : "posix",
   capabilities: {
     archive: true,
     // No rename write path exists.
@@ -2283,16 +2306,34 @@ function findConnector(args) {
 function cmdAgents() {
   output2(CONNECTORS.map((connector) => {
     const availability = connector.isAvailable();
+    const windowsCommand = connector.id === "codex" ? resolveWindowsCommandShim("codex.cmd") : void 0;
     return {
       id: connector.id,
+      pathStyle: connector.pathStyle,
       available: availability.available,
       ...!availability.available && availability.reason ? { unavailableReason: availability.reason } : {},
       ...connector.id === "codex" ? { degraded: availability.degraded } : {},
       ...availability.degraded && availability.reason ? { degradedReason: availability.reason } : {},
       capabilities: connector.capabilities,
-      resume: connector.resume
+      resume: {
+        ...connector.resume,
+        ...windowsCommand ? { windowsCommand } : {}
+      }
     };
   }));
+}
+function resolveWindowsCommandShim(fileName) {
+  if (process.platform !== "win32") return void 0;
+  for (const entry of (process.env.PATH || "").split(path2.delimiter)) {
+    const directory = entry.trim().replace(/^"(.*)"$/, "$1");
+    if (!path2.isAbsolute(directory)) continue;
+    const candidate = path2.join(directory, fileName);
+    try {
+      if (fs2.statSync(candidate).isFile()) return candidate;
+    } catch {
+    }
+  }
+  return void 0;
 }
 function cmdListDirs(dirPath) {
   const resolved = dirPath.replace(/^~/, HOME2);
@@ -2328,6 +2369,21 @@ function cmdListDirs(dirPath) {
   } catch (error) {
     output2({ error: "unreadable-directory", message: error?.message || `Could not list directory: ${resolved}` });
   }
+}
+function cmdListRoots() {
+  if (process.platform !== "win32") {
+    output2({ dirs: [{ name: "/", path: "/" }] });
+    return;
+  }
+  const dirs = [];
+  for (let code = 65; code <= 90; code += 1) {
+    const root = `${String.fromCharCode(code)}:\\`;
+    try {
+      if (fs2.statSync(root).isDirectory()) dirs.push({ name: root, path: root });
+    } catch {
+    }
+  }
+  output2({ dirs });
 }
 function cmdCheckDir(dirPath) {
   validateAbsolutePath(dirPath);
@@ -2425,6 +2481,10 @@ async function main() {
     case "list-dirs":
       if (args.length !== 1) fail("invalid-arguments", "Usage: list-dirs <path>");
       cmdListDirs(args[0]);
+      break;
+    case "list-roots":
+      if (args.length !== 0) fail("invalid-arguments", "Usage: list-roots");
+      cmdListRoots();
       break;
     case "check-dir":
       if (args.length !== 1) fail("invalid-arguments", "Usage: check-dir <absolutePath>");

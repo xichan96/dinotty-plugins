@@ -119,7 +119,9 @@ function sidecarNames() {
 }
 
 function matchKey(value) {
-  const trimmed = value.normalize('NFC').toLowerCase().trim()
+  const resolved = path.resolve(value).normalize('NFC')
+  if (process.platform !== 'win32') return resolved
+  const trimmed = resolved.toLowerCase().trim()
   const absolute = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
   const parts = []
   for (const part of absolute.split('/')) {
@@ -220,6 +222,7 @@ test('symlink identity deduplicates and stores canonical plus supplied-form matc
   assert.notEqual(first.canonicalPath, link)
   assert.equal(runJson(['add-pin', AGENT, target]).outcome, 'duplicate')
   const [pin] = readStore().pins
+  assert.equal(pin.matchKeyStyle, process.platform === 'win32' ? 'windows' : 'posix')
   assert.deepEqual(new Set(pin.matchKeys), new Set([
     matchKey(first.canonicalPath),
     matchKey(link),
@@ -254,13 +257,27 @@ test('duplicate add merges a new symlink spelling once and reports whether stora
   assert.deepEqual(readStore(), afterMerge)
 })
 
-test('match keys normalize case, Unicode composition, and the supplied symlink form', () => {
+test('duplicate add replaces untyped legacy match keys with host-safe path semantics', () => {
+  const target = mkdir('legacy-match-key-upgrade')
+  const canonicalPath = fs.realpathSync.native(target)
+  writeStore([{ path: canonicalPath, addedAt: 1, matchKeys: [canonicalPath.toLowerCase()] }])
+
+  const result = runJson(['add-pin', AGENT, target])
+  assert.equal(result.outcome, 'duplicate')
+  assert.equal(result.matchKeysMerged, true)
+  const [pin] = readStore().pins
+  assert.equal(pin.matchKeyStyle, process.platform === 'win32' ? 'windows' : 'posix')
+  assert.deepEqual(pin.matchKeys, [matchKey(canonicalPath)])
+})
+
+test('match keys follow host case semantics, normalize Unicode composition, and preserve supplied symlinks', () => {
   const target = mkdir('Unicode-\u00c9')
   const decomposedLink = path.join(fixture, 'LINK-E\u0301')
   fs.symlinkSync(target, decomposedLink, 'dir')
   runJson(['add-pin', AGENT, decomposedLink])
   const [pin] = readStore().pins
-  assert.ok(pin.matchKeys.includes(matchKey(pin.path.toUpperCase())))
+  if (process.platform === 'win32') assert.ok(pin.matchKeys.includes(matchKey(pin.path.toUpperCase())))
+  else assert.ok(pin.matchKeys.includes(pin.path.normalize('NFC')))
   assert.ok(pin.matchKeys.includes(matchKey(decomposedLink)))
   assert.equal(matchKey(decomposedLink).includes('e\u0301'), false)
 })
@@ -405,7 +422,7 @@ test('atomic replace exposes the old list until one whole new list is published'
   assert.deepEqual(finalPaths, [fs.realpathSync.native(newFolder), oldPath])
 })
 
-test('two genuinely overlapping mutations keep valid JSON and lose at most one edit', async () => {
+test('two genuinely overlapping mutations keep valid JSON and lose at most one edit', { skip: process.platform === 'win32' }, async () => {
   const base = mkdir('concurrent-base')
   const left = mkdir('concurrent-left')
   const right = mkdir('concurrent-right')
@@ -463,7 +480,7 @@ test('a pre-existing process temp makes wx fail without truncating or unlinking 
   assert.equal(fs.existsSync(pinFile()), false)
 })
 
-test('replacement destination has mode 0600 under a 0022 umask', () => {
+test('replacement destination has mode 0600 under a 0022 umask', { skip: process.platform === 'win32' }, () => {
   const folder = mkdir('permissions')
   const preload = writePreload('umask.cjs', 'process.umask(0o022)\n')
   runJson(['add-pin', AGENT, folder], { NODE_OPTIONS: nodeOptions(preload) })
@@ -586,7 +603,7 @@ test('SIGKILL during the write protocol leaves the previous file byte-intact', a
   assert.doesNotThrow(() => JSON.parse(fs.readFileSync(pinFile(), 'utf8')))
 })
 
-test('a real EACCES read failure aborts closed and writes nothing', () => {
+test('a real EACCES read failure aborts closed and writes nothing', { skip: process.platform === 'win32' }, () => {
   writeStore([storedPin('/read-error-original')])
   const previous = fs.readFileSync(pinFile())
   const folder = mkdir('read-error-new')
@@ -792,6 +809,7 @@ test('list-pins exposes canonical and symlink-form match keys', () => {
   const added = runJson(['add-pin', AGENT, link])
 
   const [listed] = runJson(['list-pins', AGENT]).pins
+  assert.equal(listed.matchKeyStyle, process.platform === 'win32' ? 'windows' : 'posix')
   assert.deepEqual(new Set(listed.matchKeys), new Set([
     matchKey(added.canonicalPath),
     matchKey(link),

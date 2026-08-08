@@ -29,6 +29,7 @@ const {
   cleanFirstPrompt,
   DEFAULT_PARTITION_SORT,
   deriveSessionPathTree,
+  displayPath,
   filterBranchOptions,
   filterSessions,
   isSafeTranscriptHref,
@@ -50,6 +51,10 @@ const {
   sampleMinimapTurnIndices,
   shQuote,
   sortSessions,
+  terminalResumeArgv,
+  WINDOWS_FOREST_ROOT,
+  pathKey,
+  parentPathForStyle,
 } = require(bundlePath)
 const { computeEditDiff, DIFF_MAX_LINES, isFullDiffSafe } = require(diffBundlePath)
 
@@ -60,6 +65,31 @@ test('filterBranchOptions filters case-insensitive substrings and preserves empt
   assert.deepEqual(filterBranchOptions(options, 'SEAr'), ['feature/Search'])
   assert.deepEqual(filterBranchOptions(options, '  '), options)
   assert.deepEqual(filterBranchOptions(options, 'missing'), [])
+})
+
+test('displayPath hides only valid Windows extended drive and UNC prefixes', () => {
+  assert.equal(displayPath('\\\\?\\C:\\Users\\dev\\repo', 'windows'), 'C:\\Users\\dev\\repo')
+  assert.equal(displayPath('/\\\\?\\C:\\Users\\dev\\repo', 'windows'), 'C:\\Users\\dev\\repo')
+  assert.equal(displayPath('\\\\?\\UNC\\server\\share\\repo', 'windows'), '\\\\server\\share\\repo')
+  assert.equal(displayPath('\\\\?\\Volume{abc}\\repo', 'windows'), '\\\\?\\Volume{abc}\\repo')
+  assert.equal(displayPath('\\\\?\\C:\\literal', 'posix'), '\\\\?\\C:\\literal')
+})
+
+test('terminalResumeArgv shells only the trusted built-in Windows Codex shim', () => {
+  const id = '16161616-1616-1616-1616-161616161616'
+  const windowsCommand = 'C:\\Program Files\\Codex\\codex.cmd'
+  assert.deepEqual(
+    terminalResumeArgv('codex', 'windows', ['codex', 'resume'], id, windowsCommand),
+    ['cmd.exe', '/D', '/V:OFF', '/S', '/C', 'call', windowsCommand, 'resume', id],
+  )
+  assert.deepEqual(terminalResumeArgv('codex', 'posix', ['codex', 'resume'], id, windowsCommand), ['codex', 'resume', id])
+  assert.deepEqual(terminalResumeArgv('claude-code', 'windows', ['claude', '--resume'], id, windowsCommand), ['claude', '--resume', id])
+  assert.deepEqual(terminalResumeArgv('codex', 'windows', ['custom.exe', 'resume'], id, windowsCommand), ['custom.exe', 'resume', id])
+  assert.deepEqual(terminalResumeArgv('codex', 'windows', ['codex', 'resume'], id, 'C:\\bad%PATH\\codex.cmd'), ['codex', 'resume', id])
+  assert.throws(
+    () => terminalResumeArgv('codex', 'windows', ['codex', 'resume'], 'bad&id', windowsCommand),
+    /Invalid session id/,
+  )
 })
 
 test('transcript batches advance by 50 without exceeding the parsed message count', () => {
@@ -288,6 +318,56 @@ test('filterSessions subtree scope respects path segment boundaries', () => {
   assert.deepEqual(filtered.map(item => item.id), ['inside', 'root'])
 })
 
+test('Windows exact scopes use namespace-aware keys while POSIX exact scopes remain case-sensitive', () => {
+  const windowsSession = session('windows', '\\\\?\\D:\\Repo', 'active', '2026-07-15T00:00:00.000Z')
+  const windowsFiltered = filterSessions([windowsSession], {
+    partition: 'active',
+    scopePath: 'D:\\Repo',
+    scopeMode: 'exact',
+    scopeMatchKeys: ['/d:\\repo'],
+    pathStyle: 'windows',
+    timeRange: 'all',
+    branch: '',
+    query: '',
+  })
+  assert.deepEqual(windowsFiltered.map(item => item.id), ['windows'])
+
+  const upper = session('upper', '/work/Foo', 'active', '2026-07-15T00:00:00.000Z')
+  const lower = session('lower', '/work/foo', 'active', '2026-07-15T00:00:00.000Z')
+  const posixFiltered = filterSessions([upper, lower], {
+    partition: 'active',
+    scopePath: '/work/Foo',
+    scopeMode: 'exact',
+    pathStyle: 'posix',
+    timeRange: 'all',
+    branch: '',
+    query: '',
+  })
+  assert.deepEqual(posixFiltered.map(item => item.id), ['upper'])
+})
+
+test('Windows path descriptors separate volumes and migrate legacy synthetic paths', () => {
+  assert.equal(normalizeStoredTreeRoot('/D:\\Work\\Repo', 'windows'), 'D:\\Work\\Repo')
+  assert.equal(normalizeStoredTreeRoot('/work/Repo', 'posix'), '/work/Repo')
+  assert.equal(pathKey('D:\\Work\\Repo', 'windows'), pathKey('\\\\?\\d:\\work\\repo', 'windows'))
+  assert.equal(parentPathForStyle('D:\\', 'windows'), WINDOWS_FOREST_ROOT)
+  assert.equal(parentPathForStyle('\\\\server\\share\\', 'windows'), WINDOWS_FOREST_ROOT)
+
+  const storedExpanded = [
+    WINDOWS_FOREST_ROOT,
+    pathKey('D:\\Work', 'windows'),
+    '/\\\\?\\D:\\Work\\Repo',
+  ]
+  const firstLoad = normalizeStoredExpandedPaths(storedExpanded, 'windows')
+  assert.deepEqual(firstLoad, new Set([
+    WINDOWS_FOREST_ROOT,
+    pathKey('D:\\Work', 'windows'),
+    pathKey('D:\\Work\\Repo', 'windows'),
+  ]))
+  assert.deepEqual(normalizeStoredExpandedPaths(Array.from(firstLoad), 'windows'), firstLoad)
+  assert.equal(normalizeStoredTreeRoot(WINDOWS_FOREST_ROOT, 'windows'), WINDOWS_FOREST_ROOT)
+})
+
 test('filterSessions applies last-active time, branch, and quick title search', () => {
   const matching = { ...session('matching', '/work', 'archive', '2026-07-16T00:00:00.000Z'), title: 'Hidden first prompt', aiTitle: 'Fix parser', customTitle: 'User rename', gitBranch: 'feature/search' }
   const old = { ...session('old', '/work', 'archive', '2026-06-01T00:00:00.000Z'), title: 'Fix parser', gitBranch: 'feature/search' }
@@ -357,4 +437,21 @@ test('deriveSessionPathTree builds a sparse tree with subtree counts and newest 
   }
   visit(tree)
   assert.deepEqual(allPaths, ['/', '/a', '/a/b', '/a/b/c', '/x'])
+})
+
+test('deriveSessionPathTree builds independent Windows drive and UNC roots under a forest', () => {
+  const tree = deriveSessionPathTree([
+    session('c', 'C:\\Users\\dev', 'active', '2026-07-01T00:00:00.000Z'),
+    session('d', '\\\\?\\D:\\AIProgram\\repo', 'active', '2026-07-02T00:00:00.000Z'),
+    session('unc', '\\\\server\\share\\team', 'archive', '2026-07-03T00:00:00.000Z'),
+  ], WINDOWS_FOREST_ROOT, 'windows')
+
+  assert.ok(tree)
+  assert.equal(tree.path, WINDOWS_FOREST_ROOT)
+  assert.deepEqual(new Set(tree.children.map(node => node.name)), new Set(['C:\\', 'D:\\', '\\\\server\\share']))
+  const driveC = tree.children.find(node => node.name === 'C:\\')
+  const driveD = tree.children.find(node => node.name === 'D:\\')
+  assert.equal(driveC.children[0].name, 'Users')
+  assert.equal(driveD.children[0].name, 'AIProgram')
+  assert.notEqual(driveC.path, driveD.path)
 })

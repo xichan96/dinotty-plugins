@@ -168,9 +168,9 @@ async function mountPins(options = {}) {
         }
         if (args[0] === 'agents') return {
           code: 0,
-          stdout: JSON.stringify([
-            { id: 'claude-code', available: true, capabilities, resume: { argv: ['claude', '--resume'] } },
-            { id: 'codex', available: true, capabilities, resume: { argv: ['codex', 'resume'] } },
+          stdout: JSON.stringify(options.agents || [
+            { id: 'claude-code', pathStyle: 'posix', available: true, capabilities, resume: { argv: ['claude', '--resume'] } },
+            { id: 'codex', pathStyle: 'posix', available: true, capabilities, resume: { argv: ['codex', 'resume'] } },
           ]),
           stderr: '',
         }
@@ -288,6 +288,11 @@ test('pins are rendered as a sibling above the independently flexing tree pane m
   } finally {
     harness.cleanup()
   }
+})
+
+test('expanded pinned folders reserve their row height instead of shrinking behind the tree pane', () => {
+  const css = fs.readFileSync(path.resolve(__dirname, '../styles.css'), 'utf8')
+  assert.match(css, /\.ccm-browser-pins-section\s*\{[^}]*flex:\s*0 0 auto/s)
 })
 
 test('activatePin preserves the visible tree root while selecting the exact pin and marking it active', async () => {
@@ -509,23 +514,19 @@ test('pin rows use exact match-key metadata and activation sets exact scope with
   const pins = [
     { path: '/work', addedAt: 1, exists: true },
     { path: '/empty', addedAt: 2, exists: true },
-    { path: '/Canonical/É', addedAt: 3, exists: true, matchKeys: ['/symlink/é'] },
   ]
   const harness = await mountPins({
     sessions: [
       session('exact-session', '/work'),
       session('descendant-session', '/work/child'),
-      session('matched-alias-session', '/SYMLINK/E\u0301'),
     ],
     pinsByAgent: { 'claude-code': pins, codex: [] },
   })
   try {
     let nodes = flatten(harness.render())
     const workRow = findPinRow(nodes, '/work')
-    const aliasRow = findPinRow(nodes, '/Canonical/É')
     assert.match(textOf(workRow), /1 session/)
     assert.doesNotMatch(textOf(workRow), /2 sessions/)
-    assert.match(textOf(aliasRow), /1 session/)
 
     workRow.props.onClick()
     nodes = flatten(harness.render())
@@ -566,6 +567,95 @@ test('current folder pin prefers an exact case-preserving path before folded mat
       'claude-code',
       '/work/foo',
     ])
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('Windows tree selection pins raw drive and UNC paths instead of POSIX tree keys', async () => {
+  for (const windowsPath of ['D:\\AIProgram\\Codex\\core', '\\\\server\\share\\repo']) {
+    const harness = await mountPins({ sessions: [session('windows-folder', windowsPath)] })
+    try {
+      const treeNode = flatten(harness.render()).find(node => hasClass(node, 'ccm-browser-tree-node')
+        && node.props?.title === windowsPath)
+      assert.ok(treeNode, 'Windows cwd tree node was not rendered with its raw path')
+      treeNode.props.onClick()
+
+      const callStart = harness.calls.length
+      const toggle = flatten(harness.render()).find(node => node?.tag === 'button'
+        && node.props?.title === dictionaries.en['pin-current-folder-add'])
+      assert.equal(toggle.props.disabled, false)
+      toggle.props.onClick()
+      await flush(4)
+
+      assert.deepEqual(harness.calls.slice(callStart).find(args => args[0] === 'add-pin'), [
+        'add-pin',
+        'claude-code',
+        windowsPath,
+      ])
+    } finally {
+      harness.cleanup()
+    }
+  }
+})
+
+test('Windows pin aliases activate namespace-equivalent sessions without weakening POSIX case sensitivity', async () => {
+  const canonicalPath = 'D:\\Canonical\\Repo'
+  const aliasPath = 'D:\\Alias\\Repo'
+  const sessionPath = '\\\\?\\D:\\Alias\\Repo'
+  const harness = await mountPins({
+    agents: [
+      { id: 'claude-code', pathStyle: 'windows', available: true, capabilities, resume: { argv: ['claude', '--resume'] } },
+      { id: 'codex', pathStyle: 'windows', available: true, capabilities, resume: { argv: ['codex', 'resume'] } },
+    ],
+    sessions: [session('matched-alias-session', sessionPath)],
+    pinsByAgent: {
+      'claude-code': [{ path: canonicalPath, addedAt: 1, exists: true, matchKeys: [aliasPath] }],
+      codex: [],
+    },
+  })
+  try {
+    let nodes = flatten(harness.render())
+    const aliasRow = findPinRow(nodes, canonicalPath)
+    assert.match(textOf(aliasRow), /1 session/)
+
+    aliasRow.props.onClick()
+    nodes = flatten(harness.render())
+    const aliasCards = nodes.filter(node => node?.tag === 'article').map(textOf).join('\n')
+    assert.match(aliasCards, /matched-alias-session/)
+    assert.doesNotMatch(textOf(nodes), /This pinned folder has no sessions for this view\./)
+  } finally {
+    harness.cleanup()
+  }
+})
+
+test('stored non-default agent initialization restores its pins, root, and expanded tree state', async () => {
+  const harness = await mountPins({
+    agents: [
+      { id: 'claude-code', pathStyle: 'windows', available: true, capabilities, resume: { argv: ['claude', '--resume'] } },
+      { id: 'codex', pathStyle: 'windows', available: true, capabilities, resume: { argv: ['codex', 'resume'] } },
+    ],
+    storageEntries: [
+      ['activeAgent', 'codex'],
+      ['treeRoot:codex', 'D:\\Work'],
+      ['treeExpandedPaths:codex', ['win:drive:d\\work']],
+    ],
+    sessionsByAgent: {
+      'claude-code': [session('default-a', 'C:\\Default')],
+      codex: [session('stored-codex', 'D:\\Work\\Repo', { agent: 'codex' })],
+    },
+  })
+  try {
+    assert.ok(
+      harness.calls.some(args => args[0] === 'list-pins' && args[1] === 'codex'),
+      'stored-agent initialization skipped the current pin list',
+    )
+    const toggle = flatten(harness.render()).find(node => node?.tag === 'button'
+      && node.props?.title === dictionaries.en['pin-current-folder-add'])
+    assert.equal(toggle.props.disabled, false)
+    const nodes = flatten(harness.render())
+    assert.equal(textOf(nodes.find(node => hasClass(node, 'ccm-browser-root-path'))), 'D:\\Work')
+    assert.ok(nodes.some(node => hasClass(node, 'ccm-browser-tree-label') && textOf(node) === 'Repo'))
   } finally {
     harness.cleanup()
   }
@@ -1056,6 +1146,22 @@ test('a symlink-added pin still matches sessions after a cold load from list-pin
     assert.equal(listed.status, 0, listed.stderr)
 
     const harness = await mountPins({
+      agents: [
+        {
+          id: 'claude-code',
+          pathStyle: process.platform === 'win32' ? 'windows' : 'posix',
+          available: true,
+          capabilities,
+          resume: { argv: ['claude', '--resume'] },
+        },
+        {
+          id: 'codex',
+          pathStyle: process.platform === 'win32' ? 'windows' : 'posix',
+          available: true,
+          capabilities,
+          resume: { argv: ['codex', 'resume'] },
+        },
+      ],
       sessions: [session('symlink-session', link)],
       pinsByAgent: { 'claude-code': [], codex: [] },
       run: async args => args[0] === 'list-pins' && args[1] === 'claude-code'
@@ -1066,6 +1172,9 @@ test('a symlink-added pin still matches sessions after a cold load from list-pin
       const pinRow = findPinRow(harness.render(), canonicalPath)
       assert.ok(pinRow)
       assert.match(textOf(pinRow), /1 session/)
+      pinRow.props.onClick()
+      const cards = flatten(harness.render()).filter(node => node?.tag === 'article').map(textOf).join('\n')
+      assert.match(cards, /symlink-session/)
       assert.equal(harness.calls.some(args => args[0] === 'add-pin'), false)
     } finally {
       harness.cleanup()

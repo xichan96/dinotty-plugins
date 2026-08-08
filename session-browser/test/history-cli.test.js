@@ -142,6 +142,32 @@ test('meta parser uses first event cwd/createdAt and expanding tail timestamp', 
   assert.equal(meta.lossyPath, undefined)
 })
 
+test('Windows agent discovery resolves the Codex shim from absolute PATH entries, not cwd', { skip: process.platform !== 'win32' }, () => {
+  const trustedBin = path.join(fixture, 'trusted bin')
+  const poisonedCwd = path.join(fixture, 'poisoned cwd')
+  fs.mkdirSync(trustedBin, { recursive: true })
+  fs.mkdirSync(poisonedCwd, { recursive: true })
+  const trustedShim = path.join(trustedBin, 'codex.cmd')
+  fs.writeFileSync(trustedShim, '@echo off\r\necho trusted %*\r\n')
+  fs.writeFileSync(path.join(poisonedCwd, 'codex.cmd'), '@echo off\r\necho poisoned %*\r\n')
+  const result = spawnSync(process.execPath, [CLI, 'agents'], {
+    cwd: poisonedCwd,
+    encoding: 'utf8',
+    env: { ...env, PATH: `${trustedBin};relative-poison` },
+  })
+  assert.equal(result.status, 0, result.stderr)
+  const codex = JSON.parse(result.stdout).find(agent => agent.id === 'codex')
+  assert.equal(codex.resume.windowsCommand, trustedShim)
+
+  const launched = spawnSync('cmd.exe', ['/D', '/V:OFF', '/S', '/C', 'call', trustedShim, 'resume', IDS.normal], {
+    cwd: poisonedCwd,
+    encoding: 'utf8',
+  })
+  assert.equal(launched.status, 0, launched.stderr)
+  assert.match(launched.stdout, new RegExp(`trusted resume ${IDS.normal}`))
+  assert.doesNotMatch(launched.stdout, /poisoned/)
+})
+
 test('meta parser skips metadata preamble for head fields', () => {
   const rootPath = '/Volumes/Dev/ai/projects/dinotty_mods'
   const attributionKey = encoded(rootPath)
@@ -297,7 +323,7 @@ test('incremental cache reuses unchanged size+mtime, invalidates changes, and he
   assert.deepEqual(rebuilt, invalidated)
 })
 
-test('build-index fails when a partition root is unreadable', () => {
+test('build-index fails when a partition root is unreadable', { skip: process.platform === 'win32' }, () => {
   fs.mkdirSync(env.CC_SB_PROJECTS_DIR, { recursive: true })
   fs.chmodSync(env.CC_SB_PROJECTS_DIR, 0o000)
   try {
@@ -309,7 +335,7 @@ test('build-index fails when a partition root is unreadable', () => {
   }
 })
 
-test('build-index diagnoses a file read failure and retains its cached entry', () => {
+test('build-index diagnoses a file read failure and retains its cached entry', { skip: process.platform === 'win32' }, () => {
   const key = '-cached-read-failure'
   const filePath = writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
     JSON.stringify({ type: 'user', cwd: '/cached/read/failure', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'cached' } }),
@@ -360,6 +386,13 @@ test('check-dir reports existing and missing paths and rejects relative or trave
   assert.match(traversal.stderr, /invalid-absolute-path/)
 })
 
+test('check-dir permits backslashes in Unix filenames', { skip: process.platform === 'win32' }, () => {
+  const existing = path.join(fixture, 'folder\\..\\literal')
+  fs.mkdirSync(existing, { recursive: true })
+
+  assert.deepEqual(runJson(['check-dir', existing]), { exists: true, dir: true })
+})
+
 test('export destination classification resolves traversal, absolute home paths, and symlinks', () => {
   const homeChild = path.join(env.HOME, 'exports')
   const outside = path.join(fixture, 'outside')
@@ -387,6 +420,8 @@ test('list-dirs returns structured errors and includes symlinked directories', (
   assert.equal(missing.error, 'not-found')
   assert.match(missing.message, /missing/)
 
+  if (process.platform === 'win32') return
+
   const denied = path.join(fixture, 'denied')
   fs.mkdirSync(denied)
   fs.chmodSync(denied, 0o000)
@@ -396,6 +431,17 @@ test('list-dirs returns structured errors and includes symlinked directories', (
     assert.equal(typeof unreadable.message, 'string')
   } finally {
     fs.chmodSync(denied, 0o700)
+  }
+})
+
+test('list-roots exposes filesystem roots without treating Windows slash as a drive root', () => {
+  const listed = runJson(['list-roots'])
+  assert.ok(Array.isArray(listed.dirs))
+  if (process.platform === 'win32') {
+    assert.ok(listed.dirs.some(entry => entry.path === path.parse(process.cwd()).root))
+    assert.equal(listed.dirs.some(entry => entry.path === '/'), false)
+  } else {
+    assert.deepEqual(listed.dirs, [{ name: '/', path: '/' }])
   }
 })
 
@@ -898,7 +944,7 @@ test('rejected outside-home export does not create the destination directory', (
   assert.equal(fs.existsSync(outsideRoot), false)
 })
 
-test('post-check outside-home rejection removes directories created after an ancestor symlink swap', () => {
+test('post-check outside-home rejection removes directories created after an ancestor symlink swap', { skip: process.platform === 'win32' }, () => {
   const key = '-export-outside-home-swap'
   writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
     JSON.stringify({ type: 'user', cwd: '/export/outside-home-swap', timestamp: '2026-07-01T00:00:00.000Z', message: { content: 'Outside home swap' } }),

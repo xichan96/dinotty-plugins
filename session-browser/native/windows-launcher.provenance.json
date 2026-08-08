@@ -1,0 +1,10 @@
+{
+  "source": "windows-launcher.rs",
+  "sourceEol": "lf",
+  "output": "../dist/cli-wrapper.exe",
+  "target": "x86_64-pc-windows-msvc",
+  "compiler": "rustc 1.94.1 (e408947bf 2026-03-25)",
+  "command": "rustc --edition=2021 --target x86_64-pc-windows-msvc -C opt-level=s -C strip=symbols -o ../dist/cli-wrapper.exe windows-launcher.rs",
+  "sourceSha256": "c1c4d17abecac1a6afbed455788b1a1193c80b92ade67acab1b5f11edb29b371",
+  "binarySha256": "fe603bbd4b2c1e3a5a1b3c277e2d90e720e14181d4a6193f40dbe4120a03e613"
+}

@@ -34,6 +34,22 @@ import {
   IconZap,
 } from './icons'
 import { initI18n, normalizeLocaleSetting, resolveLocale, translate, type LocaleSetting, type PluginLocale } from './i18n'
+import {
+  WINDOWS_FOREST_ROOT,
+  deepestCommonPath,
+  describePath,
+  isAbsolutePathForStyle,
+  isPathWithinStyle,
+  normalizeIoPath,
+  normalizePosixPath,
+  parentPathForStyle,
+  pathAncestors,
+  pathKey,
+  pathNameForStyle,
+  type PathStyle,
+} from './path-model'
+
+export { WINDOWS_FOREST_ROOT, parentPathForStyle, pathKey } from './path-model'
 
 export type SessionPartition = 'active' | 'archive'
 export type AgentId = 'claude-code' | 'codex'
@@ -111,6 +127,7 @@ interface MinimapCardPointerState {
 
 export interface SessionPathTreeNode {
   path: string
+  ioPath: string
   name: string
   directActiveCount: number
   directArchiveCount: number
@@ -144,6 +161,8 @@ export interface SessionListFilters {
   partition: SessionPartition
   scopePath: string
   scopeMode: 'subtree' | 'exact'
+  scopeMatchKeys?: string[]
+  pathStyle?: PathStyle
   timeRange: TimeRangeFilter
   branch: string
   query: string
@@ -196,6 +215,7 @@ interface FolderPin {
   addedAt: number
   exists: boolean
   matchKeys?: string[]
+  matchKeyStyle?: PathStyle
 }
 
 interface PinsState extends SelectionState {
@@ -241,12 +261,22 @@ interface ConnectorCapabilities {
 
 interface AgentDescriptor {
   id: AgentId
+  pathStyle: 'windows' | 'posix'
   available: boolean
   degraded?: boolean
   unavailableReason?: string
   degradedReason?: string
   capabilities: ConnectorCapabilities
-  resume: { argv: string[] }
+  resume: { argv: string[]; windowsCommand?: string }
+}
+
+export function displayPath(value: string, style: 'windows' | 'posix'): string {
+  if (style !== 'windows') return value
+  const syntheticPrefix = value.startsWith('/\\\\?\\') ? value.slice(1) : value
+  const unc = syntheticPrefix.match(/^\\\\\?\\UNC\\(.+)$/i)
+  if (unc) return `\\\\${unc[1]}`
+  const drive = syntheticPrefix.match(/^\\\\\?\\([A-Za-z]:\\.*)$/)
+  return drive ? drive[1] : value
 }
 
 interface MutationReason {
@@ -334,7 +364,7 @@ const FONT_SCALE_MULTIPLIERS: Record<number, number> = { 1: 0.85, 2: 0.93, 3: 1,
 const MINIMAP_TAP_SLOP = 8
 export const MINIMAP_RAIL_INSET = 12
 export const PAGE_SIZES = [20, 50, 100] as const
-const AGENT_AGNOSTIC = new Set(['list-dirs', 'check-dir', 'classify-export-destination', 'agents'])
+const AGENT_AGNOSTIC = new Set(['list-roots', 'list-dirs', 'check-dir', 'classify-export-destination', 'agents'])
 const DEFAULT_AGENT: AgentId = 'claude-code'
 const UNAVAILABLE_CAPABILITIES: ConnectorCapabilities = {
   archive: false,
@@ -361,6 +391,31 @@ const DEFAULT_RESUME_ARGV_BY_AGENT = new Map<AgentId, readonly string[]>([
 ])
 const LEGACY_RESUME = { argv: ['claude', '--resume'] }
 const RESUME_ARG_TOKEN_RE = /^[A-Za-z0-9_@%+=:,./-]+$/
+const WINDOWS_CODEX_SHIM_RE = /^(?:[A-Za-z]:\\|\\\\)[^"&|<>()^%!\r\n]*\\codex\.cmd$/i
+
+export function terminalResumeArgv(
+  agent: AgentId,
+  pathStyle: AgentDescriptor['pathStyle'],
+  resumeArgv: readonly string[],
+  sessionId: string,
+  windowsCommand?: string,
+): string[] {
+  if (!SESSION_ID_RE.test(sessionId)) throw new Error('Invalid session id')
+  const isBuiltInWindowsCodex = agent === 'codex'
+    && pathStyle === 'windows'
+    && resumeArgv.length === 2
+    && resumeArgv[0] === 'codex'
+    && resumeArgv[1] === 'resume'
+    && typeof windowsCommand === 'string'
+    && WINDOWS_CODEX_SHIM_RE.test(windowsCommand)
+  if (isBuiltInWindowsCodex && windowsCommand) {
+    // npm exposes Codex as a .cmd shim on Windows. The session id is UUID-
+    // validated and the absolute shim is resolved outside the session cwd, so
+    // neither shell syntax nor a repository-local executable can be injected.
+    return ['cmd.exe', '/D', '/V:OFF', '/S', '/C', 'call', windowsCommand, 'resume', sessionId]
+  }
+  return [...resumeArgv, sessionId]
+}
 
 type Translate = ReturnType<typeof initI18n>['t']
 type CompactView = 'tree' | 'list' | 'detail'
@@ -564,47 +619,26 @@ export function nextJumpPillAtBottom(current: boolean, distanceFromBottom: numbe
 }
 
 function normalizePath(value: string): string {
-  const trimmed = value.trim()
-  if (!trimmed) return '/'
-  const absolute = trimmed.startsWith('/') ? trimmed : `/${trimmed}`
-  const parts: string[] = []
-  for (const part of absolute.split('/')) {
-    if (!part || part === '.') continue
-    if (part === '..') parts.pop()
-    else parts.push(part)
-  }
-  return parts.length ? `/${parts.join('/')}` : '/'
+  return normalizePosixPath(value)
 }
 
 export function normalizePinMatchKey(value: string): string {
   return normalizePath(value.normalize('NFC').toLowerCase())
 }
 
-export function normalizeStoredTreeRoot(value: unknown): string | null {
-  return typeof value === 'string' ? normalizePath(value) : null
+export function normalizeStoredTreeRoot(value: unknown, style: PathStyle = 'posix'): string | null {
+  if (typeof value !== 'string') return null
+  if (style === 'windows' && value === WINDOWS_FOREST_ROOT) return WINDOWS_FOREST_ROOT
+  if (style === 'windows' && value.trim() !== '/' && !describePath(value, style)) return null
+  return normalizeIoPath(value, style)
 }
 
-export function normalizeStoredExpandedPaths(value: unknown): Set<string> | null {
+export function normalizeStoredExpandedPaths(value: unknown, style: PathStyle = 'posix'): Set<string> | null {
   if (!Array.isArray(value) || value.some(item => typeof item !== 'string')) return null
-  return new Set(value.map(item => normalizePath(item)))
-}
-
-function parentPath(value: string): string {
-  const normalized = normalizePath(value)
-  if (normalized === '/') return '/'
-  const slash = normalized.lastIndexOf('/')
-  return slash <= 0 ? '/' : normalized.slice(0, slash)
-}
-
-function pathName(value: string): string {
-  const normalized = normalizePath(value)
-  return normalized === '/' ? '/' : normalized.slice(normalized.lastIndexOf('/') + 1)
-}
-
-function isPathWithin(rootPath: string, candidatePath: string): boolean {
-  const root = normalizePath(rootPath)
-  const candidate = normalizePath(candidatePath)
-  return root === '/' || candidate === root || candidate.startsWith(`${root}/`)
+  return new Set(value.map(item => style === 'windows'
+    && (item === WINDOWS_FOREST_ROOT || /^win:(?:drive|unc):/.test(item))
+    ? item
+    : pathKey(item, style)))
 }
 
 function timestampValue(value: string): number {
@@ -1047,7 +1081,11 @@ export function filterBranchOptions(options: string[], query: string): string[] 
 }
 
 export function filterSessions(items: IndexedSession[], filters: SessionListFilters, now = Date.now()): IndexedSession[] {
+  const pathStyle = filters.pathStyle || 'posix'
   const query = filters.query.trim().toLocaleLowerCase()
+  const exactScopeKeys = filters.scopeMatchKeys?.length
+    ? new Set(filters.scopeMatchKeys.map(key => pathKey(key, pathStyle)))
+    : null
   const ranges: Record<'24h' | '7d' | '30d', number> = {
     '24h': 24 * 60 * 60_000,
     '7d': 7 * 24 * 60 * 60_000,
@@ -1059,10 +1097,11 @@ export function filterSessions(items: IndexedSession[], filters: SessionListFilt
   }
   return items.filter(session => {
     if (session.partition !== filters.partition) return false
-    const sessionPath = normalizePath(session.rootPath)
     const inScope = filters.scopeMode === 'exact'
-      ? sessionPath === normalizePath(filters.scopePath)
-      : isPathWithin(filters.scopePath, sessionPath)
+      ? exactScopeKeys
+        ? exactScopeKeys.has(pathKey(session.rootPath, pathStyle))
+        : pathKey(session.rootPath, pathStyle) === pathKey(filters.scopePath, pathStyle)
+      : isPathWithinStyle(filters.scopePath, session.rootPath, pathStyle)
     if (!inScope) return false
     const idleDuration = now - timestampValue(session.lastActiveAt)
     // Exact boundaries are included by both recency and staleness presets.
@@ -1077,19 +1116,8 @@ export function filterSessions(items: IndexedSession[], filters: SessionListFilt
   })
 }
 
-export function deepestCommonAncestor(rootPaths: string[]): string {
-  const normalized = rootPaths.map(normalizePath)
-  if (normalized.length === 0) return '/'
-  const split = normalized.map(value => value.split('/').filter(Boolean))
-  const common: string[] = []
-  const shortest = Math.min(...split.map(parts => parts.length))
-
-  for (let index = 0; index < shortest; index += 1) {
-    const segment = split[0][index]
-    if (!split.every(parts => parts[index] === segment)) break
-    common.push(segment)
-  }
-  return common.length ? `/${common.join('/')}` : '/'
+export function deepestCommonAncestor(rootPaths: string[], style: PathStyle = 'posix'): string {
+  return deepestCommonPath(rootPaths, style)
 }
 
 function newerTimestamp(current: string, candidate: string): string {
@@ -1109,15 +1137,18 @@ function newerTimestamp(current: string, candidate: string): string {
  */
 export function deriveSessionPathTree(
   sessions: IndexedSession[],
-  visibleRoot = deepestCommonAncestor(sessions.map(session => session.rootPath)),
+  visibleRoot?: string,
+  style: PathStyle = 'posix',
 ): SessionPathTreeNode | null {
-  const rootPath = normalizePath(visibleRoot)
-  const scoped = sessions.filter(session => isPathWithin(rootPath, session.rootPath))
+  const rootIoPath = visibleRoot ?? deepestCommonAncestor(sessions.map(session => session.rootPath), style)
+  const rootPath = pathKey(rootIoPath, style)
+  const scoped = sessions.filter(session => isPathWithinStyle(rootIoPath, session.rootPath, style))
   if (scoped.length === 0) return null
 
-  const makeNode = (nodePath: string): MutableTreeNode => ({
+  const makeNode = (nodePath: string, ioPath: string, name: string): MutableTreeNode => ({
     path: nodePath,
-    name: pathName(nodePath),
+    ioPath,
+    name,
     directActiveCount: 0,
     directArchiveCount: 0,
     activeCount: 0,
@@ -1126,26 +1157,30 @@ export function deriveSessionPathTree(
     childrenByName: new Map(),
   })
 
-  const root = makeNode(rootPath)
+  const rootName = style === 'windows' && rootPath === WINDOWS_FOREST_ROOT
+    ? WINDOWS_FOREST_ROOT
+    : pathNameForStyle(rootIoPath, style)
+  const root = makeNode(rootPath, rootIoPath, rootName)
   for (const session of scoped) {
-    const sessionPath = normalizePath(session.rootPath)
-    const relativeParts = sessionPath === rootPath
-      ? []
-      : sessionPath.slice(rootPath === '/' ? 1 : rootPath.length + 1).split('/').filter(Boolean)
+    const ancestors = pathAncestors(session.rootPath, style)
+    const rootIndex = ancestors.findIndex(ancestor => ancestor.key === rootPath)
+    const relativeParts = rootPath === WINDOWS_FOREST_ROOT
+      ? ancestors
+      : rootIndex >= 0 ? ancestors.slice(rootIndex + 1) : []
     const chain = [root]
     let node = root
-    let currentPath = rootPath
 
-    for (const segment of relativeParts) {
-      currentPath = currentPath === '/' ? `/${segment}` : `${currentPath}/${segment}`
-      let child = node.childrenByName.get(segment)
+    for (const part of relativeParts) {
+      let child = node.childrenByName.get(part.key)
       if (!child) {
-        child = makeNode(currentPath)
-        node.childrenByName.set(segment, child)
+        child = makeNode(part.key, part.ioPath, part.label)
+        node.childrenByName.set(part.key, child)
       }
       node = child
       chain.push(node)
     }
+
+    node.ioPath = session.rootPath
 
     if (session.partition === 'active') node.directActiveCount += 1
     else node.directArchiveCount += 1
@@ -1159,6 +1194,7 @@ export function deriveSessionPathTree(
 
   const freezeNode = (node: MutableTreeNode): SessionPathTreeNode => ({
     path: node.path,
+    ioPath: node.ioPath,
     name: node.name,
     directActiveCount: node.directActiveCount,
     directArchiveCount: node.directArchiveCount,
@@ -1462,6 +1498,7 @@ export function activate(ctx: PluginContext): PluginExports {
     return parsed.map((value: any) => {
       const caps = value?.capabilities
       const resumeArgv = value?.resume?.argv
+      const windowsCommand = value?.resume?.windowsCommand
       const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id)
       const validCapabilities = caps
         && ['archive', 'rename', 'delete', 'deleteRequiresArchived', 'nativeIndex', 'tokenStats', 'originFilter']
@@ -1475,12 +1512,18 @@ export function activate(ctx: PluginContext): PluginExports {
       if (!validResumeArgv && !defaultResumeArgv) throw new Error(t('agent-discovery-invalid'))
       return {
         id: value.id as AgentId,
+        pathStyle: value.pathStyle === 'windows' ? 'windows' : 'posix',
         available: value.available,
         degraded: value.degraded === true,
         unavailableReason: typeof value.unavailableReason === 'string' ? value.unavailableReason : undefined,
         degradedReason: typeof value.degradedReason === 'string' ? value.degradedReason : undefined,
         capabilities: caps as ConnectorCapabilities,
-        resume: { argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv!] },
+        resume: {
+          argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv!],
+          ...(typeof windowsCommand === 'string' && WINDOWS_CODEX_SHIM_RE.test(windowsCommand)
+            ? { windowsCommand }
+            : {}),
+        },
       }
     })
   }
@@ -1488,6 +1531,7 @@ export function activate(ctx: PluginContext): PluginExports {
   function legacyAgentDescriptor(): AgentDescriptor {
     return {
       id: DEFAULT_AGENT,
+      pathStyle: 'posix',
       available: true,
       degraded: false,
       capabilities: LEGACY_CAPABILITIES,
@@ -2052,6 +2096,10 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     return ctx.exec.run([...args, '--agent', activeAgent.value], opts)
   }
 
+  function activePathStyle(): PathStyle {
+    return activeDescriptor.value?.pathStyle || 'posix'
+  }
+
   function openSearch() {
     if (compactMode.value) compactView.value = 'list'
     settingsOpen.value = false
@@ -2060,7 +2108,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   }
 
   const originFilteredSessions = ctx.computed(() => sessions.value.filter(session => isSessionVisibleByOrigin(session)))
-  const tree = ctx.computed(() => deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value))
+  const tree = ctx.computed(() => deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value, activePathStyle()))
 
   function persist(key: string, value: unknown) {
     ctx.storage.set(key, value).catch((caught: any) => {
@@ -2097,17 +2145,32 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   }
 
   function pinMatchKeys(pin: FolderPin): Set<string> {
-    return new Set(pin.matchKeys?.length
+    // The CLI's historical POSIX match keys were case-folded, so they cannot
+    // safely identify folders on a case-sensitive filesystem. Windows paths
+    // are case-insensitive and may legitimately need supplied/canonical aliases.
+    const style = activePathStyle()
+    const aliasesAreSafe = style === 'windows' || pin.matchKeyStyle === 'posix'
+    return new Set(aliasesAreSafe && pin.matchKeys?.length
       ? pin.matchKeys
-      : [normalizePinMatchKey(pin.path)])
+      : [pin.path])
   }
 
   function currentFolderPin(): FolderPin | undefined {
-    const selectedPath = normalizePath(committedSelection.value.path)
-    const exact = pinsSelection.value.pins.find(pin => normalizePath(pin.path) === selectedPath)
+    const style = activePathStyle()
+    const selectedPath = pathKey(committedSelection.value.path, style)
+    const exact = pinsSelection.value.pins.find(pin => pathKey(pin.path, style) === selectedPath)
     if (exact) return exact
-    const selectedKey = normalizePinMatchKey(selectedPath)
-    return pinsSelection.value.pins.find(pin => pinMatchKeys(pin).has(selectedKey))
+    return pinsSelection.value.pins.find(pin => Array.from(pinMatchKeys(pin))
+      .some(key => pathKey(key, style) === selectedPath))
+  }
+
+  function committedPinMatchKeys(): string[] | undefined {
+    const activePath = pinsSelection.value.activePath
+    const style = activePathStyle()
+    if (committedSelection.value.mode !== 'exact' || !activePath
+      || pathKey(activePath, style) !== pathKey(committedSelection.value.path, style)) return undefined
+    const pin = pinsSelection.value.pins.find(candidate => pathKey(candidate.path, style) === pathKey(activePath, style))
+    return pin ? Array.from(pinMatchKeys(pin)) : undefined
   }
 
   function parsePinsResponse(stdout: string): { pins: FolderPin[]; corruptSidecar: string | null } {
@@ -2118,8 +2181,11 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     const pins = parsed.pins.map((pin: any) => {
       const validMatchKeys = pin?.matchKeys === undefined
         || (Array.isArray(pin.matchKeys) && pin.matchKeys.every((key: unknown) => typeof key === 'string'))
+      const validMatchKeyStyle = pin?.matchKeyStyle === undefined
+        || pin.matchKeyStyle === 'windows'
+        || pin.matchKeyStyle === 'posix'
       if (!pin || typeof pin.path !== 'string' || typeof pin.addedAt !== 'number'
-        || typeof pin.exists !== 'boolean' || !validMatchKeys) {
+        || typeof pin.exists !== 'boolean' || !validMatchKeys || !validMatchKeyStyle) {
         throw new Error(t('pin-invalid-response'))
       }
       return {
@@ -2127,6 +2193,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
         addedAt: pin.addedAt,
         exists: pin.exists,
         ...(pin.matchKeys ? { matchKeys: [...pin.matchKeys] } : {}),
+        ...(pin.matchKeyStyle ? { matchKeyStyle: pin.matchKeyStyle } : {}),
       } as FolderPin
     })
     if (parsed.corrupt === true) {
@@ -2168,7 +2235,9 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t('pin-list-load-failed')).message)
       const loaded = parsePinsResponse(result.stdout)
       const priorActive = pinsSelection.value.activePath
-      const nextActivePath = priorActive !== null && loaded.pins.some(pin => normalizePath(pin.path) === normalizePath(priorActive)) ? priorActive : null
+      const nextActivePath = priorActive !== null
+        && loaded.pins.some(pin => pathKey(pin.path, activePathStyle()) === pathKey(priorActive, activePathStyle()))
+        ? priorActive : null
       updatePinsState({
         pins: loaded.pins,
         loading: false,
@@ -2201,8 +2270,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   }
 
   function comparePinPaths(left: string, right: string): number {
-    const leftBase = pathName(left).toLowerCase()
-    const rightBase = pathName(right).toLowerCase()
+    const leftBase = pathNameForStyle(left, activePathStyle()).toLowerCase()
+    const rightBase = pathNameForStyle(right, activePathStyle()).toLowerCase()
     if (leftBase < rightBase) return -1
     if (leftBase > rightBase) return 1
     return left < right ? -1 : left > right ? 1 : 0
@@ -2647,10 +2716,36 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     clearError()
     try {
       const result = await shared.initializeAgents()
-      if (!isCurrent()) return
+      if (shared.retired || !isActiveMount(mount)) return
+      if (!isCurrent()) {
+        // Agent discovery can intentionally switch from the default agent to
+        // the stored agent, invalidating this request. Apply the now-current
+        // snapshot with fresh generations so its per-agent tree state and pins
+        // are both restored instead of accepting the preserve-only broadcast.
+        const snapshot = shared.currentIndex()
+        if (result.error || !snapshot) {
+          loading.value = false
+          updatePinsState({ loading: false })
+          if (result.error) showError(result.error)
+          return
+        }
+        const retryIndexGeneration = ++mount.indexGeneration
+        const retryTreeGeneration = ++mount.treeGeneration
+        const [applied] = await Promise.all([
+          applyIndex(
+            snapshot,
+            preserveState ? 'preserve' : 'reset',
+            { indexGeneration: retryIndexGeneration, treeGeneration: retryTreeGeneration },
+          ),
+          loadPins(),
+        ])
+        if (!applied && isActiveMount(mount)) await loadIndex(preserveState)
+        return
+      }
       const snapshot = shared.currentIndex()
       if (result.error || !snapshot) {
         loading.value = false
+        updatePinsState({ loading: false })
         if (result.error) showError(result.error)
         return
       }
@@ -2669,6 +2764,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     } catch (caught: any) {
       if (!shared.retired && isActiveMount(mount)) {
         loading.value = false
+        updatePinsState({ loading: false })
         showError(cliError(caught?.message || t('agent-discovery-failed')))
       }
     }
@@ -3676,11 +3772,17 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     try {
       await terminal.createTerminalTab({
         cwd: resumable.rootPath,
-        argv: [...activeResumeArgv.value, resumable.id],
+        argv: terminalResumeArgv(
+          activeAgent.value,
+          activeDescriptor.value?.pathStyle || 'posix',
+          activeResumeArgv.value,
+          resumable.id,
+          activeDescriptor.value?.resume.windowsCommand,
+        ),
         title: resolveSessionTitle(resumable).slice(0, 24),
       })
-    } catch {
-      if (isCurrent()) showError(t('error-open-terminal'), {
+    } catch (caught: any) {
+      if (isCurrent()) showError(cliError(caught?.message || t('error-open-terminal')), {
         label: t('copy-command'),
         run: () => { void copyResumeCommand(resumable, isCurrent) },
       })
@@ -3713,8 +3815,17 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     try {
       if (!isCurrent()) return false
       shared.setSessions(snapshot.sessions)
-      const caps = agents.value.find(agent => agent.id === snapshot.agent)?.capabilities || UNAVAILABLE_CAPABILITIES
+      const requestDescriptor = agents.value.find(agent => agent.id === snapshot.agent)
+      const caps = requestDescriptor?.capabilities || UNAVAILABLE_CAPABILITIES
+      const requestPathStyle = requestDescriptor?.pathStyle || 'posix'
       const requestAgent = snapshot.agent
+      if (requestPathStyle === 'windows') {
+        visibleRoot.value = normalizeStoredTreeRoot(visibleRoot.value, requestPathStyle) || WINDOWS_FOREST_ROOT
+        committedSelection.value = {
+          ...committedSelection.value,
+          path: normalizeStoredTreeRoot(committedSelection.value.path, requestPathStyle) || visibleRoot.value,
+        }
+      }
       if (caps.originFilter) {
         try {
           hideScriptedSessions.value = await ctx.storage.get(
@@ -3739,25 +3850,26 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       if (!isCurrentTree()) return false
       let savedRoot: string | null = null
       try {
-        savedRoot = normalizeStoredTreeRoot(await readPerAgentTreeSetting(STORAGE_KEYS.treeRoot, requestAgent))
+        savedRoot = normalizeStoredTreeRoot(await readPerAgentTreeSetting(STORAGE_KEYS.treeRoot, requestAgent), requestPathStyle)
       } catch { /* use the indexed common ancestor */ }
       if (!isCurrentTree()) return false
-      visibleRoot.value = savedRoot || deepestCommonAncestor(originFilteredSessions.value.map(session => session.rootPath))
+      visibleRoot.value = savedRoot || deepestCommonAncestor(originFilteredSessions.value.map(session => session.rootPath), requestPathStyle)
       committedSelection.value = { path: visibleRoot.value, mode: 'subtree', sessionId: null }
 
       let savedExpanded: Set<string> | null = null
       try {
         savedExpanded = normalizeStoredExpandedPaths(
           await readPerAgentTreeSetting(STORAGE_KEYS.treeExpandedPaths, requestAgent),
+          requestPathStyle,
         )
       } catch { /* use the indexed tree paths */ }
       if (!isCurrentTree()) return false
       if (savedExpanded) {
         expandedPaths.value = savedExpanded
       } else {
-        expandedPaths.value = collectTreePaths(deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value))
+        expandedPaths.value = collectTreePaths(deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value, requestPathStyle))
       }
-      expandedPaths.value.add(visibleRoot.value)
+      expandedPaths.value.add(pathKey(visibleRoot.value, requestPathStyle))
       return true
     } catch (caught: any) {
       if (isCurrent()) showError(cliError(caught?.message || String(caught)))
@@ -3839,13 +3951,14 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   function setVisibleRoot(nextRoot: string) {
     if (bulkRunning.value) return
     if (activeMount) activeMount.treeGeneration++
-    visibleRoot.value = normalizePath(nextRoot)
+    const style = activePathStyle()
+    visibleRoot.value = normalizeIoPath(nextRoot, style)
     updatePinsState({ activePath: null })
     clearSearchOverlay()
     committedSelection.value = { path: visibleRoot.value, mode: committedSelection.value.mode, sessionId: null }
     applyFilterChange()
     resetTranscript()
-    expandedPaths.value = new Set(expandedPaths.value).add(visibleRoot.value)
+    expandedPaths.value = new Set(expandedPaths.value).add(pathKey(visibleRoot.value, style))
     persist(perAgentStorageKey(STORAGE_KEYS.treeRoot), visibleRoot.value)
     persistExpandedPaths()
   }
@@ -3858,7 +3971,10 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     pickerError.value = null
     let rawOutput: string | undefined
     try {
-      const result = await runAgent(['list-dirs', dir], { timeout: 10_000 })
+      const result = await runAgent(
+        activePathStyle() === 'windows' && dir === WINDOWS_FOREST_ROOT ? ['list-roots'] : ['list-dirs', dir],
+        { timeout: 10_000 },
+      )
       if (!isActiveMount(mount) || requestSeq !== mount.pickerRequestSeq) return
       rawOutput = result.stdout
       if (result.code !== 0) {
@@ -3890,7 +4006,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   }
 
   async function navigatePickerDir(dir: string) {
-    pickerCurrentDir.value = normalizePath(dir)
+    pickerCurrentDir.value = normalizeIoPath(dir, activePathStyle())
     await loadPickerDirs(pickerCurrentDir.value)
   }
 
@@ -3909,10 +4025,13 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   function openRootPicker(target: PickerTarget) {
     if (activeMount) activeMount.pickerValidationSeq++
     pickerTarget.value = target
+    const style = activePathStyle()
     const targetPath = target === 'export-destination' ? exportDestination.value : visibleRoot.value
-    const startDir = targetPath.startsWith('/') ? normalizePath(targetPath) : visibleRoot.value
+    const startDir = style === 'windows'
+      ? describePath(targetPath, style)?.ioPath || describePath(visibleRoot.value, style)?.ioPath || WINDOWS_FOREST_ROOT
+      : targetPath.startsWith('/') ? normalizePath(targetPath) : visibleRoot.value
     pickerCurrentDir.value = startDir
-    pickerManualPath.value = startDir
+    pickerManualPath.value = startDir === WINDOWS_FOREST_ROOT ? '' : startDir
     pickerEntries.value = []
     pickerError.value = null
     showRootPicker.value = true
@@ -3930,7 +4049,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       && target === pickerTarget.value
       && requestSeq === mount.pickerValidationSeq
     const nextRoot = candidate.trim()
-    if (!nextRoot.startsWith('/')) {
+    if (!isAbsolutePathForStyle(nextRoot, activePathStyle())) {
       if (isCurrent()) pickerError.value = t('tree-root-absolute-error')
       return
     }
@@ -4029,6 +4148,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       partition,
       scopePath: committedSelection.value.path,
       scopeMode: committedSelection.value.mode,
+      scopeMatchKeys: committedPinMatchKeys(),
+      pathStyle: activePathStyle(),
       timeRange: 'all',
       branch: '',
       query: '',
@@ -4044,6 +4165,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       partition,
       scopePath: committedSelection.value.path,
       scopeMode: committedSelection.value.mode,
+      scopeMatchKeys: committedPinMatchKeys(),
+      pathStyle: activePathStyle(),
       timeRange: timeRange.value,
       branch: branchFilter.value,
       query: searchQuery.value,
@@ -4111,7 +4234,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   function flashTreePath(rootPath: string) {
     const mount = activeMount
     if (!isActiveMount(mount)) return
-    transientHighlightPath.value = normalizePath(rootPath)
+    transientHighlightPath.value = pathKey(rootPath, activePathStyle())
     if (mount.highlightTimer) clearTimeout(mount.highlightTimer)
     mount.highlightTimer = scheduleMountTimeout(() => {
       transientHighlightPath.value = null
@@ -4125,13 +4248,15 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     const mount = activeMount
     if (!isActiveMount(mount)) return
     const requestGeneration = ++mount.searchGeneration
-    const global = globalSearch.value
+    const requestedGlobalToggle = globalSearch.value
     const scopePath = committedSelection.value.path
+    const global = requestedGlobalToggle
+      || (activePathStyle() === 'windows' && scopePath === WINDOWS_FOREST_ROOT)
     const requestPartition = activePartition.value
     const isCurrent = () => isActiveMount(mount)
       && requestGeneration === mount.searchGeneration
       && activePartition.value === requestPartition
-      && globalSearch.value === global
+      && globalSearch.value === requestedGlobalToggle
       && committedSelection.value.path === scopePath
     searching.value = true
     clearError()
@@ -4336,16 +4461,17 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     committedSelection.value = { path: activePath, mode: 'subtree', sessionId: null }
 
     const nextExpanded = new Set(expandedPaths.value)
-    let ancestor = parentPath(activePath)
+    const style = activePathStyle()
+    let ancestor = parentPathForStyle(activePath, style)
     while (true) {
-      nextExpanded.add(ancestor)
-      if (ancestor === '/') break
-      ancestor = parentPath(ancestor)
+      nextExpanded.add(pathKey(ancestor, style))
+      if (ancestor === (style === 'windows' ? WINDOWS_FOREST_ROOT : '/')) break
+      ancestor = parentPathForStyle(ancestor, style)
     }
     expandedPaths.value = nextExpanded
     persistExpandedPaths()
 
-    if (!isPathWithin(visibleRoot.value, activePath)) {
+    if (!isPathWithinStyle(visibleRoot.value, activePath, style)) {
       setVisibleRoot(activePath)
       updatePinsState({ activePath })
     }
@@ -4355,8 +4481,10 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   }
 
   function pinMetadata(pin: FolderPin): { count: number; lastActiveAt: string } {
+    const style = activePathStyle()
     const keys = pinMatchKeys(pin)
-    const exactSessions = originFilteredSessions.value.filter(session => keys.has(normalizePinMatchKey(session.rootPath)))
+    const normalizedKeys = new Set(Array.from(keys, key => pathKey(key, style)))
+    const exactSessions = originFilteredSessions.value.filter(session => normalizedKeys.has(pathKey(session.rootPath, style)))
     return {
       count: exactSessions.length,
       lastActiveAt: exactSessions.reduce((newest, session) => newerTimestamp(newest, session.lastActiveAt), ''),
@@ -4366,12 +4494,15 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   function renderPinRow(pin: FolderPin, index: number): any {
     const selectMode = pinsSelectMode.value
     const metadata = pinMetadata(pin)
-    const name = pathName(pin.path)
+    const name = pathNameForStyle(pin.path, activePathStyle())
+    const displayName = displayPath(name, activeDescriptor.value?.pathStyle || 'posix')
     const count = t(metadata.count === 1 ? 'pin-session-count-one' : 'pin-session-count-other', { n: metadata.count })
     const activity = t('pin-last-activity', { time: formatRelativeTime(metadata.lastActiveAt, t) })
-    const missingTitle = pin.exists ? pin.path : t('pin-folder-missing')
+    const missingTitle = pin.exists
+      ? displayPath(pin.path, activeDescriptor.value?.pathStyle || 'posix')
+      : t('pin-folder-missing')
     const activePath = pinsSelection.value.activePath
-    const active = activePath !== null && normalizePath(pin.path) === normalizePath(activePath)
+    const active = activePath !== null && pathKey(pin.path, activePathStyle()) === pathKey(activePath, activePathStyle())
     const activateOrToggle = (shiftKey = false) => {
       if (pinsBulkRunning.value) return
       if (pinsSelectMode.value) {
@@ -4407,7 +4538,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
         type: 'checkbox',
         checked: pinsSelection.value.selected.has(pin.path),
         disabled: pinsBulkRunning.value,
-        'aria-label': t('pin-select-folder', { name }),
+        'aria-label': t('pin-select-folder', { name: displayName }),
         onClick: (event: MouseEvent) => {
           event.stopPropagation()
           reducePinsSelection(event.shiftKey
@@ -4416,7 +4547,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
         },
       }) : null,
       IconFolder(14),
-      h('span', { class: 'ccm-browser-pin-name' }, name),
+      h('span', { class: 'ccm-browser-pin-name' }, displayName),
       h('span', { class: 'ccm-browser-pin-meta' }, [
         h('span', {}, count),
         h('span', {}, activity),
@@ -4424,8 +4555,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       pinsSelectMode.value ? h('button', {
         class: 'ccm-icon-btn ccm-browser-pin-move',
         type: 'button',
-        title: t('pin-move-up', { name }),
-        'aria-label': t('pin-move-up', { name }),
+        title: t('pin-move-up', { name: displayName }),
+        'aria-label': t('pin-move-up', { name: displayName }),
         disabled: pinsBulkRunning.value || index === 0,
         onClick: (event?: MouseEvent) => {
           event?.stopPropagation()
@@ -4435,8 +4566,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       pinsSelectMode.value ? h('button', {
         class: 'ccm-icon-btn ccm-browser-pin-move',
         type: 'button',
-        title: t('pin-move-down', { name }),
-        'aria-label': t('pin-move-down', { name }),
+        title: t('pin-move-down', { name: displayName }),
+        'aria-label': t('pin-move-down', { name: displayName }),
         disabled: pinsBulkRunning.value || index === pinsSelection.value.pins.length - 1,
         onClick: (event?: MouseEvent) => {
           event?.stopPropagation()
@@ -4556,7 +4687,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
   }
 
   function renderTreeNode(node: SessionPathTreeNode, depth: number): any {
-    const selected = committedSelection.value.path === node.path
+    const selected = pathKey(committedSelection.value.path, activePathStyle()) === node.path
     const highlighted = transientHighlightPath.value === node.path
     const expanded = expandedPaths.value.has(node.path)
     const hasChildren = node.children.length > 0
@@ -4574,8 +4705,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
           highlighted ? 'ccm-browser-tree-node-highlight' : '',
         ],
         style: { paddingLeft: `${8 + depth * 16}px` },
-        title: node.path,
-        onClick: () => selectNode(node.path),
+        title: displayPath(node.ioPath, activeDescriptor.value?.pathStyle || 'posix'),
+        onClick: () => selectNode(node.ioPath),
       }, [
         hasChildren
           ? h('button', {
@@ -4590,7 +4721,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
             }, [expanded ? IconChevronDown(14) : IconChevronRight(14)])
           : h('span', { class: 'ccm-browser-tree-chevron-spacer' }),
         IconFolder(15),
-        h('span', { class: 'ccm-browser-tree-label' }, node.name),
+        h('span', { class: 'ccm-browser-tree-label' }, displayPath(node.name, activeDescriptor.value?.pathStyle || 'posix')),
         h('span', { class: 'ccm-browser-tree-badge', title: badgeTitle }, [
           h('span', { class: 'ccm-browser-tree-count ccm-browser-tree-count-active' }, t('tree-count-active', { n: node.activeCount })),
           h('span', { class: 'ccm-browser-tree-count ccm-browser-tree-count-archive' }, t('tree-count-archive', { n: node.archiveCount })),
@@ -4605,6 +4736,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
 
   function renderTreePane() {
     const pinnedFolder = currentFolderPin()
+    const style = activePathStyle()
+    const atWindowsRoots = style === 'windows' && visibleRoot.value === WINDOWS_FOREST_ROOT
     return h('aside', {
       class: 'ccm-browser-pane ccm-browser-tree-pane',
       style: compactMode.value ? undefined : { width: `calc(${paneWidths.value.left}px * var(--ccm-fs, 1))` },
@@ -4630,6 +4763,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
                 || pinsSelection.value.loading
                 || pinsBulkRunning.value
                 || Boolean(pinsSelection.value.corruptSidecar)
+                || (style === 'windows' && committedSelection.value.path === WINDOWS_FOREST_ROOT)
                 || !committedSelection.value.path,
               onClick: () => enqueuePinMutation(pinnedFolder
                 ? { type: 'remove', paths: [pinnedFolder.path] }
@@ -4639,8 +4773,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
               class: 'ccm-icon-btn',
               title: t('navigate-parent'),
               'aria-label': t('navigate-parent'),
-              disabled: loading.value || bulkRunning.value || visibleRoot.value === '/',
-              onClick: () => setVisibleRoot(parentPath(visibleRoot.value)),
+              disabled: loading.value || bulkRunning.value || (style === 'windows' ? atWindowsRoots : visibleRoot.value === '/'),
+              onClick: () => setVisibleRoot(parentPathForStyle(visibleRoot.value, style)),
             }, [IconArrowLeft(15)]),
             h('button', {
               class: ['ccm-icon-btn', committedSelection.value.mode === 'exact' ? 'ccm-icon-btn-active' : ''],
@@ -4664,6 +4798,7 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
               disabled: loading.value
                 || bulkRunning.value
                 || !committedSelection.value.path
+                || (style === 'windows' && committedSelection.value.path === WINDOWS_FOREST_ROOT)
                 || committedSelection.value.path === visibleRoot.value,
               onClick: () => setVisibleRoot(committedSelection.value.path),
             }, [IconFolderDown(15)]),
@@ -4677,12 +4812,17 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
             }, [IconPencil(15)]),
           ]),
         ]),
-        h('div', { class: 'ccm-browser-root-path', title: visibleRoot.value }, visibleRoot.value),
+        h('div', {
+          class: 'ccm-browser-root-path',
+          title: atWindowsRoots ? t('windows-roots') : displayPath(visibleRoot.value, style),
+        }, atWindowsRoots ? t('windows-roots') : displayPath(visibleRoot.value, style)),
         h('div', { class: 'ccm-browser-tree-body' }, [
           loading.value
             ? h('div', { class: 'ccm-browser-pane-state' }, t('building-index'))
             : tree.value
-              ? renderTreeNode(tree.value, 0)
+              ? tree.value.path === WINDOWS_FOREST_ROOT
+                ? tree.value.children.map(child => renderTreeNode(child, 0))
+                : renderTreeNode(tree.value, 0)
               : h('div', { class: 'ccm-browser-pane-state' }, t('no-indexed-sessions')),
         ]),
       ]),
@@ -4831,7 +4971,10 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
           title,
           titles.secondary ? h('span', { class: 'ccm-browser-title-sub' }, titles.secondary) : null,
         ]),
-        h('span', { class: 'ccm-browser-search-path', title: session.rootPath }, session.rootPath),
+        h('span', {
+          class: 'ccm-browser-search-path',
+          title: displayPath(session.rootPath, activeDescriptor.value?.pathStyle || 'posix'),
+        }, displayPath(session.rootPath, activeDescriptor.value?.pathStyle || 'posix')),
       ]),
       h('div', { class: 'ccm-browser-search-match' }, result.match),
       h('div', { class: 'ccm-browser-session-footer' }, [
@@ -4851,25 +4994,11 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
     const selectingExportDestination = pickerTarget.value === 'export-destination'
     const pickerTitle = t(selectingExportDestination ? 'picker-export-title' : 'picker-title')
     const dir = pickerCurrentDir.value
-    const segments = dir.split('/').filter(Boolean)
-    const breadcrumbs: any[] = [
-      h('span', {
-        class: 'ccm-picker-crumb',
-        role: 'button',
-        tabindex: 0,
-        onClick: () => { void navigatePickerDir('/') },
-        onKeydown: (event: KeyboardEvent) => {
-          if (event.key !== 'Enter' && event.key !== ' ') return
-          event.preventDefault()
-          void navigatePickerDir('/')
-        },
-      }, '/'),
-    ]
-    let accumulated = ''
-    for (const segment of segments) {
-      accumulated += `/${segment}`
-      const target = accumulated
-      breadcrumbs.push(h('span', { class: 'ccm-picker-crumb-sep' }, '/'))
+    const style = activePathStyle()
+    const atWindowsRoots = style === 'windows' && dir === WINDOWS_FOREST_ROOT
+    const breadcrumbs: any[] = []
+    const pushCrumb = (label: string, target: string, separator?: string) => {
+      if (separator) breadcrumbs.push(h('span', { class: 'ccm-picker-crumb-sep' }, separator))
       breadcrumbs.push(h('span', {
         class: 'ccm-picker-crumb',
         role: 'button',
@@ -4880,7 +5009,20 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
           event.preventDefault()
           void navigatePickerDir(target)
         },
-      }, segment))
+      }, label))
+    }
+    if (style === 'windows') {
+      pushCrumb(t('windows-roots'), WINDOWS_FOREST_ROOT)
+      if (!atWindowsRoots) {
+        for (const ancestor of pathAncestors(dir, style)) pushCrumb(ancestor.label, ancestor.ioPath, '›')
+      }
+    } else {
+      pushCrumb('/', '/')
+      let accumulated = ''
+      for (const segment of dir.split('/').filter(Boolean)) {
+        accumulated += `/${segment}`
+        pushCrumb(segment, accumulated, '/')
+      }
     }
 
     return h('div', {
@@ -4924,13 +5066,22 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
             onClick: () => { void validateAndCommitRoot(pickerManualPath.value) },
           }, [IconCheck(14), h('span', {}, t(selectingExportDestination ? 'picker-export-use-manual-path' : 'picker-use-manual-path'))]),
         ]),
-        h('div', { class: 'ccm-picker-current' }, [IconFolder(14), h('span', {}, t('picker-current', { path: dir }))]),
+        h('div', { class: 'ccm-picker-current' }, [
+          IconFolder(14),
+          h('span', {}, t('picker-current', {
+            path: atWindowsRoots ? t('windows-roots') : displayPath(dir, style),
+          })),
+        ]),
         h('div', { class: 'ccm-picker-actions' }, [
           h('button', {
             class: 'ccm-picker-action-btn',
             type: 'button',
+            disabled: atWindowsRoots,
             onClick: () => { void validateAndCommitRoot(dir) },
-          }, [IconCheck(14), h('span', {}, t(selectingExportDestination ? 'picker-export-select-current' : 'picker-select-current', { name: dir.split('/').pop() || '/' }))]),
+          }, [IconCheck(14), h('span', {}, t(
+            selectingExportDestination ? 'picker-export-select-current' : 'picker-select-current',
+            { name: atWindowsRoots ? t('windows-roots') : pathNameForStyle(dir, style) },
+          ))]),
         ]),
         h('div', { class: 'ccm-picker-breadcrumb' }, breadcrumbs),
         h('div', { class: 'ccm-picker-list' }, pickerLoading.value
@@ -4952,8 +5103,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
                 }, [
                   IconFolder(14),
                   h('div', { class: 'ccm-picker-item-info' }, [
-                    h('span', { class: 'ccm-picker-item-name' }, entry.name),
-                    h('span', { class: 'ccm-picker-item-path' }, entry.path),
+                    h('span', { class: 'ccm-picker-item-name' }, displayPath(entry.name, activeDescriptor.value?.pathStyle || 'posix')),
+                    h('span', { class: 'ccm-picker-item-path' }, displayPath(entry.path, activeDescriptor.value?.pathStyle || 'posix')),
                   ]),
                   IconChevronRight(14),
                 ]))
@@ -5088,6 +5239,8 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
         partition,
         scopePath: committedSelection.value.path,
         scopeMode: committedSelection.value.mode,
+        scopeMatchKeys: committedPinMatchKeys(),
+        pathStyle: activePathStyle(),
         timeRange: timeRange.value,
         branch: branchFilter.value,
         query: searchQuery.value,
@@ -5378,12 +5531,15 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
       ]),
       h('div', {
         class: ['ccm-browser-scope-summary', overlay ? 'ccm-browser-search-breadcrumb' : ''],
-        title: overlay?.scopePath || committedSelection.value.path,
+        title: displayPath(
+          overlay?.scopePath || committedSelection.value.path,
+          activeDescriptor.value?.pathStyle || 'posix',
+        ),
       }, [
         h('span', {}, overlay ? t('search') : t(committedSelection.value.mode === 'subtree' ? 'subtree' : 'exact-directory')),
         h('span', { class: 'ccm-browser-scope-path' }, overlay
-          ? `${overlay.scopePath ? overlay.scopePath : t('global')} · “${overlay.query}”`
-          : committedSelection.value.path),
+          ? `${overlay.scopePath ? displayPath(overlay.scopePath, activeDescriptor.value?.pathStyle || 'posix') : t('global')} · “${overlay.query}”`
+          : displayPath(committedSelection.value.path, activeDescriptor.value?.pathStyle || 'posix')),
         overlay
           ? h('button', {
               class: 'ccm-icon-btn',
@@ -5819,7 +5975,10 @@ function createPaneRuntime(ctx: PluginContext, props: any, shared: SharedService
             }, [copiedSessionId.value ? IconCheck(13) : IconCopy(13)]),
             copiedSessionId.value ? h('span', { class: 'ccm-browser-copy-feedback', 'aria-live': 'polite' }, t('copied')) : null,
           ]),
-          h('div', { class: 'ccm-browser-transcript-cwd', title: session.rootPath }, session.rootPath),
+          h('div', {
+            class: 'ccm-browser-transcript-cwd',
+            title: displayPath(session.rootPath, activeDescriptor.value?.pathStyle || 'posix'),
+          }, displayPath(session.rootPath, activeDescriptor.value?.pathStyle || 'posix')),
           h('div', { class: 'ccm-browser-transcript-span', title: `${session.createdAt} → ${session.lastActiveAt}` }, formatSessionSpan(session.createdAt, session.lastActiveAt, locale(), t)),
         ]),
         h('div', { class: 'ccm-browser-pane-actions' }, [

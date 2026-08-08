@@ -2,6 +2,7 @@ import * as fs from 'fs'
 import * as path from 'path'
 import * as readline from 'readline'
 import * as crypto from 'crypto'
+import * as os from 'os'
 import { codexConnector } from './codex-connector'
 
 let settingsMigrationAttempted = false
@@ -30,7 +31,7 @@ export function migratePluginSettings(pluginDataBase: string, legacyDirName: str
 }
 
 // --- Paths ---
-const HOME = process.env.HOME || '/root'
+const HOME = process.env.HOME || os.homedir()
 const CLAUDE_DIR = path.join(HOME, '.claude')
 const PROJECTS_DIR = process.env.CC_SB_PROJECTS_DIR || path.join(CLAUDE_DIR, 'projects')
 const ARCHIVE_DIR = process.env.CC_SB_ARCHIVE_DIR || path.join(CLAUDE_DIR, 'projects-archive')
@@ -47,8 +48,9 @@ export interface ConnectorCapabilities { archive: boolean; rename: boolean; dele
 export interface ConnectorAvailability { available: boolean; degraded: boolean; reason?: string }
 export interface SessionConnector {
   id: AgentId
+  pathStyle: 'windows' | 'posix'
   capabilities: ConnectorCapabilities
-  resume: { argv: string[] }
+  resume: { argv: string[]; windowsCommand?: string }
   isAvailable(): ConnectorAvailability
   buildIndex(refresh: boolean): void
   indexSessions(refresh: boolean): IndexedSession[]
@@ -127,6 +129,7 @@ interface StoredPin {
   path: string
   addedAt: number
   matchKeys?: string[]
+  matchKeyStyle?: 'windows' | 'posix'
 }
 
 interface PinStore {
@@ -205,7 +208,10 @@ function lexicalNormalizePinPath(value: string): string {
 }
 
 function pinMatchKey(value: string): string {
-  return lexicalNormalizePinPath(value.normalize('NFC').toLowerCase())
+  const normalized = path.resolve(value).normalize('NFC')
+  return process.platform === 'win32'
+    ? lexicalNormalizePinPath(normalized.toLowerCase())
+    : normalized
 }
 
 function isPinStore(value: unknown): value is PinStore {
@@ -223,6 +229,7 @@ function isPinStore(value: unknown): value is PinStore {
       && (item.matchKeys === undefined
         || (Array.isArray(item.matchKeys)
           && item.matchKeys.every(key => typeof key === 'string' && key.length > 0)))
+      && (item.matchKeyStyle === undefined || item.matchKeyStyle === 'windows' || item.matchKeyStyle === 'posix')
   })
 }
 
@@ -311,6 +318,19 @@ function loadPinsForMutation(agent: AgentId, resetCorrupt: boolean): PinMutation
   return { pins: [], resetCorrupt: true }
 }
 
+function fsyncDirectory(directoryPath: string) {
+  const directoryFd = fs.openSync(directoryPath, 'r')
+  try {
+    fs.fsyncSync(directoryFd)
+  } catch (error: any) {
+    const unsupportedOnWindows = process.platform === 'win32'
+      && ['EINVAL', 'ENOTSUP', 'EPERM'].includes(error?.code)
+    if (!unsupportedOnWindows) throw error
+  } finally {
+    fs.closeSync(directoryFd)
+  }
+}
+
 function writePinStore(agent: AgentId, pins: StoredPin[]) {
   fs.mkdirSync(PINS_DIR, { recursive: true })
   pinTempCounter = (pinTempCounter + 1) >>> 0
@@ -329,12 +349,7 @@ function writePinStore(agent: AgentId, pins: StoredPin[]) {
     fs.closeSync(descriptor)
     fs.renameSync(tempPath, destination)
 
-    const directoryFd = fs.openSync(PINS_DIR, 'r')
-    try {
-      fs.fsyncSync(directoryFd)
-    } finally {
-      fs.closeSync(directoryFd)
-    }
+    fsyncDirectory(PINS_DIR)
   } finally {
     if (fd !== undefined) {
       try { fs.closeSync(fd) } catch { /* preserve the primary failure */ }
@@ -380,7 +395,7 @@ function cmdListPins(agentValue: string) {
       let exists = false
       try { exists = fs.statSync(pin.path).isDirectory() } catch { /* missing and unreadable pins remain listed */ }
       const matchKeys = pin.matchKeys ? [...pin.matchKeys] : []
-      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys }
+      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys, matchKeyStyle: pin.matchKeyStyle }
     }),
   })
 }
@@ -398,20 +413,33 @@ function cmdAddPin(agentValue: string, suppliedPath: string, resetCorrupt: boole
 
   const suppliedAbsolutePath = path.resolve(suppliedPath)
   const incomingMatchKeys = Array.from(new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]))
+  const incomingMatchKeyStyle = process.platform === 'win32' ? 'windows' : 'posix'
   const state = loadPinsForMutation(agentValue, resetCorrupt)
   const existing = state.pins.find(pin => pin.path === canonicalPath)
   if (existing) {
     const storedMatchKeys = existing.matchKeys || []
-    const mergedMatchKeys = Array.from(new Set([...storedMatchKeys, ...incomingMatchKeys]))
-    const matchKeysMerged = mergedMatchKeys.length !== storedMatchKeys.length
-    if (matchKeysMerged) existing.matchKeys = mergedMatchKeys
+    const mergedMatchKeys = existing.matchKeyStyle === incomingMatchKeyStyle
+      ? Array.from(new Set([...storedMatchKeys, ...incomingMatchKeys]))
+      : incomingMatchKeys
+    const matchKeysMerged = existing.matchKeyStyle !== incomingMatchKeyStyle
+      || mergedMatchKeys.length !== storedMatchKeys.length
+      || mergedMatchKeys.some((key, index) => key !== storedMatchKeys[index])
+    if (matchKeysMerged) {
+      existing.matchKeys = mergedMatchKeys
+      existing.matchKeyStyle = incomingMatchKeyStyle
+    }
     if (state.resetCorrupt || matchKeysMerged) writePinStore(agentValue, state.pins)
     output({ canonicalPath, outcome: 'duplicate', matchKeysMerged })
     return
   }
   if (state.pins.length >= 500) fail('pin-limit-reached', 'Cannot add pin: the 500-pin limit has been reached')
 
-  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys: incomingMatchKeys }, ...state.pins])
+  writePinStore(agentValue, [{
+    path: canonicalPath,
+    addedAt: Date.now(),
+    matchKeys: incomingMatchKeys,
+    matchKeyStyle: incomingMatchKeyStyle,
+  }, ...state.pins])
   output({ canonicalPath, outcome: 'applied' })
 }
 
@@ -542,7 +570,8 @@ function validateEncodedPath(value: string) {
 }
 
 function validateAbsolutePath(value: string) {
-  if (!path.isAbsolute(value) || value.split(path.sep).some(segment => segment === '.' || segment === '..')) {
+  const segments = process.platform === 'win32' ? value.split(/[\\/]/) : value.split(path.sep)
+  if (!path.isAbsolute(value) || segments.some(segment => segment === '.' || segment === '..')) {
     fail('invalid-absolute-path', 'Path must be absolute and contain no traversal segments')
   }
 }
@@ -1070,6 +1099,7 @@ function resolveAllowMissing(filePath: string): string {
     }
   }
 }
+
 
 function cleanupCreatedExportDirectories(firstCreated: string | undefined, requested: string) {
   if (!firstCreated) return
@@ -1873,6 +1903,7 @@ function cmdListRecent(limit = 30) {
 
 const claudeCodeConnector: SessionConnector = {
   id: 'claude-code',
+  pathStyle: process.platform === 'win32' ? 'windows' : 'posix',
   capabilities: {
     archive: true,
     // No rename write path exists.
@@ -1921,16 +1952,34 @@ function findConnector(args: string[]): { connector: SessionConnector; rest: str
 function cmdAgents() {
   output(CONNECTORS.map(connector => {
     const availability = connector.isAvailable()
+    const windowsCommand = connector.id === 'codex' ? resolveWindowsCommandShim('codex.cmd') : undefined
     return {
       id: connector.id,
+      pathStyle: connector.pathStyle,
       available: availability.available,
       ...(!availability.available && availability.reason ? { unavailableReason: availability.reason } : {}),
       ...(connector.id === 'codex' ? { degraded: availability.degraded } : {}),
       ...(availability.degraded && availability.reason ? { degradedReason: availability.reason } : {}),
       capabilities: connector.capabilities,
-      resume: connector.resume,
+      resume: {
+        ...connector.resume,
+        ...(windowsCommand ? { windowsCommand } : {}),
+      },
     }
   }))
+}
+
+function resolveWindowsCommandShim(fileName: string): string | undefined {
+  if (process.platform !== 'win32') return undefined
+  for (const entry of (process.env.PATH || '').split(path.delimiter)) {
+    const directory = entry.trim().replace(/^"(.*)"$/, '$1')
+    if (!path.isAbsolute(directory)) continue
+    const candidate = path.join(directory, fileName)
+    try {
+      if (fs.statSync(candidate).isFile()) return candidate
+    } catch { /* missing and inaccessible PATH entries are skipped */ }
+  }
+  return undefined
 }
 
 function cmdListDirs(dirPath: string) {
@@ -1967,6 +2016,21 @@ function cmdListDirs(dirPath: string) {
   } catch (error: any) {
     output({ error: 'unreadable-directory', message: error?.message || `Could not list directory: ${resolved}` })
   }
+}
+
+function cmdListRoots() {
+  if (process.platform !== 'win32') {
+    output({ dirs: [{ name: '/', path: '/' }] })
+    return
+  }
+  const dirs: { name: string; path: string }[] = []
+  for (let code = 65; code <= 90; code += 1) {
+    const root = `${String.fromCharCode(code)}:\\`
+    try {
+      if (fs.statSync(root).isDirectory()) dirs.push({ name: root, path: root })
+    } catch { /* inaccessible and empty drive letters are omitted */ }
+  }
+  output({ dirs })
 }
 
 function cmdCheckDir(dirPath: string) {
@@ -2069,6 +2133,10 @@ async function main() {
   case 'list-dirs':
     if (args.length !== 1) fail('invalid-arguments', 'Usage: list-dirs <path>')
     cmdListDirs(args[0])
+    break
+  case 'list-roots':
+    if (args.length !== 0) fail('invalid-arguments', 'Usage: list-roots')
+    cmdListRoots()
     break
   case 'check-dir':
     if (args.length !== 1) fail('invalid-arguments', 'Usage: check-dir <absolutePath>')

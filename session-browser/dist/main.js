@@ -413,6 +413,7 @@ var dictionaries = {
     "picker-check-error": "Could not validate the directory.",
     "picker-close": "Close directory picker",
     "picker-current": "Browsing: {path}",
+    "windows-roots": "This PC",
     "picker-error": "Could not list this directory: {msg}",
     "picker-list-error": "Could not list this directory.",
     "picker-loading": "Loading directories\u2026",
@@ -694,6 +695,7 @@ var dictionaries = {
     "picker-check-error": "\u65E0\u6CD5\u9A8C\u8BC1\u76EE\u5F55\u3002",
     "picker-close": "\u5173\u95ED\u76EE\u5F55\u9009\u62E9\u5668",
     "picker-current": "\u6B63\u5728\u6D4F\u89C8\uFF1A{path}",
+    "windows-roots": "\u6B64\u7535\u8111",
     "picker-error": "\u65E0\u6CD5\u5217\u51FA\u6B64\u76EE\u5F55\uFF1A{msg}",
     "picker-list-error": "\u65E0\u6CD5\u5217\u51FA\u6B64\u76EE\u5F55\u3002",
     "picker-loading": "\u6B63\u5728\u52A0\u8F7D\u76EE\u5F55\u2026",
@@ -838,7 +840,201 @@ function resolveLocale(setting, documentLanguage = "") {
   return documentLanguage.trim().toLowerCase().startsWith("zh") ? "zh" : "en";
 }
 
+// src/path-model.ts
+var WINDOWS_FOREST_ROOT = "::windows-roots::";
+function normalizePosixPath(value) {
+  const trimmed = value.trim();
+  if (!trimmed) return "/";
+  const absolute = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+  const parts = [];
+  for (const part of absolute.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") parts.pop();
+    else parts.push(part);
+  }
+  return parts.length ? `/${parts.join("/")}` : "/";
+}
+function migrateLegacyWindowsPath(value) {
+  const trimmed = value.trim();
+  return /^\/(?:[A-Za-z]:[\\/]|\\\\)/.test(trimmed) ? trimmed.slice(1) : trimmed;
+}
+function normalizedSegments(value) {
+  const result = [];
+  for (const segment of value.split("\\")) {
+    if (!segment || segment === ".") continue;
+    if (segment === "..") result.pop();
+    else result.push(segment);
+  }
+  return result;
+}
+function comparisonSegment(value) {
+  return value.normalize("NFC").toLowerCase();
+}
+function windowsDescriptor(value) {
+  const ioPath = migrateLegacyWindowsPath(value);
+  if (!ioPath || ioPath === WINDOWS_FOREST_ROOT || ioPath === "/") return null;
+  const normalized = ioPath.replaceAll("/", "\\");
+  let kind;
+  let rootIdentity;
+  let rootLabel;
+  let rootIoPath;
+  let remainder;
+  let match = /^\\\\\?\\([A-Za-z]):\\(.*)$/.exec(normalized);
+  if (match) {
+    kind = "drive";
+    const drive = match[1].toUpperCase();
+    rootIdentity = drive.toLowerCase();
+    rootLabel = `${drive}:\\`;
+    rootIoPath = `\\\\?\\${drive}:\\`;
+    remainder = match[2];
+  } else {
+    match = /^\\\\\?\\UNC\\([^\\]+)\\([^\\]+)(?:\\(.*))?$/.exec(normalized);
+    if (match) {
+      kind = "unc";
+      const server = match[1];
+      const share = match[2];
+      rootIdentity = `${comparisonSegment(server)}\\${comparisonSegment(share)}`;
+      rootLabel = `\\\\${server}\\${share}`;
+      rootIoPath = `\\\\?\\UNC\\${server}\\${share}\\`;
+      remainder = match[3] || "";
+    } else {
+      match = /^([A-Za-z]):\\(.*)$/.exec(normalized);
+      if (match) {
+        kind = "drive";
+        const drive = match[1].toUpperCase();
+        rootIdentity = drive.toLowerCase();
+        rootLabel = `${drive}:\\`;
+        rootIoPath = `${drive}:\\`;
+        remainder = match[2];
+      } else {
+        match = /^\\\\([^\\]+)\\([^\\]+)(?:\\(.*))?$/.exec(normalized);
+        if (!match) return null;
+        kind = "unc";
+        const server = match[1];
+        const share = match[2];
+        rootIdentity = `${comparisonSegment(server)}\\${comparisonSegment(share)}`;
+        rootLabel = `\\\\${server}\\${share}`;
+        rootIoPath = `\\\\${server}\\${share}\\`;
+        remainder = match[3] || "";
+      }
+    }
+  }
+  const rootKey = `win:${kind}:${rootIdentity}`;
+  const ancestors = [{ key: rootKey, ioPath: rootIoPath, label: rootLabel }];
+  const rawSegments = normalizedSegments(remainder);
+  const keySegments = [];
+  const ioSegments = [];
+  for (const segment of rawSegments) {
+    keySegments.push(comparisonSegment(segment));
+    ioSegments.push(segment);
+    ancestors.push({
+      key: `${rootKey}\\${keySegments.join("\\")}`,
+      ioPath: `${rootIoPath}${ioSegments.join("\\")}`,
+      label: segment
+    });
+  }
+  return {
+    ioPath,
+    key: ancestors.at(-1).key,
+    rootKey,
+    ancestors
+  };
+}
+function posixAncestors(value) {
+  const normalized = normalizePosixPath(value);
+  const result = [{ key: "/", ioPath: "/", label: "/" }];
+  let current = "";
+  for (const segment of normalized.split("/").filter(Boolean)) {
+    current += `/${segment}`;
+    result.push({ key: current, ioPath: current, label: segment });
+  }
+  return result;
+}
+function describePath(value, style) {
+  if (style === "windows") return windowsDescriptor(value);
+  const ancestors = posixAncestors(value);
+  return {
+    ioPath: normalizePosixPath(value),
+    key: ancestors.at(-1).key,
+    rootKey: "/",
+    ancestors
+  };
+}
+function normalizeIoPath(value, style) {
+  if (style === "windows") {
+    if (value === WINDOWS_FOREST_ROOT || value.trim() === "/") return WINDOWS_FOREST_ROOT;
+    return windowsDescriptor(value)?.ioPath || migrateLegacyWindowsPath(value);
+  }
+  return normalizePosixPath(value);
+}
+function pathKey(value, style) {
+  if (style === "windows" && (value === WINDOWS_FOREST_ROOT || value.trim() === "/")) return WINDOWS_FOREST_ROOT;
+  const descriptor = describePath(value, style);
+  if (descriptor) return descriptor.key;
+  return style === "windows" ? `win:opaque:${migrateLegacyWindowsPath(value).normalize("NFC").toLowerCase()}` : normalizePosixPath(value);
+}
+function pathAncestors(value, style) {
+  return describePath(value, style)?.ancestors || [];
+}
+function parentPathForStyle(value, style) {
+  if (style === "windows") {
+    if (value === WINDOWS_FOREST_ROOT || value.trim() === "/") return WINDOWS_FOREST_ROOT;
+    const ancestors = pathAncestors(value, style);
+    return ancestors.length <= 1 ? WINDOWS_FOREST_ROOT : ancestors[ancestors.length - 2].ioPath;
+  }
+  const normalized = normalizePosixPath(value);
+  if (normalized === "/") return "/";
+  const slash = normalized.lastIndexOf("/");
+  return slash <= 0 ? "/" : normalized.slice(0, slash);
+}
+function pathNameForStyle(value, style) {
+  if (style === "windows" && (value === WINDOWS_FOREST_ROOT || value.trim() === "/")) return WINDOWS_FOREST_ROOT;
+  const ancestors = pathAncestors(value, style);
+  return ancestors.at(-1)?.label || (style === "windows" ? value : "/");
+}
+function isPathWithinStyle(rootPath, candidatePath, style) {
+  if (style === "windows" && (rootPath === WINDOWS_FOREST_ROOT || rootPath.trim() === "/")) return true;
+  const root = pathKey(rootPath, style);
+  const candidate = pathKey(candidatePath, style);
+  const separator = style === "windows" ? "\\" : "/";
+  if (style === "posix" && root === "/") return true;
+  return candidate === root || candidate.startsWith(`${root}${separator}`);
+}
+function deepestCommonPath(rootPaths, style) {
+  if (rootPaths.length === 0) return style === "windows" ? WINDOWS_FOREST_ROOT : "/";
+  if (style === "posix") {
+    const split = rootPaths.map((value) => normalizePosixPath(value).split("/").filter(Boolean));
+    const common = [];
+    for (let index = 0; ; index += 1) {
+      const segment = split[0][index];
+      if (segment === void 0 || !split.every((parts) => parts[index] === segment)) break;
+      common.push(segment);
+    }
+    return common.length ? `/${common.join("/")}` : "/";
+  }
+  const descriptors = rootPaths.map((value) => windowsDescriptor(value));
+  if (descriptors.some((value) => !value)) return WINDOWS_FOREST_ROOT;
+  const concrete = descriptors;
+  if (!concrete.every((value) => value.rootKey === concrete[0].rootKey)) return WINDOWS_FOREST_ROOT;
+  let commonIndex = 0;
+  const shortest = Math.min(...concrete.map((value) => value.ancestors.length));
+  while (commonIndex < shortest && concrete.every((value) => value.ancestors[commonIndex].key === concrete[0].ancestors[commonIndex].key)) commonIndex += 1;
+  return concrete[0].ancestors[Math.max(0, commonIndex - 1)].ioPath;
+}
+function isAbsolutePathForStyle(value, style) {
+  if (style === "windows") return windowsDescriptor(value) !== null;
+  return value.trim().startsWith("/");
+}
+
 // src/ui.ts
+function displayPath(value, style) {
+  if (style !== "windows") return value;
+  const syntheticPrefix = value.startsWith("/\\\\?\\") ? value.slice(1) : value;
+  const unc = syntheticPrefix.match(/^\\\\\?\\UNC\\(.+)$/i);
+  if (unc) return `\\\\${unc[1]}`;
+  const drive = syntheticPrefix.match(/^\\\\\?\\([A-Za-z]:\\.*)$/);
+  return drive ? drive[1] : value;
+}
 var STORAGE_KEYS = {
   locale: "locale",
   activeAgent: "activeAgent",
@@ -867,7 +1063,7 @@ var FONT_SCALE_MULTIPLIERS = { 1: 0.85, 2: 0.93, 3: 1, 4: 1.1, 5: 1.25 };
 var MINIMAP_TAP_SLOP = 8;
 var MINIMAP_RAIL_INSET = 12;
 var PAGE_SIZES = [20, 50, 100];
-var AGENT_AGNOSTIC = /* @__PURE__ */ new Set(["list-dirs", "check-dir", "classify-export-destination", "agents"]);
+var AGENT_AGNOSTIC = /* @__PURE__ */ new Set(["list-roots", "list-dirs", "check-dir", "classify-export-destination", "agents"]);
 var DEFAULT_AGENT = "claude-code";
 var UNAVAILABLE_CAPABILITIES = {
   archive: false,
@@ -894,6 +1090,15 @@ var DEFAULT_RESUME_ARGV_BY_AGENT = /* @__PURE__ */ new Map([
 ]);
 var LEGACY_RESUME = { argv: ["claude", "--resume"] };
 var RESUME_ARG_TOKEN_RE = /^[A-Za-z0-9_@%+=:,./-]+$/;
+var WINDOWS_CODEX_SHIM_RE = /^(?:[A-Za-z]:\\|\\\\)[^"&|<>()^%!\r\n]*\\codex\.cmd$/i;
+function terminalResumeArgv(agent, pathStyle, resumeArgv, sessionId, windowsCommand) {
+  if (!SESSION_ID_RE.test(sessionId)) throw new Error("Invalid session id");
+  const isBuiltInWindowsCodex = agent === "codex" && pathStyle === "windows" && resumeArgv.length === 2 && resumeArgv[0] === "codex" && resumeArgv[1] === "resume" && typeof windowsCommand === "string" && WINDOWS_CODEX_SHIM_RE.test(windowsCommand);
+  if (isBuiltInWindowsCodex && windowsCommand) {
+    return ["cmd.exe", "/D", "/V:OFF", "/S", "/C", "call", windowsCommand, "resume", sessionId];
+  }
+  return [...resumeArgv, sessionId];
+}
 function localizedExportError(failure, destination, t) {
   switch (failure.error) {
     case "export-destination-outside-home":
@@ -1043,41 +1248,20 @@ function nextJumpPillAtBottom(current, distanceFromBottom, clientHeight) {
   return current;
 }
 function normalizePath(value) {
-  const trimmed = value.trim();
-  if (!trimmed) return "/";
-  const absolute = trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
-  const parts = [];
-  for (const part of absolute.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") parts.pop();
-    else parts.push(part);
-  }
-  return parts.length ? `/${parts.join("/")}` : "/";
+  return normalizePosixPath(value);
 }
 function normalizePinMatchKey(value) {
   return normalizePath(value.normalize("NFC").toLowerCase());
 }
-function normalizeStoredTreeRoot(value) {
-  return typeof value === "string" ? normalizePath(value) : null;
+function normalizeStoredTreeRoot(value, style = "posix") {
+  if (typeof value !== "string") return null;
+  if (style === "windows" && value === WINDOWS_FOREST_ROOT) return WINDOWS_FOREST_ROOT;
+  if (style === "windows" && value.trim() !== "/" && !describePath(value, style)) return null;
+  return normalizeIoPath(value, style);
 }
-function normalizeStoredExpandedPaths(value) {
+function normalizeStoredExpandedPaths(value, style = "posix") {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) return null;
-  return new Set(value.map((item) => normalizePath(item)));
-}
-function parentPath(value) {
-  const normalized = normalizePath(value);
-  if (normalized === "/") return "/";
-  const slash = normalized.lastIndexOf("/");
-  return slash <= 0 ? "/" : normalized.slice(0, slash);
-}
-function pathName(value) {
-  const normalized = normalizePath(value);
-  return normalized === "/" ? "/" : normalized.slice(normalized.lastIndexOf("/") + 1);
-}
-function isPathWithin(rootPath, candidatePath) {
-  const root = normalizePath(rootPath);
-  const candidate = normalizePath(candidatePath);
-  return root === "/" || candidate === root || candidate.startsWith(`${root}/`);
+  return new Set(value.map((item) => style === "windows" && (item === WINDOWS_FOREST_ROOT || /^win:(?:drive|unc):/.test(item)) ? item : pathKey(item, style)));
 }
 function timestampValue(value) {
   const parsed = Date.parse(value);
@@ -1440,7 +1624,9 @@ function filterBranchOptions(options, query) {
   return options.filter((option) => option.toLocaleLowerCase().includes(normalizedQuery));
 }
 function filterSessions(items, filters, now = Date.now()) {
+  const pathStyle = filters.pathStyle || "posix";
   const query = filters.query.trim().toLocaleLowerCase();
+  const exactScopeKeys = filters.scopeMatchKeys?.length ? new Set(filters.scopeMatchKeys.map((key) => pathKey(key, pathStyle))) : null;
   const ranges = {
     "24h": 24 * 60 * 6e4,
     "7d": 7 * 24 * 60 * 6e4,
@@ -1452,8 +1638,7 @@ function filterSessions(items, filters, now = Date.now()) {
   };
   return items.filter((session) => {
     if (session.partition !== filters.partition) return false;
-    const sessionPath = normalizePath(session.rootPath);
-    const inScope = filters.scopeMode === "exact" ? sessionPath === normalizePath(filters.scopePath) : isPathWithin(filters.scopePath, sessionPath);
+    const inScope = filters.scopeMode === "exact" ? exactScopeKeys ? exactScopeKeys.has(pathKey(session.rootPath, pathStyle)) : pathKey(session.rootPath, pathStyle) === pathKey(filters.scopePath, pathStyle) : isPathWithinStyle(filters.scopePath, session.rootPath, pathStyle);
     if (!inScope) return false;
     const idleDuration = now - timestampValue(session.lastActiveAt);
     if (filters.timeRange in ranges && idleDuration > ranges[filters.timeRange]) return false;
@@ -1468,18 +1653,8 @@ ${session.gitBranch || ""}`.toLocaleLowerCase().includes(query)) return false;
     return true;
   });
 }
-function deepestCommonAncestor(rootPaths) {
-  const normalized = rootPaths.map(normalizePath);
-  if (normalized.length === 0) return "/";
-  const split = normalized.map((value) => value.split("/").filter(Boolean));
-  const common = [];
-  const shortest = Math.min(...split.map((parts) => parts.length));
-  for (let index = 0; index < shortest; index += 1) {
-    const segment = split[0][index];
-    if (!split.every((parts) => parts[index] === segment)) break;
-    common.push(segment);
-  }
-  return common.length ? `/${common.join("/")}` : "/";
+function deepestCommonAncestor(rootPaths, style = "posix") {
+  return deepestCommonPath(rootPaths, style);
 }
 function newerTimestamp(current, candidate) {
   if (!current) return candidate;
@@ -1490,13 +1665,15 @@ function newerTimestamp(current, candidate) {
   if (Number.isNaN(currentTime) || candidateTime > currentTime) return candidate;
   return current;
 }
-function deriveSessionPathTree(sessions, visibleRoot = deepestCommonAncestor(sessions.map((session) => session.rootPath))) {
-  const rootPath = normalizePath(visibleRoot);
-  const scoped = sessions.filter((session) => isPathWithin(rootPath, session.rootPath));
+function deriveSessionPathTree(sessions, visibleRoot, style = "posix") {
+  const rootIoPath = visibleRoot ?? deepestCommonAncestor(sessions.map((session) => session.rootPath), style);
+  const rootPath = pathKey(rootIoPath, style);
+  const scoped = sessions.filter((session) => isPathWithinStyle(rootIoPath, session.rootPath, style));
   if (scoped.length === 0) return null;
-  const makeNode = (nodePath) => ({
+  const makeNode = (nodePath, ioPath, name) => ({
     path: nodePath,
-    name: pathName(nodePath),
+    ioPath,
+    name,
     directActiveCount: 0,
     directArchiveCount: 0,
     activeCount: 0,
@@ -1504,23 +1681,24 @@ function deriveSessionPathTree(sessions, visibleRoot = deepestCommonAncestor(ses
     newestLastActiveAt: "",
     childrenByName: /* @__PURE__ */ new Map()
   });
-  const root = makeNode(rootPath);
+  const rootName = style === "windows" && rootPath === WINDOWS_FOREST_ROOT ? WINDOWS_FOREST_ROOT : pathNameForStyle(rootIoPath, style);
+  const root = makeNode(rootPath, rootIoPath, rootName);
   for (const session of scoped) {
-    const sessionPath = normalizePath(session.rootPath);
-    const relativeParts = sessionPath === rootPath ? [] : sessionPath.slice(rootPath === "/" ? 1 : rootPath.length + 1).split("/").filter(Boolean);
+    const ancestors = pathAncestors(session.rootPath, style);
+    const rootIndex = ancestors.findIndex((ancestor) => ancestor.key === rootPath);
+    const relativeParts = rootPath === WINDOWS_FOREST_ROOT ? ancestors : rootIndex >= 0 ? ancestors.slice(rootIndex + 1) : [];
     const chain = [root];
     let node = root;
-    let currentPath = rootPath;
-    for (const segment of relativeParts) {
-      currentPath = currentPath === "/" ? `/${segment}` : `${currentPath}/${segment}`;
-      let child = node.childrenByName.get(segment);
+    for (const part of relativeParts) {
+      let child = node.childrenByName.get(part.key);
       if (!child) {
-        child = makeNode(currentPath);
-        node.childrenByName.set(segment, child);
+        child = makeNode(part.key, part.ioPath, part.label);
+        node.childrenByName.set(part.key, child);
       }
       node = child;
       chain.push(node);
     }
+    node.ioPath = session.rootPath;
     if (session.partition === "active") node.directActiveCount += 1;
     else node.directArchiveCount += 1;
     for (const ancestor of chain) {
@@ -1531,6 +1709,7 @@ function deriveSessionPathTree(sessions, visibleRoot = deepestCommonAncestor(ses
   }
   const freezeNode = (node) => ({
     path: node.path,
+    ioPath: node.ioPath,
     name: node.name,
     directActiveCount: node.directActiveCount,
     directArchiveCount: node.directArchiveCount,
@@ -1716,6 +1895,7 @@ function activate(ctx) {
     return parsed.map((value) => {
       const caps = value?.capabilities;
       const resumeArgv = value?.resume?.argv;
+      const windowsCommand = value?.resume?.windowsCommand;
       const defaultResumeArgv = DEFAULT_RESUME_ARGV_BY_AGENT.get(value?.id);
       const validCapabilities = caps && ["archive", "rename", "delete", "deleteRequiresArchived", "nativeIndex", "tokenStats", "originFilter"].every((key) => typeof caps[key] === "boolean");
       if (!value || typeof value.id !== "string" || typeof value.available !== "boolean" || !validCapabilities) {
@@ -1725,18 +1905,23 @@ function activate(ctx) {
       if (!validResumeArgv && !defaultResumeArgv) throw new Error(t("agent-discovery-invalid"));
       return {
         id: value.id,
+        pathStyle: value.pathStyle === "windows" ? "windows" : "posix",
         available: value.available,
         degraded: value.degraded === true,
         unavailableReason: typeof value.unavailableReason === "string" ? value.unavailableReason : void 0,
         degradedReason: typeof value.degradedReason === "string" ? value.degradedReason : void 0,
         capabilities: caps,
-        resume: { argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv] }
+        resume: {
+          argv: validResumeArgv ? [...resumeArgv] : [...defaultResumeArgv],
+          ...typeof windowsCommand === "string" && WINDOWS_CODEX_SHIM_RE.test(windowsCommand) ? { windowsCommand } : {}
+        }
       };
     });
   }
   function legacyAgentDescriptor() {
     return {
       id: DEFAULT_AGENT,
+      pathStyle: "posix",
       available: true,
       degraded: false,
       capabilities: LEGACY_CAPABILITIES,
@@ -2285,6 +2470,9 @@ function createPaneRuntime(ctx, props, shared) {
     if (AGENT_AGNOSTIC.has(args[0])) return ctx.exec.run(args, opts);
     return ctx.exec.run([...args, "--agent", activeAgent.value], opts);
   }
+  function activePathStyle() {
+    return activeDescriptor.value?.pathStyle || "posix";
+  }
   function openSearch() {
     if (compactMode.value) compactView.value = "list";
     settingsOpen.value = false;
@@ -2292,7 +2480,7 @@ function createPaneRuntime(ctx, props, shared) {
     scheduleMountTimeout(() => searchInputRef.value?.focus(), 0);
   }
   const originFilteredSessions = ctx.computed(() => sessions.value.filter((session) => isSessionVisibleByOrigin(session)));
-  const tree = ctx.computed(() => deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value));
+  const tree = ctx.computed(() => deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value, activePathStyle()));
   function persist(key, value) {
     ctx.storage.set(key, value).catch((caught) => {
       if (warnedPersistFailure) return;
@@ -2322,14 +2510,23 @@ function createPaneRuntime(ctx, props, shared) {
     };
   }
   function pinMatchKeys(pin) {
-    return new Set(pin.matchKeys?.length ? pin.matchKeys : [normalizePinMatchKey(pin.path)]);
+    const style = activePathStyle();
+    const aliasesAreSafe = style === "windows" || pin.matchKeyStyle === "posix";
+    return new Set(aliasesAreSafe && pin.matchKeys?.length ? pin.matchKeys : [pin.path]);
   }
   function currentFolderPin() {
-    const selectedPath = normalizePath(committedSelection.value.path);
-    const exact = pinsSelection.value.pins.find((pin) => normalizePath(pin.path) === selectedPath);
+    const style = activePathStyle();
+    const selectedPath = pathKey(committedSelection.value.path, style);
+    const exact = pinsSelection.value.pins.find((pin) => pathKey(pin.path, style) === selectedPath);
     if (exact) return exact;
-    const selectedKey = normalizePinMatchKey(selectedPath);
-    return pinsSelection.value.pins.find((pin) => pinMatchKeys(pin).has(selectedKey));
+    return pinsSelection.value.pins.find((pin) => Array.from(pinMatchKeys(pin)).some((key) => pathKey(key, style) === selectedPath));
+  }
+  function committedPinMatchKeys() {
+    const activePath = pinsSelection.value.activePath;
+    const style = activePathStyle();
+    if (committedSelection.value.mode !== "exact" || !activePath || pathKey(activePath, style) !== pathKey(committedSelection.value.path, style)) return void 0;
+    const pin = pinsSelection.value.pins.find((candidate) => pathKey(candidate.path, style) === pathKey(activePath, style));
+    return pin ? Array.from(pinMatchKeys(pin)) : void 0;
   }
   function parsePinsResponse(stdout) {
     const parsed = JSON.parse(stdout);
@@ -2338,14 +2535,16 @@ function createPaneRuntime(ctx, props, shared) {
     }
     const pins = parsed.pins.map((pin) => {
       const validMatchKeys = pin?.matchKeys === void 0 || Array.isArray(pin.matchKeys) && pin.matchKeys.every((key) => typeof key === "string");
-      if (!pin || typeof pin.path !== "string" || typeof pin.addedAt !== "number" || typeof pin.exists !== "boolean" || !validMatchKeys) {
+      const validMatchKeyStyle = pin?.matchKeyStyle === void 0 || pin.matchKeyStyle === "windows" || pin.matchKeyStyle === "posix";
+      if (!pin || typeof pin.path !== "string" || typeof pin.addedAt !== "number" || typeof pin.exists !== "boolean" || !validMatchKeys || !validMatchKeyStyle) {
         throw new Error(t("pin-invalid-response"));
       }
       return {
         path: pin.path,
         addedAt: pin.addedAt,
         exists: pin.exists,
-        ...pin.matchKeys ? { matchKeys: [...pin.matchKeys] } : {}
+        ...pin.matchKeys ? { matchKeys: [...pin.matchKeys] } : {},
+        ...pin.matchKeyStyle ? { matchKeyStyle: pin.matchKeyStyle } : {}
       };
     });
     if (parsed.corrupt === true) {
@@ -2381,7 +2580,7 @@ function createPaneRuntime(ctx, props, shared) {
       if (result.code !== 0) throw new Error(parseCliFailure(result.stderr, t("pin-list-load-failed")).message);
       const loaded = parsePinsResponse(result.stdout);
       const priorActive = pinsSelection.value.activePath;
-      const nextActivePath = priorActive !== null && loaded.pins.some((pin) => normalizePath(pin.path) === normalizePath(priorActive)) ? priorActive : null;
+      const nextActivePath = priorActive !== null && loaded.pins.some((pin) => pathKey(pin.path, activePathStyle()) === pathKey(priorActive, activePathStyle())) ? priorActive : null;
       updatePinsState({
         pins: loaded.pins,
         loading: false,
@@ -2412,8 +2611,8 @@ function createPaneRuntime(ctx, props, shared) {
     return next;
   }
   function comparePinPaths(left, right) {
-    const leftBase = pathName(left).toLowerCase();
-    const rightBase = pathName(right).toLowerCase();
+    const leftBase = pathNameForStyle(left, activePathStyle()).toLowerCase();
+    const rightBase = pathNameForStyle(right, activePathStyle()).toLowerCase();
     if (leftBase < rightBase) return -1;
     if (leftBase > rightBase) return 1;
     return left < right ? -1 : left > right ? 1 : 0;
@@ -2815,10 +3014,32 @@ function createPaneRuntime(ctx, props, shared) {
     clearError();
     try {
       const result = await shared.initializeAgents();
-      if (!isCurrent()) return;
+      if (shared.retired || !isActiveMount(mount2)) return;
+      if (!isCurrent()) {
+        const snapshot2 = shared.currentIndex();
+        if (result.error || !snapshot2) {
+          loading.value = false;
+          updatePinsState({ loading: false });
+          if (result.error) showError(result.error);
+          return;
+        }
+        const retryIndexGeneration = ++mount2.indexGeneration;
+        const retryTreeGeneration = ++mount2.treeGeneration;
+        const [applied2] = await Promise.all([
+          applyIndex(
+            snapshot2,
+            preserveState ? "preserve" : "reset",
+            { indexGeneration: retryIndexGeneration, treeGeneration: retryTreeGeneration }
+          ),
+          loadPins()
+        ]);
+        if (!applied2 && isActiveMount(mount2)) await loadIndex(preserveState);
+        return;
+      }
       const snapshot = shared.currentIndex();
       if (result.error || !snapshot) {
         loading.value = false;
+        updatePinsState({ loading: false });
         if (result.error) showError(result.error);
         return;
       }
@@ -2834,6 +3055,7 @@ function createPaneRuntime(ctx, props, shared) {
     } catch (caught) {
       if (!shared.retired && isActiveMount(mount2)) {
         loading.value = false;
+        updatePinsState({ loading: false });
         showError(cliError(caught?.message || t("agent-discovery-failed")));
       }
     }
@@ -3731,11 +3953,17 @@ function createPaneRuntime(ctx, props, shared) {
     try {
       await terminal.createTerminalTab({
         cwd: resumable.rootPath,
-        argv: [...activeResumeArgv.value, resumable.id],
+        argv: terminalResumeArgv(
+          activeAgent.value,
+          activeDescriptor.value?.pathStyle || "posix",
+          activeResumeArgv.value,
+          resumable.id,
+          activeDescriptor.value?.resume.windowsCommand
+        ),
         title: resolveSessionTitle(resumable).slice(0, 24)
       });
-    } catch {
-      if (isCurrent()) showError(t("error-open-terminal"), {
+    } catch (caught) {
+      if (isCurrent()) showError(cliError(caught?.message || t("error-open-terminal")), {
         label: t("copy-command"),
         run: () => {
           void copyResumeCommand(resumable, isCurrent);
@@ -3763,8 +3991,17 @@ function createPaneRuntime(ctx, props, shared) {
     try {
       if (!isCurrent()) return false;
       shared.setSessions(snapshot.sessions);
-      const caps = agents.value.find((agent) => agent.id === snapshot.agent)?.capabilities || UNAVAILABLE_CAPABILITIES;
+      const requestDescriptor = agents.value.find((agent) => agent.id === snapshot.agent);
+      const caps = requestDescriptor?.capabilities || UNAVAILABLE_CAPABILITIES;
+      const requestPathStyle = requestDescriptor?.pathStyle || "posix";
       const requestAgent = snapshot.agent;
+      if (requestPathStyle === "windows") {
+        visibleRoot.value = normalizeStoredTreeRoot(visibleRoot.value, requestPathStyle) || WINDOWS_FOREST_ROOT;
+        committedSelection.value = {
+          ...committedSelection.value,
+          path: normalizeStoredTreeRoot(committedSelection.value.path, requestPathStyle) || visibleRoot.value
+        };
+      }
       if (caps.originFilter) {
         try {
           hideScriptedSessions.value = await ctx.storage.get(
@@ -3790,16 +4027,17 @@ function createPaneRuntime(ctx, props, shared) {
       if (!isCurrentTree()) return false;
       let savedRoot = null;
       try {
-        savedRoot = normalizeStoredTreeRoot(await readPerAgentTreeSetting(STORAGE_KEYS.treeRoot, requestAgent));
+        savedRoot = normalizeStoredTreeRoot(await readPerAgentTreeSetting(STORAGE_KEYS.treeRoot, requestAgent), requestPathStyle);
       } catch {
       }
       if (!isCurrentTree()) return false;
-      visibleRoot.value = savedRoot || deepestCommonAncestor(originFilteredSessions.value.map((session) => session.rootPath));
+      visibleRoot.value = savedRoot || deepestCommonAncestor(originFilteredSessions.value.map((session) => session.rootPath), requestPathStyle);
       committedSelection.value = { path: visibleRoot.value, mode: "subtree", sessionId: null };
       let savedExpanded = null;
       try {
         savedExpanded = normalizeStoredExpandedPaths(
-          await readPerAgentTreeSetting(STORAGE_KEYS.treeExpandedPaths, requestAgent)
+          await readPerAgentTreeSetting(STORAGE_KEYS.treeExpandedPaths, requestAgent),
+          requestPathStyle
         );
       } catch {
       }
@@ -3807,9 +4045,9 @@ function createPaneRuntime(ctx, props, shared) {
       if (savedExpanded) {
         expandedPaths.value = savedExpanded;
       } else {
-        expandedPaths.value = collectTreePaths(deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value));
+        expandedPaths.value = collectTreePaths(deriveSessionPathTree(originFilteredSessions.value, visibleRoot.value, requestPathStyle));
       }
-      expandedPaths.value.add(visibleRoot.value);
+      expandedPaths.value.add(pathKey(visibleRoot.value, requestPathStyle));
       return true;
     } catch (caught) {
       if (isCurrent()) showError(cliError(caught?.message || String(caught)));
@@ -3887,13 +4125,14 @@ function createPaneRuntime(ctx, props, shared) {
   function setVisibleRoot(nextRoot) {
     if (bulkRunning.value) return;
     if (activeMount) activeMount.treeGeneration++;
-    visibleRoot.value = normalizePath(nextRoot);
+    const style = activePathStyle();
+    visibleRoot.value = normalizeIoPath(nextRoot, style);
     updatePinsState({ activePath: null });
     clearSearchOverlay();
     committedSelection.value = { path: visibleRoot.value, mode: committedSelection.value.mode, sessionId: null };
     applyFilterChange();
     resetTranscript();
-    expandedPaths.value = new Set(expandedPaths.value).add(visibleRoot.value);
+    expandedPaths.value = new Set(expandedPaths.value).add(pathKey(visibleRoot.value, style));
     persist(perAgentStorageKey(STORAGE_KEYS.treeRoot), visibleRoot.value);
     persistExpandedPaths();
   }
@@ -3905,7 +4144,10 @@ function createPaneRuntime(ctx, props, shared) {
     pickerError.value = null;
     let rawOutput;
     try {
-      const result = await runAgent(["list-dirs", dir], { timeout: 1e4 });
+      const result = await runAgent(
+        activePathStyle() === "windows" && dir === WINDOWS_FOREST_ROOT ? ["list-roots"] : ["list-dirs", dir],
+        { timeout: 1e4 }
+      );
       if (!isActiveMount(mount2) || requestSeq !== mount2.pickerRequestSeq) return;
       rawOutput = result.stdout;
       if (result.code !== 0) {
@@ -3936,7 +4178,7 @@ function createPaneRuntime(ctx, props, shared) {
     }
   }
   async function navigatePickerDir(dir) {
-    pickerCurrentDir.value = normalizePath(dir);
+    pickerCurrentDir.value = normalizeIoPath(dir, activePathStyle());
     await loadPickerDirs(pickerCurrentDir.value);
   }
   function closeRootPicker() {
@@ -3953,10 +4195,11 @@ function createPaneRuntime(ctx, props, shared) {
   function openRootPicker(target) {
     if (activeMount) activeMount.pickerValidationSeq++;
     pickerTarget.value = target;
+    const style = activePathStyle();
     const targetPath = target === "export-destination" ? exportDestination.value : visibleRoot.value;
-    const startDir = targetPath.startsWith("/") ? normalizePath(targetPath) : visibleRoot.value;
+    const startDir = style === "windows" ? describePath(targetPath, style)?.ioPath || describePath(visibleRoot.value, style)?.ioPath || WINDOWS_FOREST_ROOT : targetPath.startsWith("/") ? normalizePath(targetPath) : visibleRoot.value;
     pickerCurrentDir.value = startDir;
-    pickerManualPath.value = startDir;
+    pickerManualPath.value = startDir === WINDOWS_FOREST_ROOT ? "" : startDir;
     pickerEntries.value = [];
     pickerError.value = null;
     showRootPicker.value = true;
@@ -3970,7 +4213,7 @@ function createPaneRuntime(ctx, props, shared) {
     const requestSeq = ++mount2.pickerValidationSeq;
     const isCurrent = () => isActiveMount(mount2) && showRootPicker.value && target === pickerTarget.value && requestSeq === mount2.pickerValidationSeq;
     const nextRoot = candidate.trim();
-    if (!nextRoot.startsWith("/")) {
+    if (!isAbsolutePathForStyle(nextRoot, activePathStyle())) {
       if (isCurrent()) pickerError.value = t("tree-root-absolute-error");
       return;
     }
@@ -4062,6 +4305,8 @@ function createPaneRuntime(ctx, props, shared) {
       partition,
       scopePath: committedSelection.value.path,
       scopeMode: committedSelection.value.mode,
+      scopeMatchKeys: committedPinMatchKeys(),
+      pathStyle: activePathStyle(),
       timeRange: "all",
       branch: "",
       query: ""
@@ -4074,6 +4319,8 @@ function createPaneRuntime(ctx, props, shared) {
       partition,
       scopePath: committedSelection.value.path,
       scopeMode: committedSelection.value.mode,
+      scopeMatchKeys: committedPinMatchKeys(),
+      pathStyle: activePathStyle(),
       timeRange: timeRange.value,
       branch: branchFilter.value,
       query: searchQuery.value,
@@ -4131,7 +4378,7 @@ function createPaneRuntime(ctx, props, shared) {
   function flashTreePath(rootPath) {
     const mount2 = activeMount;
     if (!isActiveMount(mount2)) return;
-    transientHighlightPath.value = normalizePath(rootPath);
+    transientHighlightPath.value = pathKey(rootPath, activePathStyle());
     if (mount2.highlightTimer) clearTimeout(mount2.highlightTimer);
     mount2.highlightTimer = scheduleMountTimeout(() => {
       transientHighlightPath.value = null;
@@ -4144,10 +4391,11 @@ function createPaneRuntime(ctx, props, shared) {
     const mount2 = activeMount;
     if (!isActiveMount(mount2)) return;
     const requestGeneration = ++mount2.searchGeneration;
-    const global = globalSearch.value;
+    const requestedGlobalToggle = globalSearch.value;
     const scopePath = committedSelection.value.path;
+    const global = requestedGlobalToggle || activePathStyle() === "windows" && scopePath === WINDOWS_FOREST_ROOT;
     const requestPartition = activePartition.value;
-    const isCurrent = () => isActiveMount(mount2) && requestGeneration === mount2.searchGeneration && activePartition.value === requestPartition && globalSearch.value === global && committedSelection.value.path === scopePath;
+    const isCurrent = () => isActiveMount(mount2) && requestGeneration === mount2.searchGeneration && activePartition.value === requestPartition && globalSearch.value === requestedGlobalToggle && committedSelection.value.path === scopePath;
     searching.value = true;
     clearError();
     try {
@@ -4333,15 +4581,16 @@ function createPaneRuntime(ctx, props, shared) {
     clearSearchOverlay();
     committedSelection.value = { path: activePath, mode: "subtree", sessionId: null };
     const nextExpanded = new Set(expandedPaths.value);
-    let ancestor = parentPath(activePath);
+    const style = activePathStyle();
+    let ancestor = parentPathForStyle(activePath, style);
     while (true) {
-      nextExpanded.add(ancestor);
-      if (ancestor === "/") break;
-      ancestor = parentPath(ancestor);
+      nextExpanded.add(pathKey(ancestor, style));
+      if (ancestor === (style === "windows" ? WINDOWS_FOREST_ROOT : "/")) break;
+      ancestor = parentPathForStyle(ancestor, style);
     }
     expandedPaths.value = nextExpanded;
     persistExpandedPaths();
-    if (!isPathWithin(visibleRoot.value, activePath)) {
+    if (!isPathWithinStyle(visibleRoot.value, activePath, style)) {
       setVisibleRoot(activePath);
       updatePinsState({ activePath });
     }
@@ -4350,8 +4599,10 @@ function createPaneRuntime(ctx, props, shared) {
     if (compactMode.value) compactView.value = "tree";
   }
   function pinMetadata(pin) {
+    const style = activePathStyle();
     const keys = pinMatchKeys(pin);
-    const exactSessions = originFilteredSessions.value.filter((session) => keys.has(normalizePinMatchKey(session.rootPath)));
+    const normalizedKeys = new Set(Array.from(keys, (key) => pathKey(key, style)));
+    const exactSessions = originFilteredSessions.value.filter((session) => normalizedKeys.has(pathKey(session.rootPath, style)));
     return {
       count: exactSessions.length,
       lastActiveAt: exactSessions.reduce((newest, session) => newerTimestamp(newest, session.lastActiveAt), "")
@@ -4360,12 +4611,13 @@ function createPaneRuntime(ctx, props, shared) {
   function renderPinRow(pin, index) {
     const selectMode2 = pinsSelectMode.value;
     const metadata = pinMetadata(pin);
-    const name = pathName(pin.path);
+    const name = pathNameForStyle(pin.path, activePathStyle());
+    const displayName = displayPath(name, activeDescriptor.value?.pathStyle || "posix");
     const count = t(metadata.count === 1 ? "pin-session-count-one" : "pin-session-count-other", { n: metadata.count });
     const activity = t("pin-last-activity", { time: formatRelativeTime(metadata.lastActiveAt, t) });
-    const missingTitle = pin.exists ? pin.path : t("pin-folder-missing");
+    const missingTitle = pin.exists ? displayPath(pin.path, activeDescriptor.value?.pathStyle || "posix") : t("pin-folder-missing");
     const activePath = pinsSelection.value.activePath;
-    const active = activePath !== null && normalizePath(pin.path) === normalizePath(activePath);
+    const active = activePath !== null && pathKey(pin.path, activePathStyle()) === pathKey(activePath, activePathStyle());
     const activateOrToggle = (shiftKey = false) => {
       if (pinsBulkRunning.value) return;
       if (pinsSelectMode.value) {
@@ -4398,14 +4650,14 @@ function createPaneRuntime(ctx, props, shared) {
         type: "checkbox",
         checked: pinsSelection.value.selected.has(pin.path),
         disabled: pinsBulkRunning.value,
-        "aria-label": t("pin-select-folder", { name }),
+        "aria-label": t("pin-select-folder", { name: displayName }),
         onClick: (event) => {
           event.stopPropagation();
           reducePinsSelection(event.shiftKey ? { type: "shift-range", key: pin.path, pageKeys: pinPaths() } : { type: "toggle", key: pin.path });
         }
       }) : null,
       IconFolder(14),
-      h("span", { class: "ccm-browser-pin-name" }, name),
+      h("span", { class: "ccm-browser-pin-name" }, displayName),
       h("span", { class: "ccm-browser-pin-meta" }, [
         h("span", {}, count),
         h("span", {}, activity)
@@ -4413,8 +4665,8 @@ function createPaneRuntime(ctx, props, shared) {
       pinsSelectMode.value ? h("button", {
         class: "ccm-icon-btn ccm-browser-pin-move",
         type: "button",
-        title: t("pin-move-up", { name }),
-        "aria-label": t("pin-move-up", { name }),
+        title: t("pin-move-up", { name: displayName }),
+        "aria-label": t("pin-move-up", { name: displayName }),
         disabled: pinsBulkRunning.value || index === 0,
         onClick: (event) => {
           event?.stopPropagation();
@@ -4424,8 +4676,8 @@ function createPaneRuntime(ctx, props, shared) {
       pinsSelectMode.value ? h("button", {
         class: "ccm-icon-btn ccm-browser-pin-move",
         type: "button",
-        title: t("pin-move-down", { name }),
-        "aria-label": t("pin-move-down", { name }),
+        title: t("pin-move-down", { name: displayName }),
+        "aria-label": t("pin-move-down", { name: displayName }),
         disabled: pinsBulkRunning.value || index === pinsSelection.value.pins.length - 1,
         onClick: (event) => {
           event?.stopPropagation();
@@ -4531,7 +4783,7 @@ function createPaneRuntime(ctx, props, shared) {
     ]);
   }
   function renderTreeNode(node, depth) {
-    const selected = committedSelection.value.path === node.path;
+    const selected = pathKey(committedSelection.value.path, activePathStyle()) === node.path;
     const highlighted = transientHighlightPath.value === node.path;
     const expanded = expandedPaths.value.has(node.path);
     const hasChildren = node.children.length > 0;
@@ -4548,8 +4800,8 @@ function createPaneRuntime(ctx, props, shared) {
           highlighted ? "ccm-browser-tree-node-highlight" : ""
         ],
         style: { paddingLeft: `${8 + depth * 16}px` },
-        title: node.path,
-        onClick: () => selectNode(node.path)
+        title: displayPath(node.ioPath, activeDescriptor.value?.pathStyle || "posix"),
+        onClick: () => selectNode(node.ioPath)
       }, [
         hasChildren ? h("button", {
           class: "ccm-icon-btn ccm-browser-tree-chevron",
@@ -4562,7 +4814,7 @@ function createPaneRuntime(ctx, props, shared) {
           }
         }, [expanded ? IconChevronDown(14) : IconChevronRight(14)]) : h("span", { class: "ccm-browser-tree-chevron-spacer" }),
         IconFolder(15),
-        h("span", { class: "ccm-browser-tree-label" }, node.name),
+        h("span", { class: "ccm-browser-tree-label" }, displayPath(node.name, activeDescriptor.value?.pathStyle || "posix")),
         h("span", { class: "ccm-browser-tree-badge", title: badgeTitle }, [
           h("span", { class: "ccm-browser-tree-count ccm-browser-tree-count-active" }, t("tree-count-active", { n: node.activeCount })),
           h("span", { class: "ccm-browser-tree-count ccm-browser-tree-count-archive" }, t("tree-count-archive", { n: node.archiveCount })),
@@ -4574,6 +4826,8 @@ function createPaneRuntime(ctx, props, shared) {
   }
   function renderTreePane() {
     const pinnedFolder = currentFolderPin();
+    const style = activePathStyle();
+    const atWindowsRoots = style === "windows" && visibleRoot.value === WINDOWS_FOREST_ROOT;
     return h("aside", {
       class: "ccm-browser-pane ccm-browser-tree-pane",
       style: compactMode.value ? void 0 : { width: `calc(${paneWidths.value.left}px * var(--ccm-fs, 1))` }
@@ -4597,15 +4851,15 @@ function createPaneRuntime(ctx, props, shared) {
               title: t(pinnedFolder ? "pin-current-folder-remove" : "pin-current-folder-add"),
               "aria-label": t(pinnedFolder ? "pin-current-folder-remove" : "pin-current-folder-add"),
               "aria-pressed": Boolean(pinnedFolder),
-              disabled: loading.value || pinsSelection.value.loading || pinsBulkRunning.value || Boolean(pinsSelection.value.corruptSidecar) || !committedSelection.value.path,
+              disabled: loading.value || pinsSelection.value.loading || pinsBulkRunning.value || Boolean(pinsSelection.value.corruptSidecar) || style === "windows" && committedSelection.value.path === WINDOWS_FOREST_ROOT || !committedSelection.value.path,
               onClick: () => enqueuePinMutation(pinnedFolder ? { type: "remove", paths: [pinnedFolder.path] } : { type: "add", path: committedSelection.value.path })
             }, [IconPin(15)]),
             h("button", {
               class: "ccm-icon-btn",
               title: t("navigate-parent"),
               "aria-label": t("navigate-parent"),
-              disabled: loading.value || bulkRunning.value || visibleRoot.value === "/",
-              onClick: () => setVisibleRoot(parentPath(visibleRoot.value))
+              disabled: loading.value || bulkRunning.value || (style === "windows" ? atWindowsRoots : visibleRoot.value === "/"),
+              onClick: () => setVisibleRoot(parentPathForStyle(visibleRoot.value, style))
             }, [IconArrowLeft(15)]),
             h("button", {
               class: ["ccm-icon-btn", committedSelection.value.mode === "exact" ? "ccm-icon-btn-active" : ""],
@@ -4626,7 +4880,7 @@ function createPaneRuntime(ctx, props, shared) {
               class: "ccm-icon-btn",
               title: t("use-selected-folder-as-tree-root"),
               "aria-label": t("use-selected-folder-as-tree-root"),
-              disabled: loading.value || bulkRunning.value || !committedSelection.value.path || committedSelection.value.path === visibleRoot.value,
+              disabled: loading.value || bulkRunning.value || !committedSelection.value.path || style === "windows" && committedSelection.value.path === WINDOWS_FOREST_ROOT || committedSelection.value.path === visibleRoot.value,
               onClick: () => setVisibleRoot(committedSelection.value.path)
             }, [IconFolderDown(15)]),
             h("button", {
@@ -4641,9 +4895,12 @@ function createPaneRuntime(ctx, props, shared) {
             }, [IconPencil(15)])
           ])
         ]),
-        h("div", { class: "ccm-browser-root-path", title: visibleRoot.value }, visibleRoot.value),
+        h("div", {
+          class: "ccm-browser-root-path",
+          title: atWindowsRoots ? t("windows-roots") : displayPath(visibleRoot.value, style)
+        }, atWindowsRoots ? t("windows-roots") : displayPath(visibleRoot.value, style)),
         h("div", { class: "ccm-browser-tree-body" }, [
-          loading.value ? h("div", { class: "ccm-browser-pane-state" }, t("building-index")) : tree.value ? renderTreeNode(tree.value, 0) : h("div", { class: "ccm-browser-pane-state" }, t("no-indexed-sessions"))
+          loading.value ? h("div", { class: "ccm-browser-pane-state" }, t("building-index")) : tree.value ? tree.value.path === WINDOWS_FOREST_ROOT ? tree.value.children.map((child) => renderTreeNode(child, 0)) : renderTreeNode(tree.value, 0) : h("div", { class: "ccm-browser-pane-state" }, t("no-indexed-sessions"))
         ])
       ])
     ]);
@@ -4776,7 +5033,10 @@ function createPaneRuntime(ctx, props, shared) {
           title,
           titles.secondary ? h("span", { class: "ccm-browser-title-sub" }, titles.secondary) : null
         ]),
-        h("span", { class: "ccm-browser-search-path", title: session.rootPath }, session.rootPath)
+        h("span", {
+          class: "ccm-browser-search-path",
+          title: displayPath(session.rootPath, activeDescriptor.value?.pathStyle || "posix")
+        }, displayPath(session.rootPath, activeDescriptor.value?.pathStyle || "posix"))
       ]),
       h("div", { class: "ccm-browser-search-match" }, result.match),
       h("div", { class: "ccm-browser-session-footer" }, [
@@ -4793,27 +5053,11 @@ function createPaneRuntime(ctx, props, shared) {
     const selectingExportDestination = pickerTarget.value === "export-destination";
     const pickerTitle = t(selectingExportDestination ? "picker-export-title" : "picker-title");
     const dir = pickerCurrentDir.value;
-    const segments = dir.split("/").filter(Boolean);
-    const breadcrumbs = [
-      h("span", {
-        class: "ccm-picker-crumb",
-        role: "button",
-        tabindex: 0,
-        onClick: () => {
-          void navigatePickerDir("/");
-        },
-        onKeydown: (event) => {
-          if (event.key !== "Enter" && event.key !== " ") return;
-          event.preventDefault();
-          void navigatePickerDir("/");
-        }
-      }, "/")
-    ];
-    let accumulated = "";
-    for (const segment of segments) {
-      accumulated += `/${segment}`;
-      const target = accumulated;
-      breadcrumbs.push(h("span", { class: "ccm-picker-crumb-sep" }, "/"));
+    const style = activePathStyle();
+    const atWindowsRoots = style === "windows" && dir === WINDOWS_FOREST_ROOT;
+    const breadcrumbs = [];
+    const pushCrumb = (label, target, separator) => {
+      if (separator) breadcrumbs.push(h("span", { class: "ccm-picker-crumb-sep" }, separator));
       breadcrumbs.push(h("span", {
         class: "ccm-picker-crumb",
         role: "button",
@@ -4826,7 +5070,20 @@ function createPaneRuntime(ctx, props, shared) {
           event.preventDefault();
           void navigatePickerDir(target);
         }
-      }, segment));
+      }, label));
+    };
+    if (style === "windows") {
+      pushCrumb(t("windows-roots"), WINDOWS_FOREST_ROOT);
+      if (!atWindowsRoots) {
+        for (const ancestor of pathAncestors(dir, style)) pushCrumb(ancestor.label, ancestor.ioPath, "\u203A");
+      }
+    } else {
+      pushCrumb("/", "/");
+      let accumulated = "";
+      for (const segment of dir.split("/").filter(Boolean)) {
+        accumulated += `/${segment}`;
+        pushCrumb(segment, accumulated, "/");
+      }
     }
     return h("div", {
       class: "ccm-picker-overlay",
@@ -4875,15 +5132,24 @@ function createPaneRuntime(ctx, props, shared) {
             }
           }, [IconCheck(14), h("span", {}, t(selectingExportDestination ? "picker-export-use-manual-path" : "picker-use-manual-path"))])
         ]),
-        h("div", { class: "ccm-picker-current" }, [IconFolder(14), h("span", {}, t("picker-current", { path: dir }))]),
+        h("div", { class: "ccm-picker-current" }, [
+          IconFolder(14),
+          h("span", {}, t("picker-current", {
+            path: atWindowsRoots ? t("windows-roots") : displayPath(dir, style)
+          }))
+        ]),
         h("div", { class: "ccm-picker-actions" }, [
           h("button", {
             class: "ccm-picker-action-btn",
             type: "button",
+            disabled: atWindowsRoots,
             onClick: () => {
               void validateAndCommitRoot(dir);
             }
-          }, [IconCheck(14), h("span", {}, t(selectingExportDestination ? "picker-export-select-current" : "picker-select-current", { name: dir.split("/").pop() || "/" }))])
+          }, [IconCheck(14), h("span", {}, t(
+            selectingExportDestination ? "picker-export-select-current" : "picker-select-current",
+            { name: atWindowsRoots ? t("windows-roots") : pathNameForStyle(dir, style) }
+          ))])
         ]),
         h("div", { class: "ccm-picker-breadcrumb" }, breadcrumbs),
         h("div", { class: "ccm-picker-list" }, pickerLoading.value ? h("div", { class: "ccm-picker-empty" }, [h("span", { class: "ccm-browser-spinner" }), h("span", {}, t("picker-loading"))]) : pickerError.value ? h("div", { class: "ccm-picker-empty", role: "alert" }, pickerError.value) : pickerEntries.value.length ? pickerEntries.value.map((entry) => h("div", {
@@ -4902,8 +5168,8 @@ function createPaneRuntime(ctx, props, shared) {
         }, [
           IconFolder(14),
           h("div", { class: "ccm-picker-item-info" }, [
-            h("span", { class: "ccm-picker-item-name" }, entry.name),
-            h("span", { class: "ccm-picker-item-path" }, entry.path)
+            h("span", { class: "ccm-picker-item-name" }, displayPath(entry.name, activeDescriptor.value?.pathStyle || "posix")),
+            h("span", { class: "ccm-picker-item-path" }, displayPath(entry.path, activeDescriptor.value?.pathStyle || "posix"))
           ]),
           IconChevronRight(14)
         ])) : h("div", { class: "ccm-picker-empty" }, t("picker-no-subdirs")))
@@ -5031,6 +5297,8 @@ function createPaneRuntime(ctx, props, shared) {
         partition,
         scopePath: committedSelection.value.path,
         scopeMode: committedSelection.value.mode,
+        scopeMatchKeys: committedPinMatchKeys(),
+        pathStyle: activePathStyle(),
         timeRange: timeRange.value,
         branch: branchFilter.value,
         query: searchQuery.value,
@@ -5320,10 +5588,13 @@ function createPaneRuntime(ctx, props, shared) {
       ]),
       h("div", {
         class: ["ccm-browser-scope-summary", overlay ? "ccm-browser-search-breadcrumb" : ""],
-        title: overlay?.scopePath || committedSelection.value.path
+        title: displayPath(
+          overlay?.scopePath || committedSelection.value.path,
+          activeDescriptor.value?.pathStyle || "posix"
+        )
       }, [
         h("span", {}, overlay ? t("search") : t(committedSelection.value.mode === "subtree" ? "subtree" : "exact-directory")),
-        h("span", { class: "ccm-browser-scope-path" }, overlay ? `${overlay.scopePath ? overlay.scopePath : t("global")} \xB7 \u201C${overlay.query}\u201D` : committedSelection.value.path),
+        h("span", { class: "ccm-browser-scope-path" }, overlay ? `${overlay.scopePath ? displayPath(overlay.scopePath, activeDescriptor.value?.pathStyle || "posix") : t("global")} \xB7 \u201C${overlay.query}\u201D` : displayPath(committedSelection.value.path, activeDescriptor.value?.pathStyle || "posix")),
         overlay ? h("button", {
           class: "ccm-icon-btn",
           title: t("leave-full-text-results"),
@@ -5756,7 +6027,10 @@ function createPaneRuntime(ctx, props, shared) {
             }, [copiedSessionId.value ? IconCheck(13) : IconCopy(13)]),
             copiedSessionId.value ? h("span", { class: "ccm-browser-copy-feedback", "aria-live": "polite" }, t("copied")) : null
           ]),
-          h("div", { class: "ccm-browser-transcript-cwd", title: session.rootPath }, session.rootPath),
+          h("div", {
+            class: "ccm-browser-transcript-cwd",
+            title: displayPath(session.rootPath, activeDescriptor.value?.pathStyle || "posix")
+          }, displayPath(session.rootPath, activeDescriptor.value?.pathStyle || "posix")),
           h("div", { class: "ccm-browser-transcript-span", title: `${session.createdAt} \u2192 ${session.lastActiveAt}` }, formatSessionSpan(session.createdAt, session.lastActiveAt, locale(), t))
         ]),
         h("div", { class: "ccm-browser-pane-actions" }, [
@@ -5962,6 +6236,7 @@ export {
   MINIMAP_RAIL_INSET,
   PAGE_SIZES,
   TRANSCRIPT_BATCH_SIZE,
+  WINDOWS_FOREST_ROOT,
   activate,
   clampPage,
   cleanFirstPrompt,
@@ -5970,6 +6245,7 @@ export {
   dateRangeMatches,
   deepestCommonAncestor,
   deriveSessionPathTree,
+  displayPath,
   filterBranchOptions,
   filterSessions,
   findMinimapActiveTurn,
@@ -5988,7 +6264,9 @@ export {
   normalizePinMatchKey,
   normalizeStoredExpandedPaths,
   normalizeStoredTreeRoot,
+  parentPathForStyle,
   parseCliFailure,
+  pathKey,
   resolveSessionTitle,
   resolveSessionTitles,
   runBulkSerial,
@@ -5996,5 +6274,6 @@ export {
   selectionReducer,
   sessionKey,
   shQuote,
-  sortSessions
+  sortSessions,
+  terminalResumeArgv
 };
