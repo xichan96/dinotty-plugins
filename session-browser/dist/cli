@@ -707,7 +707,8 @@ function lexicalNormalizePinPath(value) {
   return parts.length ? `/${parts.join("/")}` : "/";
 }
 function pinMatchKey(value) {
-  return lexicalNormalizePinPath(value.normalize("NFC").toLowerCase());
+  const normalized = path2.resolve(value).normalize("NFC");
+  return process.platform === "win32" ? lexicalNormalizePinPath(normalized.toLowerCase()) : normalized;
 }
 function isPinStore(value) {
   if (!value || typeof value !== "object") return false;
@@ -716,7 +717,7 @@ function isPinStore(value) {
   return candidate.pins.every((pin) => {
     if (!pin || typeof pin !== "object") return false;
     const item = pin;
-    return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0 && (item.matchKeys === void 0 || Array.isArray(item.matchKeys) && item.matchKeys.every((key) => typeof key === "string" && key.length > 0));
+    return typeof item.path === "string" && path2.isAbsolute(item.path) && typeof item.addedAt === "number" && Number.isSafeInteger(item.addedAt) && item.addedAt >= 0 && (item.matchKeys === void 0 || Array.isArray(item.matchKeys) && item.matchKeys.every((key) => typeof key === "string" && key.length > 0)) && (item.matchKeyStyle === void 0 || item.matchKeyStyle === "windows" || item.matchKeyStyle === "posix");
   });
 }
 function prunePinSidecars(agent, keepPath) {
@@ -880,7 +881,7 @@ function cmdListPins(agentValue) {
       } catch {
       }
       const matchKeys = pin.matchKeys ? [...pin.matchKeys] : [];
-      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys };
+      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys, matchKeyStyle: pin.matchKeyStyle };
     })
   });
 }
@@ -896,19 +897,28 @@ function cmdAddPin(agentValue, suppliedPath, resetCorrupt) {
   }
   const suppliedAbsolutePath = path2.resolve(suppliedPath);
   const incomingMatchKeys = Array.from(/* @__PURE__ */ new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]));
+  const incomingMatchKeyStyle = process.platform === "win32" ? "windows" : "posix";
   const state = loadPinsForMutation(agentValue, resetCorrupt);
   const existing = state.pins.find((pin) => pin.path === canonicalPath);
   if (existing) {
     const storedMatchKeys = existing.matchKeys || [];
-    const mergedMatchKeys = Array.from(/* @__PURE__ */ new Set([...storedMatchKeys, ...incomingMatchKeys]));
-    const matchKeysMerged = mergedMatchKeys.length !== storedMatchKeys.length;
-    if (matchKeysMerged) existing.matchKeys = mergedMatchKeys;
+    const mergedMatchKeys = existing.matchKeyStyle === incomingMatchKeyStyle ? Array.from(/* @__PURE__ */ new Set([...storedMatchKeys, ...incomingMatchKeys])) : incomingMatchKeys;
+    const matchKeysMerged = existing.matchKeyStyle !== incomingMatchKeyStyle || mergedMatchKeys.length !== storedMatchKeys.length || mergedMatchKeys.some((key, index) => key !== storedMatchKeys[index]);
+    if (matchKeysMerged) {
+      existing.matchKeys = mergedMatchKeys;
+      existing.matchKeyStyle = incomingMatchKeyStyle;
+    }
     if (state.resetCorrupt || matchKeysMerged) writePinStore(agentValue, state.pins);
     output2({ canonicalPath, outcome: "duplicate", matchKeysMerged });
     return;
   }
   if (state.pins.length >= 500) fail("pin-limit-reached", "Cannot add pin: the 500-pin limit has been reached");
-  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys: incomingMatchKeys }, ...state.pins]);
+  writePinStore(agentValue, [{
+    path: canonicalPath,
+    addedAt: Date.now(),
+    matchKeys: incomingMatchKeys,
+    matchKeyStyle: incomingMatchKeyStyle
+  }, ...state.pins]);
   output2({ canonicalPath, outcome: "applied" });
 }
 function cmdRemovePins(agentValue, requestedPaths, resetCorrupt) {
@@ -2360,6 +2370,21 @@ function cmdListDirs(dirPath) {
     output2({ error: "unreadable-directory", message: error?.message || `Could not list directory: ${resolved}` });
   }
 }
+function cmdListRoots() {
+  if (process.platform !== "win32") {
+    output2({ dirs: [{ name: "/", path: "/" }] });
+    return;
+  }
+  const dirs = [];
+  for (let code = 65; code <= 90; code += 1) {
+    const root = `${String.fromCharCode(code)}:\\`;
+    try {
+      if (fs2.statSync(root).isDirectory()) dirs.push({ name: root, path: root });
+    } catch {
+    }
+  }
+  output2({ dirs });
+}
 function cmdCheckDir(dirPath) {
   validateAbsolutePath(dirPath);
   try {
@@ -2456,6 +2481,10 @@ async function main() {
     case "list-dirs":
       if (args.length !== 1) fail("invalid-arguments", "Usage: list-dirs <path>");
       cmdListDirs(args[0]);
+      break;
+    case "list-roots":
+      if (args.length !== 0) fail("invalid-arguments", "Usage: list-roots");
+      cmdListRoots();
       break;
     case "check-dir":
       if (args.length !== 1) fail("invalid-arguments", "Usage: check-dir <absolutePath>");

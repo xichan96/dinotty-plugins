@@ -397,7 +397,7 @@
   display: flex;
   max-height: 33.333%;
   min-height: 0;
-  flex: 0 1 auto;
+  flex: 0 0 auto;
   flex-direction: column;
   border-bottom: 1px solid var(--ccm-border);
   background: var(--ccm-bg-surface);

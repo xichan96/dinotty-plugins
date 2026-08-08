@@ -129,6 +129,7 @@ interface StoredPin {
   path: string
   addedAt: number
   matchKeys?: string[]
+  matchKeyStyle?: 'windows' | 'posix'
 }
 
 interface PinStore {
@@ -207,7 +208,10 @@ function lexicalNormalizePinPath(value: string): string {
 }
 
 function pinMatchKey(value: string): string {
-  return lexicalNormalizePinPath(value.normalize('NFC').toLowerCase())
+  const normalized = path.resolve(value).normalize('NFC')
+  return process.platform === 'win32'
+    ? lexicalNormalizePinPath(normalized.toLowerCase())
+    : normalized
 }
 
 function isPinStore(value: unknown): value is PinStore {
@@ -225,6 +229,7 @@ function isPinStore(value: unknown): value is PinStore {
       && (item.matchKeys === undefined
         || (Array.isArray(item.matchKeys)
           && item.matchKeys.every(key => typeof key === 'string' && key.length > 0)))
+      && (item.matchKeyStyle === undefined || item.matchKeyStyle === 'windows' || item.matchKeyStyle === 'posix')
   })
 }
 
@@ -390,7 +395,7 @@ function cmdListPins(agentValue: string) {
       let exists = false
       try { exists = fs.statSync(pin.path).isDirectory() } catch { /* missing and unreadable pins remain listed */ }
       const matchKeys = pin.matchKeys ? [...pin.matchKeys] : []
-      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys }
+      return { path: pin.path, addedAt: pin.addedAt, exists, matchKeys, matchKeyStyle: pin.matchKeyStyle }
     }),
   })
 }
@@ -408,20 +413,33 @@ function cmdAddPin(agentValue: string, suppliedPath: string, resetCorrupt: boole
 
   const suppliedAbsolutePath = path.resolve(suppliedPath)
   const incomingMatchKeys = Array.from(new Set([pinMatchKey(canonicalPath), pinMatchKey(suppliedAbsolutePath)]))
+  const incomingMatchKeyStyle = process.platform === 'win32' ? 'windows' : 'posix'
   const state = loadPinsForMutation(agentValue, resetCorrupt)
   const existing = state.pins.find(pin => pin.path === canonicalPath)
   if (existing) {
     const storedMatchKeys = existing.matchKeys || []
-    const mergedMatchKeys = Array.from(new Set([...storedMatchKeys, ...incomingMatchKeys]))
-    const matchKeysMerged = mergedMatchKeys.length !== storedMatchKeys.length
-    if (matchKeysMerged) existing.matchKeys = mergedMatchKeys
+    const mergedMatchKeys = existing.matchKeyStyle === incomingMatchKeyStyle
+      ? Array.from(new Set([...storedMatchKeys, ...incomingMatchKeys]))
+      : incomingMatchKeys
+    const matchKeysMerged = existing.matchKeyStyle !== incomingMatchKeyStyle
+      || mergedMatchKeys.length !== storedMatchKeys.length
+      || mergedMatchKeys.some((key, index) => key !== storedMatchKeys[index])
+    if (matchKeysMerged) {
+      existing.matchKeys = mergedMatchKeys
+      existing.matchKeyStyle = incomingMatchKeyStyle
+    }
     if (state.resetCorrupt || matchKeysMerged) writePinStore(agentValue, state.pins)
     output({ canonicalPath, outcome: 'duplicate', matchKeysMerged })
     return
   }
   if (state.pins.length >= 500) fail('pin-limit-reached', 'Cannot add pin: the 500-pin limit has been reached')
 
-  writePinStore(agentValue, [{ path: canonicalPath, addedAt: Date.now(), matchKeys: incomingMatchKeys }, ...state.pins])
+  writePinStore(agentValue, [{
+    path: canonicalPath,
+    addedAt: Date.now(),
+    matchKeys: incomingMatchKeys,
+    matchKeyStyle: incomingMatchKeyStyle,
+  }, ...state.pins])
   output({ canonicalPath, outcome: 'applied' })
 }
 
@@ -2000,6 +2018,21 @@ function cmdListDirs(dirPath: string) {
   }
 }
 
+function cmdListRoots() {
+  if (process.platform !== 'win32') {
+    output({ dirs: [{ name: '/', path: '/' }] })
+    return
+  }
+  const dirs: { name: string; path: string }[] = []
+  for (let code = 65; code <= 90; code += 1) {
+    const root = `${String.fromCharCode(code)}:\\`
+    try {
+      if (fs.statSync(root).isDirectory()) dirs.push({ name: root, path: root })
+    } catch { /* inaccessible and empty drive letters are omitted */ }
+  }
+  output({ dirs })
+}
+
 function cmdCheckDir(dirPath: string) {
   validateAbsolutePath(dirPath)
   try {
@@ -2100,6 +2133,10 @@ async function main() {
   case 'list-dirs':
     if (args.length !== 1) fail('invalid-arguments', 'Usage: list-dirs <path>')
     cmdListDirs(args[0])
+    break
+  case 'list-roots':
+    if (args.length !== 0) fail('invalid-arguments', 'Usage: list-roots')
+    cmdListRoots()
     break
   case 'check-dir':
     if (args.length !== 1) fail('invalid-arguments', 'Usage: check-dir <absolutePath>')

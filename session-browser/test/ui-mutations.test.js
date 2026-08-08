@@ -1185,6 +1185,82 @@ test('the shared picker routes tree-root and export-destination commits independ
   }
 })
 
+test('Windows workspace tree and picker start at independent drive roots instead of a synthetic slash', async () => {
+  const windowsCapabilities = {
+    archive: true,
+    rename: false,
+    delete: true,
+    deleteRequiresArchived: false,
+    nativeIndex: true,
+    tokenStats: false,
+    originFilter: false,
+  }
+  const indexed = [
+    session('windows-c', 'active', { rootPath: 'C:\\Users\\dev\\repo', attributionKey: 'c-repo' }),
+    session('windows-d', 'active', { rootPath: 'D:\\Work\\repo', attributionKey: 'd-repo' }),
+  ]
+  const harness = await mount(indexed, async args => {
+    if (args[0] === 'agents') return {
+      code: 0,
+      stdout: JSON.stringify([{
+        id: 'claude-code',
+        pathStyle: 'windows',
+        available: true,
+        capabilities: windowsCapabilities,
+        resume: { argv: ['claude', '--resume'] },
+      }]),
+      stderr: '',
+    }
+    if (args[0] === 'list-roots') return {
+      code: 0,
+      stdout: JSON.stringify({ dirs: [
+        { name: 'C:\\', path: 'C:\\' },
+        { name: 'D:\\', path: 'D:\\' },
+      ] }),
+      stderr: '',
+    }
+    if (args[0] === 'list-dirs' && args[1] === 'D:\\') return {
+      code: 0,
+      stdout: JSON.stringify({ dirs: [{ name: 'Work', path: 'D:\\Work' }] }),
+      stderr: '',
+    }
+    if (args[0] === 'search') return { code: 0, stdout: '[]', stderr: '' }
+  })
+  try {
+    let nodes = flatten(harness.render())
+    assert.equal(textOf(nodes.find(node => node?.props?.class === 'ccm-browser-root-path')), 'This PC')
+    const treeLabels = nodes.filter(node => node?.props?.class === 'ccm-browser-tree-label').map(textOf)
+    assert.ok(treeLabels.includes('C:\\'))
+    assert.ok(treeLabels.includes('D:\\'))
+
+    const searchInput = nodes.find(node => node?.tag === 'input' && node.props?.id?.startsWith('session-browser-search-input'))
+    searchInput.props.onInput({ target: { value: 'needle' } })
+    nodes = flatten(harness.render())
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Run full-text search').props.onClick()
+    await flush()
+    const searchCall = harness.calls.find(args => args[0] === 'search')
+    assert.ok(searchCall)
+    assert.equal(searchCall.includes('--scope'), false)
+
+    nodes.find(node => node?.tag === 'button' && node.props?.title === 'Change tree root').props.onClick()
+    await flush()
+    assert.ok(harness.calls.some(args => args[0] === 'list-roots'))
+    assert.equal(harness.calls.some(args => args[0] === 'list-dirs' && args[1] === '/'), false)
+
+    nodes = flatten(harness.render())
+    const pickerText = textOf(nodes.find(node => node?.props?.class === 'ccm-picker-panel'))
+    assert.match(pickerText, /This PC/)
+    assert.match(pickerText, /C:\\/)
+    assert.match(pickerText, /D:\\/)
+    const dRoot = nodes.find(node => node?.props?.class === 'ccm-picker-item' && textOf(node).includes('D:\\'))
+    dRoot.props.onClick()
+    await flush()
+    assert.ok(harness.calls.some(args => args[0] === 'list-dirs' && args[1] === 'D:\\'))
+  } finally {
+    harness.cleanup()
+  }
+})
+
 test('stale picker validation cannot commit after switching target modes', async () => {
   const staleValidation = deferred()
   const harness = await mount([session('picker-cross-target-race')], async args => (

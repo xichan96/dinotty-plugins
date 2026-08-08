@@ -434,6 +434,17 @@ test('list-dirs returns structured errors and includes symlinked directories', (
   }
 })
 
+test('list-roots exposes filesystem roots without treating Windows slash as a drive root', () => {
+  const listed = runJson(['list-roots'])
+  assert.ok(Array.isArray(listed.dirs))
+  if (process.platform === 'win32') {
+    assert.ok(listed.dirs.some(entry => entry.path === path.parse(process.cwd()).root))
+    assert.equal(listed.dirs.some(entry => entry.path === '/'), false)
+  } else {
+    assert.deepEqual(listed.dirs, [{ name: '/', path: '/' }])
+  }
+})
+
 test('live registry ignores malformed, dead, and terminal entries and newest duplicate wins without entering the cache', () => {
   const key = '-live-registry'
   const sourceJson = writeSession(env.CC_SB_PROJECTS_DIR, key, IDS.normal, [
