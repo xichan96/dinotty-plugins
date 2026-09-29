@@ -1,0 +1,29 @@
+{
+  "name": "window-mirror",
+  "version": "0.1.0",
+  "private": true,
+  "main": "dist/main.js",
+  "description": "Mirror one desktop window into a dinotty pane",
+  "license": "MIT",
+  "scripts": {
+    "build:native": "cd native && cargo build --release",
+    "copy:native": "node -e \"require('node:fs').copyFileSync('native/target/release/window-mirror.exe','dist/window-mirror.exe')\"",
+    "build:ui": "esbuild src/ui.ts --bundle --format=esm --platform=browser --outfile=dist/main.js",
+    "build": "node -e \"require('node:fs').mkdirSync('dist',{recursive:true})\" && npm run build:native && npm run copy:native && npm run build:ui",
+    "typecheck": "tsc --noEmit",
+    "test:native": "cd native && cargo test --release",
+    "test:rfb": "node test/rfb.test.mjs",
+    "test": "npm run test:native && npm run test:keys && npm run test:rfb && npm run test:input",
+    "test:input": "node test/input.test.mjs",
+    "build:test-modules": "esbuild src/keys.ts --bundle --format=esm --platform=neutral --outfile=dist/keys.mjs",
+    "test:keys": "npm run build:test-modules && node --test test/keys.test.mjs"
+  },
+  "dependencies": {
+    "@novnc/novnc": "^1.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "esbuild": "^0.28.1",
+    "typescript": "~5.7.0"
+  }
+}

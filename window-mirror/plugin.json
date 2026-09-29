@@ -1,0 +1,37 @@
+{
+  "id": "window-mirror",
+  "name": "Window Mirror",
+  "version": "0.1.0",
+  "minAppVersion": "0.19.0",
+  "description": "Mirror one desktop window into a pane, watchable from any device",
+  "description_zh": "把桌面上的某个窗口映射进面板，任何设备都能看",
+  "category": "system",
+  "icon": "monitor",
+  "entry": "./dist/main.js",
+  "styles": "./styles.css",
+  "targets": [
+    "windows-x86_64"
+  ],
+  "bin": {
+    "mode": "cli",
+    "entry": "dist/window-mirror",
+    "entries": {
+      "windows-x86_64": "dist/window-mirror.exe"
+    },
+    "lifecycle": {
+      "scope": "host",
+      "shutdownDeadlineMs": 5000,
+      "forceKillAfterMs": 8000
+    }
+  },
+  "permissions": [
+    "native.execute",
+    "process.long-running"
+  ],
+  "commands": [
+    {
+      "id": "window-mirror.open",
+      "title": "Open Window Mirror"
+    }
+  ]
+}
