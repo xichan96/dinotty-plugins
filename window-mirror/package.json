@@ -15,8 +15,8 @@
     "test:rfb": "node test/rfb.test.mjs",
     "test": "npm run test:native && npm run test:keys && npm run test:rfb && npm run test:input",
     "test:input": "node test/input.test.mjs",
-    "build:test-modules": "esbuild src/keys.ts --bundle --format=esm --platform=neutral --outfile=dist/keys.mjs",
-    "test:keys": "npm run build:test-modules && node --test test/keys.test.mjs"
+    "build:test-modules": "esbuild src/keys.ts --bundle --format=esm --platform=neutral --outfile=dist/keys.mjs && esbuild src/storage-key.ts --bundle --format=esm --platform=neutral --outfile=dist/storage-key.mjs",
+    "test:keys": "npm run build:test-modules && node --test test/keys.test.mjs test/storage-key.test.mjs"
   },
   "dependencies": {
     "@novnc/novnc": "^1.7.0"

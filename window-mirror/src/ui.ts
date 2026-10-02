@@ -1,6 +1,7 @@
 import RFB from '@novnc/novnc'
 import type { PluginContext, PluginExports } from '../../plugin-api/index'
 import { charToKeysym, diffInput, needsReset, KEYSYM, NAMED_KEYS, PAD } from './keys'
+import { storageKeyFor } from './storage-key'
 
 /**
  * The pane: pick a window, then watch it — and, once you take control, drive it.
@@ -158,7 +159,7 @@ export async function activate(ctx: PluginContext): Promise<PluginExports> {
   const mirrors = new Map<string, Mirror>()
 
   /** One announcement key per pane, so two panes can mirror two windows. */
-  const keyFor = (paneId: string) => `mirror-${paneId}`
+  const keyFor = storageKeyFor
 
   function mirrorFor(paneId: string): Mirror {
     let mirror = mirrors.get(paneId)
