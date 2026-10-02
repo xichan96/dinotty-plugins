@@ -83,15 +83,9 @@ class Reader {
 const hwnd =
   process.argv[2] ?? String(JSON.parse(execFileSync(exe, ['list'], { encoding: 'utf8' }))[0].id)
 
-// Where the centre of this window is on screen, and -- as a side effect -- the
-// cursor parked somewhere that is not there.
-const centre = run('pointer-probe', '--hwnd', hwnd, '--fx', '0.5', '--fy', '0.5')
-const elsewhere = run('pointer-probe', '--hwnd', hwnd, '--fx', '0.2', '--fy', '0.2')
-assert.notDeepEqual(centre.expected_screen, elsewhere.expected_screen)
-assert.ok(
-  !near(run('cursor'), centre.expected_screen),
-  'the cursor should be parked away from the centre before the real test',
-)
+// Park the cursor away from the middle, so that landing in the middle later is
+// evidence of something rather than of where it already was.
+run('pointer-probe', '--hwnd', hwnd, '--fx', '0.2', '--fy', '0.2')
 
 const server = spawn(exe, ['serve', '--hwnd', hwnd], { stdio: ['ignore', 'pipe', 'pipe'] })
 let serverErr = ''
@@ -128,6 +122,23 @@ const init = await reader.read(24)
 const width = init.readUInt16BE(0)
 const height = init.readUInt16BE(2)
 await reader.read(init.readUInt32BE(20))
+
+// Work out where the middle of *this* framebuffer is only now that the server
+// has said how big it is. Measuring beforehand was the bug: a window that
+// resizes between the measurement and the connection leaves the test sending
+// the centre of one framebuffer and checking it against another, which reads
+// as a mapping error and is not one.
+const centre = run('map-point', '--hwnd', hwnd, '--fx', '0.5', '--fy', '0.5')
+assert.equal(
+  centre.frame.width,
+  width,
+  'the window resized between connecting and measuring; rerun on a still desktop',
+)
+assert.equal(centre.frame.height, height)
+assert.ok(
+  !near(run('cursor'), centre.expected_screen),
+  'the cursor should be parked away from the centre before the real test',
+)
 
 // The centre of the framebuffer, which is the point pointer-probe measured.
 const pointer = Buffer.alloc(6)

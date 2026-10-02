@@ -270,11 +270,13 @@ The native probe is usable on its own:
 ./native/target/release/window-mirror stream-bench --hwnd <id> --seconds 5
 ./native/target/release/window-mirror serve --hwnd <id> [--view-only]
 ./native/target/release/window-mirror pointer-probe --hwnd <id> --fx 0.5 --fy 0.5
+./native/target/release/window-mirror map-point --hwnd <id> --fx 0.5 --fy 0.5
 ./native/target/release/window-mirror cursor
 ./native/target/release/window-mirror diff-bench --hwnd <id>
 ```
 
-`pointer-probe` raises the window and moves the real cursor to a fractional
+`map-point` answers where a point lands without touching anything, which is
+what a test needs *before* something else does the moving. `pointer-probe` to a fractional
 position inside it, then reports where it landed — the quickest way to tell a
 coordinate-mapping bug from a display-geometry one.
 

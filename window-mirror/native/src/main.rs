@@ -84,6 +84,20 @@ enum Cmd {
         #[arg(long, default_value_t = 20)]
         iterations: u32,
     },
+    /// Where a fractional point inside a window lands on screen, without
+    /// touching anything.
+    ///
+    /// `pointer-probe` answers the same question but moves the cursor to prove
+    /// it, which makes it useless for working out what to expect *before*
+    /// something else does the moving.
+    MapPoint {
+        #[arg(long)]
+        hwnd: u32,
+        #[arg(long, default_value_t = 0.5)]
+        fx: f64,
+        #[arg(long, default_value_t = 0.5)]
+        fy: f64,
+    },
     /// Print the current cursor position, so a test can check where an
     /// injected pointer event actually landed.
     Cursor,
@@ -332,6 +346,37 @@ async fn main() -> Result<()> {
                         "p50": unchanged[unchanged.len() / 2],
                         "max": unchanged[unchanged.len() - 1],
                     },
+                })
+            );
+        }
+
+        Cmd::MapPoint { hwnd, fx, fy } => {
+            // Through a real frame, so the answer reflects the framebuffer a
+            // viewer is actually clicking on rather than the window rect alone.
+            let latest = capture::Latest::new();
+            let _control =
+                capture::start(hwnd, Arc::clone(&latest)).map_err(|e| anyhow!("{e}"))?;
+            let mut frames = latest.subscribe();
+            let frame = loop {
+                if let Some(frame) = frames.borrow_and_update().clone() {
+                    break frame;
+                }
+                tokio::time::timeout(Duration::from_secs(5), frames.changed())
+                    .await
+                    .map_err(|_| anyhow!("no frame arrived within 5s"))??;
+            };
+            let injector = input::Injector::new(hwnd);
+            let target = (
+                (f64::from(frame.width - 1) * fx).round() as u32,
+                (f64::from(frame.height - 1) * fy).round() as u32,
+            );
+            let point = injector.screen_point(target, (frame.width, frame.height))?;
+            println!(
+                "{}",
+                serde_json::json!({
+                    "frame": { "width": frame.width, "height": frame.height },
+                    "framebuffer_point": { "x": target.0, "y": target.1 },
+                    "expected_screen": { "x": point.0, "y": point.1 },
                 })
             );
         }
