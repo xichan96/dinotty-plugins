@@ -2,9 +2,9 @@
 
 Mirror one desktop window into a dinotty pane, and watch it from any device.
 
-> Status: M5. The pane picks a window, shows it live over a compressed stream,
-> and — once you take control — clicks and types into it, from a phone as well
-> as a desktop.
+> Status: M6. The pane picks a window, shows it live over a compressed stream,
+> and — once you take control — drives it with a virtual cursor and a soft
+> keyboard, from a phone as well as a desktop.
 
 ## Why this is not WebRTC
 
@@ -187,6 +187,43 @@ Worth trying before revisiting this: `MinimumUpdateIntervalSettings`, which caps
 the capture rate at the source and cuts scan *and* capture cost with no
 correctness risk at all.
 
+### M6 — a trackpad, because tapping where you want to click does not work
+
+Fitted to a phone, a 2560-pixel window is about 390 CSS pixels wide: one pixel
+of finger is six pixels of desktop, and a fingertip covers a toolbar. Showing it
+at 1:1 fixes the precision and loses the window. Neither mode can hit a close
+button.
+
+So in the default mode the finger is not a pointer. It is a trackpad: it moves a
+visible cursor, and the tap that follows lands where the cursor is rather than
+where the finger is. Relative motion makes sensitivity a free parameter, and at
+0.6 the cursor moves slower than the finger — which is the only reason
+sub-fingertip precision is possible at all. The cursor keeps a fractional
+position, so a small nudge is not rounded away to nothing.
+
+| gesture | effect |
+|---|---|
+| one finger drag | move the cursor |
+| tap | left click at the cursor |
+| two-finger tap | right click |
+| press and hold, then drag | hold the left button and drag |
+| two-finger drag | scroll |
+
+noVNC's own touch handling stays available as the `direct` mode, which is the
+better one on a tablet. Switching is one button.
+
+**This needs no private noVNC API.** Its canvas listens for ordinary
+`mousedown` / `mousemove` / `mouseup`, so the virtual cursor drives it with
+synthesised DOM events; its gesture handler is bypassed by stopping the touch
+events in the capture phase before they reach the canvas.
+
+Verified against the live pane, driving it with synthetic touches: a finger
+travelling (120, 80) moved the cursor to exactly the (584, 326) the 0.6
+sensitivity predicts, and the host cursor landed within 7 px of the point an
+independent probe computed for that position — a residue consistent with
+reading the marker's position back in whole CSS pixels, each of which is 2.5
+pixels of desktop.
+
 ### Enumeration and capture disagree
 
 `xcap` lists windows that Windows Graphics Capture then refuses, so `list`
@@ -247,8 +284,10 @@ coordinate-mapping bug from a display-geometry one.
 npm test
 ```
 
-`test:keys` covers the soft-keyboard diff, which is the part that fails quietly:
-get it wrong and the host receives a deletion the user never made.
+`test:keys` covers the soft-keyboard diff, the storage key, and the trackpad
+arithmetic — the parts that fail quietly. Get the diff wrong and the host
+receives a deletion the user never made; get the trackpad wrong and a tap
+clicks the wrong thing.
 `test:native` covers pixel-format negotiation, the client-message parser's
 partial-message handling, the tile merge, the keysym table and the coordinate
 arithmetic. `test:rfb` starts a real server against a real window, speaks the
@@ -273,7 +312,11 @@ more than a pixel once a second monitor is attached.
 - [x] **M4** — view modes, a soft keyboard, and the modifier keys a phone lacks
 - [x] **M5** — zlib encoding. The dirty-region half was measured and dropped;
       see above
+- [x] **M6** — a virtual cursor driven like a trackpad
 - [ ] Ports to the other four host targets
+- [ ] Capture a whole display, not only a window. The capture API takes a
+      monitor wherever it takes a window, and input gets *simpler* — there is
+      no window to raise and no part of it off-screen
 
 ## Security
 

@@ -2,6 +2,18 @@ import RFB from '@novnc/novnc'
 import type { PluginContext, PluginExports } from '../../plugin-api/index'
 import { charToKeysym, diffInput, needsReset, KEYSYM, NAMED_KEYS, PAD } from './keys'
 import { storageKeyFor } from './storage-key'
+import {
+  advance,
+  centre,
+  classify,
+  distance,
+  midpoint,
+  type Bounds,
+  type Point,
+  HOLD_MS,
+  TAP_MS,
+  TAP_SLOP,
+} from './trackpad'
 
 /**
  * The pane: pick a window, then watch it — and, once you take control, drive it.
@@ -30,6 +42,13 @@ type Locale = 'en' | 'zh'
 /** How the framebuffer is fitted into the pane. */
 type View = 'fit' | 'actual'
 
+/**
+ * How a finger becomes a pointer. `direct` is noVNC's own handling -- a tap is
+ * a click where you touched. `trackpad` moves a visible cursor instead, which
+ * is the only way to hit a 2560-pixel window with a fingertip.
+ */
+type Pointer = 'direct' | 'trackpad'
+
 interface Strings {
   title: string
   pick: string
@@ -47,6 +66,8 @@ interface Strings {
   fit: string
   actual: string
   keyboard: string
+  direct: string
+  trackpad: string
   failed: (reason: string) => string
 }
 
@@ -68,6 +89,8 @@ const STRINGS: Record<Locale, Strings> = {
     fit: 'Fit',
     actual: '1:1',
     keyboard: 'Keyboard',
+    direct: 'Touch',
+    trackpad: 'Trackpad',
     failed: (reason) => `Failed: ${reason}`,
   },
   zh: {
@@ -87,6 +110,8 @@ const STRINGS: Record<Locale, Strings> = {
     fit: '适应',
     actual: '原始',
     keyboard: '键盘',
+    direct: '直接',
+    trackpad: '触控板',
     failed: (reason) => `失败：${reason}`,
   },
 }
@@ -117,12 +142,29 @@ interface Modifiers {
   shift: boolean
 }
 
+/** In-flight state of one touch gesture. Reset between gestures. */
+interface Touch {
+  startedAt: number
+  /** Total path length, not displacement -- a finger that wandered and came
+   *  back was aiming at something, and must not count as a tap. */
+  travelled: number
+  last: Point
+  holding: boolean
+  holdTimer: ReturnType<typeof setTimeout> | null
+  twoFinger: boolean
+  lastMid: Point | null
+}
+
 interface Mirror {
   phase: Phase
   /** Whether this viewer sends input. Starts off, so that opening a mirror
    *  cannot take the desktop away from whoever is at the machine by accident. */
   interactive: boolean
   view: View
+  pointer: Pointer
+  /** Virtual cursor, in the canvas's own CSS pixel space. */
+  cursor: Point | null
+  touch: Touch | null
   keyboardOpen: boolean
   mods: Modifiers
   windows: WindowInfo[]
@@ -168,6 +210,9 @@ export async function activate(ctx: PluginContext): Promise<PluginExports> {
         phase: 'picking',
         interactive: false,
         view: 'fit',
+        pointer: 'trackpad',
+        cursor: null,
+        touch: null,
         keyboardOpen: false,
         mods: { ctrl: false, alt: false, shift: false },
         windows: [],
@@ -413,6 +458,165 @@ export async function activate(ctx: PluginContext): Promise<PluginExports> {
     mirror.connected = false
   }
 
+  // --- trackpad ------------------------------------------------------------
+
+  /**
+   * noVNC listens for ordinary `mousedown` / `mousemove` / `mouseup` on its
+   * canvas, so a virtual cursor can drive it with synthesised DOM events and
+   * never reach for a private method. Its own touch handling is bypassed
+   * instead, by stopping the touch events in the capture phase before they
+   * reach it.
+   */
+  function canvasOf(mirror: Mirror): HTMLCanvasElement | null {
+    return mirror.container?.querySelector('canvas') ?? null
+  }
+
+  function boundsOf(mirror: Mirror): Bounds | null {
+    const canvas = canvasOf(mirror)
+    if (!canvas) return null
+    const rect = canvas.getBoundingClientRect()
+    return rect.width > 0 && rect.height > 0 ? { width: rect.width, height: rect.height } : null
+  }
+
+  function dispatchMouse(mirror: Mirror, type: string, button = 0, buttons = 0): void {
+    const canvas = canvasOf(mirror)
+    if (!canvas || !mirror.cursor) return
+    const rect = canvas.getBoundingClientRect()
+    canvas.dispatchEvent(
+      new MouseEvent(type, {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: rect.left + mirror.cursor.x,
+        clientY: rect.top + mirror.cursor.y,
+        button,
+        buttons,
+      }),
+    )
+  }
+
+  function dispatchWheel(mirror: Mirror, deltaX: number, deltaY: number): void {
+    const canvas = canvasOf(mirror)
+    if (!canvas || !mirror.cursor) return
+    const rect = canvas.getBoundingClientRect()
+    canvas.dispatchEvent(
+      new WheelEvent('wheel', {
+        bubbles: true,
+        cancelable: true,
+        view: window,
+        clientX: rect.left + mirror.cursor.x,
+        clientY: rect.top + mirror.cursor.y,
+        deltaX,
+        deltaY,
+      }),
+    )
+  }
+
+  const pointOf = (t: { clientX: number; clientY: number }): Point => ({
+    x: t.clientX,
+    y: t.clientY,
+  })
+
+  function clearHold(mirror: Mirror): void {
+    if (mirror.touch?.holdTimer) {
+      clearTimeout(mirror.touch.holdTimer)
+      mirror.touch.holdTimer = null
+    }
+  }
+
+  function onTouchStart(mirror: Mirror, e: TouchEvent): void {
+    const bounds = boundsOf(mirror)
+    if (!bounds) return
+    e.stopPropagation()
+    e.preventDefault()
+    if (!mirror.cursor) mirror.cursor = centre(bounds)
+
+    if (e.touches.length === 1) {
+      const touch: Touch = {
+        startedAt: Date.now(),
+        travelled: 0,
+        last: pointOf(e.touches[0]),
+        holding: false,
+        holdTimer: null,
+        twoFinger: false,
+        lastMid: null,
+      }
+      mirror.touch = touch
+      // A finger that rests without moving means press-and-hold, which is the
+      // only way to drag: select text, move a window, work a slider.
+      touch.holdTimer = setTimeout(() => {
+        if (touch.travelled <= TAP_SLOP) {
+          touch.holding = true
+          dispatchMouse(mirror, 'mousedown', 0, 1)
+        }
+      }, HOLD_MS)
+    } else if (mirror.touch) {
+      clearHold(mirror)
+      mirror.touch.twoFinger = true
+      mirror.touch.lastMid = midpoint(pointOf(e.touches[0]), pointOf(e.touches[1]))
+    }
+  }
+
+  function onTouchMove(mirror: Mirror, e: TouchEvent): void {
+    const touch = mirror.touch
+    const bounds = boundsOf(mirror)
+    if (!touch || !bounds || !mirror.cursor) return
+    e.stopPropagation()
+    e.preventDefault()
+
+    if (e.touches.length >= 2 && touch.lastMid) {
+      const mid = midpoint(pointOf(e.touches[0]), pointOf(e.touches[1]))
+      // Two fingers moving up should move the content up, which is a wheel
+      // turning the same way as on a laptop trackpad.
+      dispatchWheel(mirror, touch.lastMid.x - mid.x, touch.lastMid.y - mid.y)
+      touch.lastMid = mid
+      return
+    }
+
+    const point = pointOf(e.touches[0])
+    const delta = { x: point.x - touch.last.x, y: point.y - touch.last.y }
+    touch.travelled += distance(point, touch.last)
+    touch.last = point
+    mirror.cursor = advance(mirror.cursor, delta, bounds)
+    dispatchMouse(mirror, 'mousemove', 0, touch.holding ? 1 : 0)
+  }
+
+  function onTouchEnd(mirror: Mirror, e: TouchEvent): void {
+    const touch = mirror.touch
+    if (!touch) return
+    e.stopPropagation()
+    e.preventDefault()
+    // Fingers leave one at a time; the gesture ends when the last one does.
+    if (e.touches.length > 0) return
+    clearHold(mirror)
+
+    const elapsed = Date.now() - touch.startedAt
+    if (touch.holding) {
+      dispatchMouse(mirror, 'mouseup', 0, 0)
+    } else if (touch.twoFinger) {
+      if (touch.travelled <= TAP_SLOP && elapsed <= TAP_MS) {
+        dispatchMouse(mirror, 'mousedown', 2, 2)
+        dispatchMouse(mirror, 'mouseup', 2, 0)
+      }
+    } else if (classify(touch.travelled, elapsed) === 'tap') {
+      dispatchMouse(mirror, 'mousedown', 0, 1)
+      dispatchMouse(mirror, 'mouseup', 0, 0)
+    }
+    mirror.touch = null
+  }
+
+  /** Where to draw the cursor, relative to the element it sits in. */
+  function cursorStyle(mirror: Mirror): Record<string, string> | null {
+    const canvas = canvasOf(mirror)
+    if (!canvas || !mirror.cursor || !mirror.container) return null
+    const canvasRect = canvas.getBoundingClientRect()
+    const hostRect = mirror.container.getBoundingClientRect()
+    return {
+      left: `${canvasRect.left - hostRect.left + mirror.cursor.x}px`,
+      top: `${canvasRect.top - hostRect.top + mirror.cursor.y}px`,
+    }
+  }
+
   // --- rendering -----------------------------------------------------------
 
   function renderPicker(paneId: string, mirror: Mirror) {
@@ -510,6 +714,17 @@ export async function activate(ctx: PluginContext): Promise<PluginExports> {
         h(
           'button',
           {
+            class: mirror.pointer === 'trackpad' ? 'wm-btn wm-btn-on' : 'wm-btn',
+            onClick: () => {
+              mirror.pointer = mirror.pointer === 'trackpad' ? 'direct' : 'trackpad'
+              mirror.cursor = null
+            },
+          },
+          mirror.pointer === 'trackpad' ? s.trackpad : s.direct,
+        ),
+        h(
+          'button',
+          {
             class: mirror.keyboardOpen ? 'wm-btn wm-btn-on' : 'wm-btn',
             disabled: !mirror.interactive,
             onClick: () =>
@@ -524,10 +739,32 @@ export async function activate(ctx: PluginContext): Promise<PluginExports> {
         ),
         h('button', { class: 'wm-btn', onClick: () => void stop(paneId, mirror) }, s.stop),
       ]),
-      h('div', {
-        class: mirror.view === 'actual' ? 'wm-screen wm-screen-actual' : 'wm-screen',
-        ref: (el: unknown) => bindContainer(mirror, el),
-      }),
+      h(
+        'div',
+        {
+          class: mirror.view === 'actual' ? 'wm-screen wm-screen-actual' : 'wm-screen',
+          ref: (el: unknown) => bindContainer(mirror, el),
+          // Capture phase, so noVNC's gesture handler on the canvas never sees
+          // these. In `direct` mode nothing is attached and its own handling is
+          // left intact.
+          ...(mirror.pointer === 'trackpad'
+            ? {
+                onTouchstartCapture: (e: TouchEvent) => onTouchStart(mirror, e),
+                onTouchmoveCapture: (e: TouchEvent) => onTouchMove(mirror, e),
+                onTouchendCapture: (e: TouchEvent) => onTouchEnd(mirror, e),
+                onTouchcancelCapture: (e: TouchEvent) => onTouchEnd(mirror, e),
+              }
+            : {}),
+        },
+        mirror.pointer === 'trackpad' && mirror.cursor
+          ? [
+              h('div', {
+                class: mirror.touch?.holding ? 'wm-cursor wm-cursor-held' : 'wm-cursor',
+                style: cursorStyle(mirror) ?? { display: 'none' },
+              }),
+            ]
+          : [],
+      ),
       mirror.keyboardOpen ? renderModifierRow(mirror) : null,
       // Always mounted, never visible: it is what the on-screen keyboard
       // attaches to, and remounting it on toggle would drop the caret.

@@ -142,6 +142,7 @@
    touch-action:none keeps the browser from claiming the gestures noVNC needs -
    without it a two-finger drag scrolls the page instead of the mirror. */
 .wm-screen {
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: hidden;
@@ -150,6 +151,37 @@
 
 .wm-screen-actual {
   cursor: grab;
+}
+
+/* The virtual cursor. Two rings rather than one shape, so it stays visible on
+   both a dark editor and a white document without knowing which is underneath. */
+.wm-cursor {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* A dot appears while the button is held, so a drag in progress is visible. */
+.wm-cursor::after {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.wm-cursor-held {
+  border-color: var(--accent-color, #4a9eff);
+}
+
+.wm-cursor-held::after {
+  background: var(--accent-color, #4a9eff);
 }
 
 /* Keys a phone keyboard does not have. Wraps, because a narrow pane cannot fit
