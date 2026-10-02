@@ -181,6 +181,21 @@ The native supervisor must also be built and copied into the platform-specific
 commands. Do not add this plugin to `registry.json` until the native artifact
 signing and multi-platform packaging requirements are implemented.
 
+**Window Mirror (Windows only, development-only)**
+
+```bash
+cd window-mirror
+npm install
+npm run build
+```
+
+`npm run build` compiles the Rust sidecar and copies it into `dist/`, so a
+Rust toolchain is required. `npm test` runs the Rust and JavaScript unit tests
+and then two integration tests that raise a real window and move the real
+cursor -- those need a graphical session and are not CI-safe. Not in
+`registry.json`: the binary is built for `windows-x86_64` only, and
+multi-platform packaging is the stated prerequisite above.
+
 Plugins written in plain JavaScript (Command Bookmarks, JSON Formatter, Text Diff) require no build step -- edit `main.js` directly.
 
 ### Adding a new plugin
