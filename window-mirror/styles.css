@@ -1,0 +1,231 @@
+.wm-root {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+  font-size: 13px;
+}
+
+.wm-centered {
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  opacity: 0.8;
+}
+
+.wm-picker {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.wm-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border-color, rgba(127, 127, 127, 0.25));
+}
+
+.wm-picker-title {
+  font-weight: 600;
+}
+
+.wm-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  min-height: 0;
+}
+
+.wm-item {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 9px 12px;
+  cursor: pointer;
+  border-bottom: 1px solid var(--border-color, rgba(127, 127, 127, 0.12));
+}
+
+.wm-item:hover {
+  background: var(--hover-bg, rgba(127, 127, 127, 0.12));
+}
+
+.wm-item-app {
+  font-weight: 600;
+  flex: none;
+}
+
+/* The title is the part that gets long, so it is the part that truncates. */
+.wm-item-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.7;
+}
+
+.wm-item-size {
+  flex: none;
+  opacity: 0.5;
+  font-variant-numeric: tabular-nums;
+}
+
+.wm-live {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.wm-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border-color, rgba(127, 127, 127, 0.25));
+}
+
+.wm-bar-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.wm-badge {
+  flex: none;
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 11px;
+  opacity: 0.7;
+  border: 1px solid var(--border-color, rgba(127, 127, 127, 0.35));
+}
+
+.wm-badge-live {
+  border-color: var(--accent-color, #4a9eff);
+  color: var(--accent-color, #4a9eff);
+  opacity: 1;
+}
+
+.wm-btn {
+  flex: none;
+  padding: 3px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+  color: inherit;
+  border: 1px solid var(--border-color, rgba(127, 127, 127, 0.35));
+}
+
+.wm-btn-on {
+  border-color: var(--accent-color, #4a9eff);
+  color: var(--accent-color, #4a9eff);
+}
+
+.wm-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.wm-btn:hover {
+  background: var(--hover-bg, rgba(127, 127, 127, 0.12));
+}
+
+/* noVNC sizes its canvas to this element, so it has to be the one that flexes.
+   touch-action:none keeps the browser from claiming the gestures noVNC needs -
+   without it a two-finger drag scrolls the page instead of the mirror. */
+.wm-screen {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+  touch-action: none;
+}
+
+.wm-screen-actual {
+  cursor: grab;
+}
+
+/* The virtual cursor. Two rings rather than one shape, so it stays visible on
+   both a dark editor and a white document without knowing which is underneath. */
+.wm-cursor {
+  position: absolute;
+  width: 18px;
+  height: 18px;
+  margin: -9px 0 0 -9px;
+  border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.9);
+  box-shadow: 0 0 0 2px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  z-index: 2;
+}
+
+/* A dot appears while the button is held, so a drag in progress is visible. */
+.wm-cursor::after {
+  content: '';
+  position: absolute;
+  inset: 5px;
+  border-radius: 50%;
+  background: transparent;
+}
+
+.wm-cursor-held {
+  border-color: var(--accent-color, #4a9eff);
+}
+
+.wm-cursor-held::after {
+  background: var(--accent-color, #4a9eff);
+}
+
+/* Keys a phone keyboard does not have. Wraps, because a narrow pane cannot fit
+   them on one line and a horizontal scrollbar here would be worse. */
+.wm-keys {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 6px;
+  border-top: 1px solid var(--border-color, rgba(127, 127, 127, 0.25));
+}
+
+.wm-key {
+  min-width: 40px;
+  padding: 7px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  border: 1px solid var(--border-color, rgba(127, 127, 127, 0.35));
+}
+
+.wm-key-on {
+  border-color: var(--accent-color, #4a9eff);
+  color: var(--accent-color, #4a9eff);
+}
+
+/* Invisible, but focusable: focusing a field is the only way to raise a mobile
+   on-screen keyboard, and it must stay in the layout for that to work. */
+.wm-field {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  resize: none;
+  caret-color: transparent;
+  pointer-events: none;
+}
+
+.wm-error {
+  max-width: 40ch;
+  text-align: center;
+  color: var(--error-color, #e5534b);
+}
