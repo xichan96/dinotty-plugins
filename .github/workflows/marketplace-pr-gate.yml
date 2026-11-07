@@ -1,0 +1,104 @@
+name: Marketplace PR gate
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, ready_for_review]
+
+permissions:
+  contents: read
+  pull-requests: read
+  id-token: write
+
+jobs:
+  marketplace-pr-gate:
+    name: marketplace-pr-gate
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run source gate
+        uses: actions/github-script@v8
+        env:
+          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL }}
+          OIDC_AUDIENCE: ${{ vars.DINOTTY_OIDC_AUDIENCE || 'dinotty-offsite' }}
+          AUTOMATION_LOGIN: ${{ vars.MARKETPLACE_AUTOMATION_LOGIN }}
+          CODEOWNER_LOGIN: ${{ vars.MARKETPLACE_CODEOWNER_LOGIN || 'xichan96' }}
+        with:
+          script: |
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: context.payload.pull_request.number,
+              per_page: 100,
+            });
+            const changedPaths = files.flatMap(file => [file.filename, file.previous_filename].filter(Boolean));
+            const workflowChanged = changedPaths.some(path => path.startsWith('.github/workflows/') || path === '.github/CODEOWNERS');
+            if (workflowChanged) {
+              const reviews = await github.paginate(github.rest.pulls.listReviews, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: context.payload.pull_request.number,
+                per_page: 100,
+              });
+              const ownerLogin = process.env.CODEOWNER_LOGIN.trim().toLowerCase();
+              const ownerReviews = reviews
+                .filter(review => review.user?.login?.toLowerCase() === ownerLogin)
+                .sort((left, right) => {
+                  const submitted = (left.submitted_at || '').localeCompare(right.submitted_at || '');
+                  return submitted || (left.id || 0) - (right.id || 0);
+                });
+              const latest = ownerReviews.at(-1);
+              const head = context.payload.pull_request.head.sha;
+              if (latest?.state !== 'APPROVED' || latest.commit_id !== head) {
+                throw new Error('Workflow or CODEOWNERS changes require current-head CODEOWNER approval.');
+              }
+            }
+            if (changedPaths.some(path => path === 'repositories.txt' || path.startsWith('repositories.txt/'))) {
+              throw new Error('repositories.txt is retired; use sources/<plugin-id>.yaml.');
+            }
+            const registryFiles = files.filter(file => file.filename === 'registry.json' || file.previous_filename === 'registry.json');
+            if (registryFiles.length > 0) {
+              if (files.length !== 1 || registryFiles[0].filename !== 'registry.json' || ['removed', 'deleted'].includes(registryFiles[0].status)) {
+                throw new Error('A registry projection PR may only add or update registry.json.');
+              }
+              const expected = process.env.AUTOMATION_LOGIN?.trim().toLowerCase();
+              const author = context.payload.pull_request.user?.login?.toLowerCase();
+              if (!expected || author !== expected) {
+                throw new Error('registry.json is only updated by the configured automation account.');
+              }
+              const base = context.payload.pull_request.base.sha;
+              const head = context.payload.pull_request.head.sha;
+              async function readRegistry(ref) {
+                const response = await github.rest.repos.getContent({ owner: context.repo.owner, repo: context.repo.repo, path: 'registry.json', ref });
+                if (Array.isArray(response.data)) throw new Error('registry.json must be a file');
+                return JSON.parse(Buffer.from(response.data.content, 'base64').toString('utf8'));
+              }
+              const previous = await readRegistry(base);
+              const next = await readRegistry(head);
+              if (!next || !Array.isArray(next.plugins)) throw new Error('registry.json must contain a plugins array.');
+              const ids = new Set();
+              for (const plugin of next.plugins) {
+                for (const key of ['id', 'name', 'description', 'version', 'repo', 'branch', 'subdir']) {
+                  if (typeof plugin[key] !== 'string' || !plugin[key]) throw new Error(`registry plugin is missing ${key}`);
+                }
+                const safeSubdir = plugin.subdir === '.' || (!plugin.subdir.startsWith('/') && !plugin.subdir.includes('\\') && plugin.subdir.split('/').every(part => /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(part) && part !== '.' && part !== '..'));
+                if (plugin.branch !== 'main' || !safeSubdir || ids.has(plugin.id)) throw new Error('registry projection has invalid IDs, branch, subdir, or duplicates.');
+                ids.add(plugin.id);
+              }
+              core.info(`Validated registry projection against ${previous.plugins?.length || 0} previous entries.`);
+              return;
+            }
+            if (!files.some(file => file.filename.startsWith('sources/'))) {
+              core.info('No source declaration changed; source gate is not required for this PR.');
+              return;
+            }
+            if (!process.env.OFFSITE_URL) throw new Error('DINOTTY_OFFSITE_URL repository variable is required');
+            const token = await core.getIDToken(process.env.OIDC_AUDIENCE);
+            const url = `${process.env.OFFSITE_URL.replace(/\/$/, '')}/api/internal/github/source-pr-checks`;
+            const response = await fetch(url, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ prNumber: context.payload.pull_request.number, headSha: context.payload.pull_request.head.sha }),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(result.error?.message || result.errorCode || JSON.stringify(result));
+            if (result.result === 'failed') throw new Error(`source gate failed: ${result.errorCode || 'rejected'}`);
+            if (result.result === 'pending') core.warning('Source candidate is waiting for manual review.');

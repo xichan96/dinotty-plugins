@@ -1,0 +1,51 @@
+name: Marketplace discovery
+
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: marketplace-discovery
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run discovery
+        uses: actions/github-script@v8
+        env:
+          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL }}
+          OIDC_AUDIENCE: ${{ vars.DINOTTY_OIDC_AUDIENCE || 'dinotty-offsite' }}
+        with:
+          script: |
+            if (!process.env.OFFSITE_URL) throw new Error('DINOTTY_OFFSITE_URL repository variable is required');
+            const token = await core.getIDToken(process.env.OIDC_AUDIENCE);
+            const response = await fetch(`${process.env.OFFSITE_URL.replace(/\/$/, '')}/api/internal/github/discovery-runs`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({}),
+            });
+            const result = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(result.error?.message || result.errorCode || JSON.stringify(result));
+            if (!result.jobId) throw new Error(`discovery did not return a job id: ${JSON.stringify(result)}`);
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+              const statusToken = await core.getIDToken(process.env.OIDC_AUDIENCE);
+              const statusResponse = await fetch(`${process.env.OFFSITE_URL.replace(/\/$/, '')}/api/internal/github/jobs/${result.jobId}`, {
+                headers: { Authorization: `Bearer ${statusToken}` },
+              });
+              const status = await statusResponse.json().catch(() => ({}));
+              if (!statusResponse.ok) throw new Error(status.error?.message || status.errorCode || JSON.stringify(status));
+              if (['completed', 'superseded'].includes(status.status)) {
+                core.info(`discovery job ${status.status}: ${result.jobId}`);
+                return;
+              }
+              if (status.status === 'failed') throw new Error(`discovery failed: ${status.errorCode || 'unknown'}`);
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+            throw new Error('discovery timed out');

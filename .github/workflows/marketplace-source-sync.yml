@@ -1,0 +1,49 @@
+name: Marketplace source sync
+
+on:
+  push:
+    branches: [main]
+    paths: [sources/**]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: marketplace-source-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync merged source snapshot
+        uses: actions/github-script@v8
+        env:
+          OFFSITE_URL: ${{ vars.DINOTTY_OFFSITE_URL }}
+          OIDC_AUDIENCE: ${{ vars.DINOTTY_OIDC_AUDIENCE || 'dinotty-offsite' }}
+        with:
+          script: |
+            if (!process.env.OFFSITE_URL) throw new Error('DINOTTY_OFFSITE_URL repository variable is required');
+            const base = process.env.OFFSITE_URL.replace(/\/$/, '');
+            const token = await core.getIDToken(process.env.OIDC_AUDIENCE);
+            const sha = context.payload.after || context.sha;
+            const response = await fetch(`${base}/api/internal/github/source-syncs`, {
+              method: 'POST',
+              headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+              body: JSON.stringify({ commitSha: sha }),
+            });
+            const job = await response.json().catch(() => ({}));
+            if (!response.ok) throw new Error(job.error?.message || job.errorCode || JSON.stringify(job));
+            if (!job.jobId) throw new Error(`source sync did not return a job id: ${JSON.stringify(job)}`);
+            for (let attempt = 0; attempt < 120; attempt += 1) {
+              const statusToken = await core.getIDToken(process.env.OIDC_AUDIENCE);
+              const statusResponse = await fetch(`${base}/api/internal/github/jobs/${job.jobId}`, { headers: { Authorization: `Bearer ${statusToken}` } });
+              const status = await statusResponse.json().catch(() => ({}));
+              if (!statusResponse.ok) throw new Error(status.error?.message || status.errorCode || JSON.stringify(status));
+              if (['completed', 'superseded'].includes(status.status)) return;
+              if (status.status === 'failed') throw new Error(`source sync failed: ${status.errorCode || 'unknown'}`);
+              await new Promise(resolve => setTimeout(resolve, 5000));
+            }
+            throw new Error('source sync timed out');
