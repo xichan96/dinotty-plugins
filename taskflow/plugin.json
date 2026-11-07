@@ -10,9 +10,29 @@
   "entry": "./dist/main.js",
   "styles": "./styles.css",
   "commands": [
-    { "id": "taskflow.open", "title": "打开 Taskflow" },
-    { "id": "taskflow.new", "title": "新建任务" },
-    { "id": "taskflow.start", "title": "开始最近一个待办" },
-    { "id": "taskflow.complete", "title": "完成当前进行中任务" }
+    {
+      "id": "taskflow.open",
+      "title": "打开 Taskflow"
+    },
+    {
+      "id": "taskflow.new",
+      "title": "新建任务"
+    },
+    {
+      "id": "taskflow.start",
+      "title": "开始最近一个待办"
+    },
+    {
+      "id": "taskflow.complete",
+      "title": "完成当前进行中任务"
+    }
+  ],
+  "permissions": [],
+  "targets": [
+    "windows-x86_64",
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-x86_64",
+    "macos-aarch64"
   ]
 }

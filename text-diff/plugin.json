@@ -8,6 +8,18 @@
   "entry": "./main.js",
   "styles": "./styles.css",
   "commands": [
-    { "id": "text-diff.open", "title": "打开文本对比工具" }
+    {
+      "id": "text-diff.open",
+      "title": "打开文本对比工具"
+    }
+  ],
+  "minAppVersion": "0.1.0",
+  "permissions": [],
+  "targets": [
+    "windows-x86_64",
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-x86_64",
+    "macos-aarch64"
   ]
 }

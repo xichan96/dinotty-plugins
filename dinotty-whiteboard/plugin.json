@@ -8,10 +8,34 @@
   "entry": "./main.js",
   "styles": "./styles.css",
   "commands": [
-    { "id": "whiteboard.open", "title": "Open Whiteboard" },
-    { "id": "whiteboard.new", "title": "New Whiteboard" },
-    { "id": "whiteboard.clear", "title": "Clear Whiteboard" },
-    { "id": "whiteboard.export-png", "title": "Export as PNG" },
-    { "id": "whiteboard.export-json", "title": "Export as JSON" }
+    {
+      "id": "whiteboard.open",
+      "title": "Open Whiteboard"
+    },
+    {
+      "id": "whiteboard.new",
+      "title": "New Whiteboard"
+    },
+    {
+      "id": "whiteboard.clear",
+      "title": "Clear Whiteboard"
+    },
+    {
+      "id": "whiteboard.export-png",
+      "title": "Export as PNG"
+    },
+    {
+      "id": "whiteboard.export-json",
+      "title": "Export as JSON"
+    }
+  ],
+  "minAppVersion": "0.1.0",
+  "permissions": [],
+  "targets": [
+    "windows-x86_64",
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-x86_64",
+    "macos-aarch64"
   ]
 }

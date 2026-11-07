@@ -12,11 +12,28 @@
     "entry": "./bin/cc-switch"
   },
   "commands": [
-    { "id": "cc-switch.open", "title": "打开 CC Switch" },
-    { "id": "cc-switch.next", "title": "切换到下一个 Provider" },
-    { "id": "cc-switch.import", "title": "导入当前配置" }
+    {
+      "id": "cc-switch.open",
+      "title": "打开 CC Switch"
+    },
+    {
+      "id": "cc-switch.next",
+      "title": "切换到下一个 Provider"
+    },
+    {
+      "id": "cc-switch.import",
+      "title": "导入当前配置"
+    }
   ],
   "requirements": {
     "cli": "cc-switch"
-  }
+  },
+  "minAppVersion": "0.1.0",
+  "permissions": [],
+  "targets": [
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-x86_64",
+    "macos-aarch64"
+  ]
 }

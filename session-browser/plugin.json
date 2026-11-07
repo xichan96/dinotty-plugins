@@ -11,12 +11,29 @@
   "bin": {
     "mode": "cli",
     "entry": "dist/cli-wrapper",
-    "entries": { "windows-x86_64": "dist/cli-wrapper.exe" }
+    "entries": {
+      "windows-x86_64": "dist/cli-wrapper.exe"
+    }
   },
-  "permissions": ["native.execute"],
+  "permissions": [
+    "native.execute"
+  ],
   "styles": "./styles.css",
   "commands": [
-    { "id": "session-browser.open", "title": "Open Session Browser" },
-    { "id": "session-browser.search", "title": "Search Sessions" }
+    {
+      "id": "session-browser.open",
+      "title": "Open Session Browser"
+    },
+    {
+      "id": "session-browser.search",
+      "title": "Search Sessions"
+    }
+  ],
+  "targets": [
+    "windows-x86_64",
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-x86_64",
+    "macos-aarch64"
   ]
 }

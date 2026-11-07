@@ -12,6 +12,17 @@
     "entry": "./bin/volc-ark-quota"
   },
   "commands": [
-    { "id": "volc-ark-quota.refresh", "title": "Refresh Volcano Ark quota" }
+    {
+      "id": "volc-ark-quota.refresh",
+      "title": "Refresh Volcano Ark quota"
+    }
+  ],
+  "minAppVersion": "0.1.0",
+  "permissions": [],
+  "targets": [
+    "linux-x86_64",
+    "linux-aarch64",
+    "macos-x86_64",
+    "macos-aarch64"
   ]
 }
